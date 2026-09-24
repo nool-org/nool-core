@@ -3,10 +3,17 @@ from pydantic import BaseModel
 
 # ---- Curriculum tree ------------------------------------------------------
 
+class SubtopicTreeOut(BaseModel):
+    ref: str
+    number: str
+    name: str
+
+
 class TopicTreeOut(BaseModel):
     ref: str
     number: str
     name: str
+    subtopics: list[SubtopicTreeOut]
 
 
 class ChapterTreeOut(BaseModel):
@@ -21,6 +28,12 @@ class CurriculumTreeOut(BaseModel):
     grade: int
     subject: str
     chapters: list[ChapterTreeOut]
+
+
+class CurriculumSubjectOut(BaseModel):
+    name: str
+    grade: int
+    chapter_count: int
 
 
 # ---- Question generation ---------------------------------------------------
@@ -38,7 +51,7 @@ class GeneratedQuestionOut(BaseModel):
     question_type: str
     chapter_number: int
     topic: str
-    source_concept_ids: list[str]
+    source_refs: list[str]
 
 
 class GenerateQuestionsOut(BaseModel):

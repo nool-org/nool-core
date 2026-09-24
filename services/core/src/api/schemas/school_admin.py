@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from src.domain.models import SubscriptionStatus, UserStatus
 
@@ -225,6 +225,11 @@ class SubjectToggle(CamelModel):
     id: str
     name: str
     enabled: bool
+    # Which grades this Subject applies to - see SubjectGrade's docstring.
+    # An already-enabled subject can show up here with no grades (or a
+    # grade that doesn't match this picker's own Class) if it was assigned
+    # before that constraint existed; a *new* toggle is still rejected.
+    grades: list[int] = []
 
 
 class SchoolCurriculumOut(CamelModel):
@@ -255,6 +260,12 @@ class CreateSchoolSubjectIn(CamelModel):
     """
 
     name: str
+    # Required, non-empty - same reasoning as admin_catalog's
+    # CreateSubjectIn: without at least one grade, the enable-for-my-school
+    # half of this call would have nothing eligible to grant. Unioned onto
+    # an existing (possibly still ungraded) Subject rather than replacing
+    # its links when reusing one by name.
+    grades: list[int] = Field(min_length=1)
 
 
 class SchoolDatasetOut(CamelModel):

@@ -16,6 +16,20 @@ class Subject(IdMixin, Base):
     __tablename__ = "subjects"
 
     name: Mapped[str] = mapped_column(String, unique=True)
+    # nool-kg names its graphs after the bare subject name it ingested
+    # (e.g. "Science" -> Science_Grade_{grade}_NCERT) - a catalog Subject's
+    # own display `name` can be anything ("Class 10 Science", "Physical
+    # Science", ...) and has no reason to match that exactly. NULL (the
+    # default) means "use `name` as-is" - only set this when nool-kg's own
+    # subject name genuinely differs from the display name. See
+    # nool_kg_client.graph_name_for and admin_catalog.py's sync routes.
+    #
+    # NEVER probe a candidate name against nool-kg's chapters/topics
+    # endpoints to "check" it - confirmed live that querying a graph name
+    # that doesn't exist yet silently creates an empty one there forever,
+    # with no delete endpoint exposed to undo it. Always validate against
+    # nool_kg_client.list_subjects()'s own returned names instead.
+    kg_subject_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class Chapter(IdMixin, Base):
@@ -55,6 +69,34 @@ class Topic(IdMixin, Base):
     name: Mapped[str] = mapped_column(String)
     # Same role as Chapter.kg_ref above, one level down (the KG's Section id).
     kg_ref: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+
+
+class Subtopic(IdMixin, Base):
+    __tablename__ = "subtopics"
+
+    topic_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"))
+    name: Mapped[str] = mapped_column(String)
+    # Same role as Chapter.kg_ref/Topic.kg_ref, one level down (the KG's
+    # Subtopic id).
+    kg_ref: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+
+
+class SubjectGrade(IdMixin, Base):
+    """Which grades a Subject applies to - a global catalog fact a Super
+    Admin declares once per Subject (e.g. "Science" -> grades 9, 10), not a
+    per-school assignment. Both SchoolCurriculum (enabling a Subject for a
+    school) and GradeSubject (enabling it for one Class) only accept a
+    brand-new grant for a Subject that has at least one row here - see
+    src/services/subject_grades.py. A Subject with zero rows here simply
+    can't be newly assigned anywhere yet; SchoolCurriculum/GradeSubject
+    rows written before this table existed are left working regardless.
+    """
+
+    __tablename__ = "subject_grades"
+    __table_args__ = (UniqueConstraint("subject_id", "grade"),)
+
+    subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("subjects.id"))
+    grade: Mapped[int] = mapped_column(Integer)
 
 
 class SchoolCurriculum(IdMixin, Base):

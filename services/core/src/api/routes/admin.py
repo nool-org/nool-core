@@ -9,7 +9,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from shared.errors import ConflictError, NotFoundError
+from shared.errors import ConflictError, NotFoundError, ValidationError
 
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.admin import (
@@ -135,6 +135,7 @@ from src.domain.models import (
     StudentProfile,
     StudentTestResult,
     Subject,
+    SubjectGrade,
     Subscription,
     SupportTicket,
     SupportTicketComment,
@@ -158,6 +159,14 @@ from src.repositories.roster_repository import (
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_students, count_teachers
 from src.services import data_explorer, reporting
+from src.services.subject_grades import (
+    add_subject_grades,
+    grades_by_subject,
+    picker_subjects_for_grade,
+    picker_subjects_for_school,
+    validate_new_grants_for_grade,
+    validate_new_grants_have_any_grade,
+)
 from src.services.bulk_import import BulkRowResult, parse_rows
 from src.services.email import send_email
 from src.services.school_analytics import compute_school_analytics
@@ -1729,16 +1738,21 @@ async def delete_grade_as_admin(
     return {"deleted": True}
 
 
-async def _grade_subjects_out(session: AsyncSession, grade_id: str) -> GradeSubjectsOut:
-    subjects_result = await session.execute(select(Subject))
-    subjects = subjects_result.scalars().all()
+async def _grade_subjects_out(session: AsyncSession, grade_id: str, grade: int) -> GradeSubjectsOut:
+    subjects = await picker_subjects_for_grade(session, grade_id, grade)
+    grades_map = await grades_by_subject(session, [s.id for s in subjects])
     enabled_result = await session.execute(
         select(GradeSubject.subject_id).where(GradeSubject.grade_id == grade_id, GradeSubject.enabled.is_(True))
     )
     enabled_ids = {row[0] for row in enabled_result.all()}
     return GradeSubjectsOut(
         grade_id=grade_id,
-        subjects=[SubjectToggle(id=str(s.id), name=s.name, enabled=s.id in enabled_ids) for s in subjects],
+        subjects=[
+            SubjectToggle(
+                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
+            )
+            for s in subjects
+        ],
     )
 
 
@@ -1748,8 +1762,8 @@ async def get_grade_subjects_as_admin(
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> GradeSubjectsOut:
-    await _get_grade(session, grade_id)
-    return await _grade_subjects_out(session, grade_id)
+    school_grade = await _get_grade(session, grade_id)
+    return await _grade_subjects_out(session, grade_id, school_grade.grade)
 
 
 @router.put("/grades/{grade_id}/subjects", summary="Set which subjects a Class teaches (cross-tenant)")
@@ -1759,20 +1773,23 @@ async def update_grade_subjects_as_admin(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> GradeSubjectsOut:
-    await _get_grade(session, grade_id)
+    school_grade = await _get_grade(session, grade_id)
     existing = await session.execute(select(GradeSubject).where(GradeSubject.grade_id == grade_id))
     by_subject = {str(row.subject_id): row for row in existing.scalars().all()}
 
     enabled_ids = set(body.subject_ids)
+    new_grants = enabled_ids - set(by_subject.keys())
+    await validate_new_grants_for_grade(session, new_grants, school_grade.grade)
+
     for subject_id, row in by_subject.items():
         row.enabled = subject_id in enabled_ids
-    for subject_id in enabled_ids - set(by_subject.keys()):
+    for subject_id in new_grants:
         session.add(GradeSubject(grade_id=grade_id, subject_id=subject_id, enabled=True))
     await audit_repository.record(
         session, actor_id=actor.id, action="grade.subjects.updated", target_type="grade", target_id=grade_id,
     )
     await session.commit()
-    return await _grade_subjects_out(session, grade_id)
+    return await _grade_subjects_out(session, grade_id, school_grade.grade)
 
 
 @router.put("/classes/{class_id}/assignments", summary="Assign teacher + subject (cross-tenant)")
@@ -1814,8 +1831,8 @@ async def get_curriculum_as_admin(
     session: AsyncSession = Depends(get_db_session),
 ) -> SchoolCurriculumOut:
     await _get_school(session, school_id)
-    subjects_result = await session.execute(select(Subject))
-    subjects = subjects_result.scalars().all()
+    subjects = await picker_subjects_for_school(session, school_id)
+    grades_map = await grades_by_subject(session, [s.id for s in subjects])
     enabled_result = await session.execute(
         select(SchoolCurriculum.subject_id).where(
             SchoolCurriculum.school_id == school_id, SchoolCurriculum.enabled.is_(True)
@@ -1825,7 +1842,10 @@ async def get_curriculum_as_admin(
     return SchoolCurriculumOut(
         board="",
         subjects=[
-            SubjectToggle(id=str(s.id), name=s.name, enabled=s.id in enabled_ids) for s in subjects
+            SubjectToggle(
+                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
+            )
+            for s in subjects
         ],
     )
 
@@ -1849,9 +1869,12 @@ async def update_curriculum_as_admin(
     by_subject = {str(row.subject_id): row for row in existing.scalars().all()}
 
     enabled_ids = set(body.subject_ids)
+    new_grants = enabled_ids - set(by_subject.keys())
+    await validate_new_grants_have_any_grade(session, new_grants)
+
     for subject_id, row in by_subject.items():
         row.enabled = subject_id in enabled_ids
-    for subject_id in enabled_ids - set(by_subject.keys()):
+    for subject_id in new_grants:
         session.add(SchoolCurriculum(school_id=school_id, subject_id=subject_id, enabled=True))
     await audit_repository.record(
         session, actor_id=actor.id, action="curriculum.updated", target_type="school", target_id=school_id
@@ -1872,9 +1895,12 @@ async def create_subject_as_admin(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> SubjectToggle:
-    """Same reuse-by-name-or-create logic as school_admin.py's
-    create_school_subject, just enabling the result for an explicit
-    school_id instead of the caller's own school.
+    """Reuses an existing Subject by name (case-insensitive) or creates one,
+    then enables it for an explicit school_id. body.grades is required
+    (CreateSchoolSubjectIn) so the enable-for-this-school step below always
+    has a subject that's actually eligible - unioned onto an existing
+    subject's grades rather than replacing them, since two schools asking
+    for "Sanskrit" at different grades should both stick.
     """
     await _get_school(session, school_id)
     name = body.name.strip()
@@ -1891,6 +1917,7 @@ async def create_subject_as_admin(
             session, actor_id=actor.id, action="subject.created", target_type="subject", target_id=str(subject.id),
             detail=subject.name,
         )
+    await add_subject_grades(session, subject.id, set(body.grades))
 
     curriculum_row = await session.execute(
         select(SchoolCurriculum).where(
@@ -1907,7 +1934,10 @@ async def create_subject_as_admin(
         detail=subject.name,
     )
     await session.commit()
-    return SubjectToggle(id=str(subject.id), name=subject.name, enabled=True)
+    grades_map = await grades_by_subject(session, [subject.id])
+    return SubjectToggle(
+        id=str(subject.id), name=subject.name, enabled=True, grades=grades_map.get(str(subject.id), [])
+    )
 
 
 @router.get("/schools/{school_id}/datasets", summary="View a school's enabled datasets (cross-tenant)")

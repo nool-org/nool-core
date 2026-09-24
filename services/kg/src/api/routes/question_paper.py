@@ -10,7 +10,7 @@ from src.api.schemas import (
 )
 from src.config.settings import get_settings
 from src.services.generator import generate_questions
-from src.services.neo4j_client import get_concept_context_for_scope
+from src.services.nool_kg_client import get_concept_context_for_scope
 
 router = APIRouter(prefix="/question-papers", tags=["question-papers"])
 
@@ -25,6 +25,8 @@ async def generate(body: GenerateQuestionsIn) -> GenerateQuestionsOut:
         chapter_numbers=[c.number for c in body.chapters],
         topic_names=body.topic_names or None,
         subject=body.subject,
+        board=body.board,
+        grade=body.grade,
     )
     questions = generate_questions(
         api_key=settings.openai_api_key,
@@ -52,6 +54,8 @@ async def replacement_candidates(body: ReplacementCandidatesIn) -> GenerateQuest
         chapter_numbers=[c.number for c in body.chapters],
         topic_names=body.topic_names or None,
         subject=body.subject,
+        board=body.board,
+        grade=body.grade,
     )
     questions = generate_questions(
         api_key=settings.openai_api_key,

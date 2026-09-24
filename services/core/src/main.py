@@ -28,6 +28,7 @@ from src.api.routes import (
     progress,
     question_paper,
     ready,
+    realtime,
     roster,
     school_admin,
     school_oversight,
@@ -95,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard.router)
     app.include_router(gamification.router)
     app.include_router(journey.router)
+    app.include_router(realtime.router)
     # Super Admin / School Admin
     app.include_router(admin.router)
     app.include_router(admin_catalog.router)

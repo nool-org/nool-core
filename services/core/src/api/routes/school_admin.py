@@ -51,7 +51,6 @@ from src.api.schemas.school_admin import (
     UpdateClassIn,
     UpdateClassStatusIn,
     UpdateGradeStatusIn,
-    UpdateGradeSubjectsIn,
     UpdateSchoolAdminMeIn,
     UpdateSchoolDatasetsIn,
     UpdateStudentIn,
@@ -105,6 +104,7 @@ from src.repositories.usage_repository import (
     count_tests,
 )
 from src.services import reporting
+from src.services.subject_grades import grades_by_subject, picker_subjects_for_grade
 from src.services.bulk_import import BulkRowResult, parse_rows
 from src.services.email import send_email
 from src.services.school_analytics import compute_school_analytics
@@ -1050,46 +1050,34 @@ async def _get_own_grade(session: AsyncSession, grade_id: str, school_id) -> Sch
 
 @router.get("/grades/{grade_id}/subjects", summary="View which subjects a Class teaches")
 async def get_grade_subjects(
+    # Deliberately read-only: School Admin can see which subjects are
+    # assigned to a Class but can no longer toggle them (that write
+    # capability - PUT /grades/{grade_id}/subjects - was removed, not just
+    # hidden in the UI). Assignment is now exclusively Super Admin/PM's job,
+    # via the cross-tenant PUT /admin/grades/{id}/subjects - same reasoning
+    # and same pattern as get_school_curriculum's write removal above.
+    # School Admin's own remaining job here is roster: adding Sections
+    # under a Class, not deciding what it teaches.
     grade_id: str,
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> GradeSubjectsOut:
-    await _get_own_grade(session, grade_id, user.school_id)
-    subjects_result = await session.execute(select(Subject))
-    subjects = subjects_result.scalars().all()
+    school_grade = await _get_own_grade(session, grade_id, user.school_id)
+    subjects = await picker_subjects_for_grade(session, grade_id, school_grade.grade)
+    grades_map = await grades_by_subject(session, [s.id for s in subjects])
     enabled_result = await session.execute(
         select(GradeSubject.subject_id).where(GradeSubject.grade_id == grade_id, GradeSubject.enabled.is_(True))
     )
     enabled_ids = {row[0] for row in enabled_result.all()}
     return GradeSubjectsOut(
         grade_id=grade_id,
-        subjects=[SubjectToggle(id=str(s.id), name=s.name, enabled=s.id in enabled_ids) for s in subjects],
+        subjects=[
+            SubjectToggle(
+                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
+            )
+            for s in subjects
+        ],
     )
-
-
-@router.put("/grades/{grade_id}/subjects", summary="Set which subjects a Class teaches")
-async def update_grade_subjects(
-    grade_id: str,
-    body: UpdateGradeSubjectsIn,
-    user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
-    session: AsyncSession = Depends(get_db_session),
-) -> GradeSubjectsOut:
-    await _get_own_grade(session, grade_id, user.school_id)
-    existing = await session.execute(select(GradeSubject).where(GradeSubject.grade_id == grade_id))
-    # Keyed by str(subject_id) - same UUID-vs-string fix update_school_datasets
-    # already applies.
-    by_subject = {str(row.subject_id): row for row in existing.scalars().all()}
-
-    enabled_ids = set(body.subject_ids)
-    for subject_id, row in by_subject.items():
-        row.enabled = subject_id in enabled_ids
-    for subject_id in enabled_ids - set(by_subject.keys()):
-        session.add(GradeSubject(grade_id=grade_id, subject_id=subject_id, enabled=True))
-    await audit_repository.record(
-        session, actor_id=user.id, action="grade.subjects.updated", target_type="grade", target_id=grade_id,
-    )
-    await session.commit()
-    return await get_grade_subjects(grade_id, user=user, session=session)
 
 
 @router.put("/classes/{class_id}/assignments", summary="Assign teacher + subject")
@@ -1153,6 +1141,7 @@ async def get_school_curriculum(
 ) -> SchoolCurriculumOut:
     subjects_result = await session.execute(select(Subject))
     subjects = subjects_result.scalars().all()
+    grades_map = await grades_by_subject(session, [s.id for s in subjects])
     enabled_result = await session.execute(
         select(SchoolCurriculum.subject_id).where(
             SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.enabled.is_(True)
@@ -1162,7 +1151,10 @@ async def get_school_curriculum(
     return SchoolCurriculumOut(
         board="",
         subjects=[
-            SubjectToggle(id=str(s.id), name=s.name, enabled=s.id in enabled_ids) for s in subjects
+            SubjectToggle(
+                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
+            )
+            for s in subjects
         ],
     )
 

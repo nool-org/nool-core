@@ -217,7 +217,9 @@ async def test_admin_catalog_mutation_creates_audit_log_row(db_session):
 
     before = (await db_session.execute(AuditLog.__table__.select())).all()
 
-    await admin_catalog.create_subject(CreateSubjectIn(name="New Subject"), actor=admin, session=db_session)
+    await admin_catalog.create_subject(
+        CreateSubjectIn(name="New Subject", grades=[9]), actor=admin, session=db_session
+    )
 
     after = (await db_session.execute(AuditLog.__table__.select())).all()
     assert len(after) == len(before) + 1

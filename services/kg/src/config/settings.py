@@ -4,14 +4,10 @@ from shared.config import BaseServiceSettings
 class KgSettings(BaseServiceSettings):
     service_name: str = "kg"
 
-    # Same Neo4j the nool-data-ingestion pipeline populates - this service
-    # is the only thing in nool-core that talks to it directly (see
-    # services/core/src/services/kg_client.py for the HTTP seam everything
-    # else goes through instead). Blank-safe: the service boots without
-    # these, only /ready and the routes that need Neo4j fail until set.
-    neo4j_uri: str | None = None
-    neo4j_user: str | None = None
-    neo4j_password: str | None = None
+    # nool-kg (FalkorDB-backed textbook graph) is the only KG this service
+    # talks to - see services/core/src/services/kg_client.py for the HTTP
+    # seam everything else in nool-core goes through instead.
+    nool_kg_base_url: str = "https://nool-data.draco-labs.in"
 
     # Question generation grounded in the KG - see src/services/generator.py.
     openai_api_key: str | None = None

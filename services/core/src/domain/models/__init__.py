@@ -7,7 +7,7 @@ from ..base import Base
 from .ai_assessor import AiAssessorSession, AiAssessorSessionBloomLevel
 from .assistant import AssistantMessage, ChatRole
 from .bloom import BloomLevel
-from .curriculum import Chapter, GradeSubject, SchoolCurriculum, Subject, Topic
+from .curriculum import Chapter, GradeSubject, SchoolCurriculum, Subject, SubjectGrade, Subtopic, Topic
 from .custom_question import CustomQuestion, QuestionType
 from .dataset import Dataset, DatasetQuestion, DatasetType, SchoolDataset
 from .gamification import StudentDailyGoalCompletion, StudentGamification
@@ -76,6 +76,8 @@ __all__ = [
     "SchoolCurriculum",
     "GradeSubject",
     "Subject",
+    "SubjectGrade",
+    "Subtopic",
     "Topic",
     "CustomQuestion",
     "QuestionType",

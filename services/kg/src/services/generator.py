@@ -1,10 +1,9 @@
-"""KG-grounded question generation. Same approach validated in
-nool-data-ingestion/ingestion/llm_extract.py: one OpenAI call, output
-constrained to a strict JSON schema (Structured Outputs, json_schema
-format/strict mode) so the response is always valid, parseable JSON.
+"""KG-grounded question generation: one OpenAI call, output constrained to
+a strict JSON schema (Structured Outputs, json_schema format/strict mode)
+so the response is always valid, parseable JSON.
 
 The retrieval step (what context to ground the call in) lives in
-neo4j_client.get_concept_context_for_scope; this module only turns that
+nool_kg_client.get_concept_context_for_scope; this module only turns that
 context plus a request shape into grounded questions.
 """
 
@@ -36,11 +35,11 @@ GENERATED_QUESTIONS_SCHEMA = {
                     "question_type": {"type": "string", "enum": list(_QUESTION_TYPES)},
                     "chapter_number": {"type": "integer"},
                     "topic": {"type": "string"},
-                    "source_concept_ids": {"type": "array", "items": {"type": "string"}},
+                    "source_refs": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": [
                     "text", "answer", "bloom_level", "difficulty", "question_type",
-                    "chapter_number", "topic", "source_concept_ids",
+                    "chapter_number", "topic", "source_refs",
                 ],
                 "additionalProperties": False,
             },
@@ -51,19 +50,19 @@ GENERATED_QUESTIONS_SCHEMA = {
 }
 
 SYSTEM_PROMPT = """You are a CBSE Class 10 Science question-paper writer. You are given a set
-of concepts retrieved from a knowledge graph built from the actual NCERT
-textbook - each with its definitions, formulas, worked examples, and figure
-descriptions, grounded with a concept_id you must cite in source_concept_ids.
+of topics/subtopics retrieved from the actual NCERT textbook - each with its
+own textbook text, activities, worked examples, and existing textbook
+questions, grounded with a topic_ref you must cite in source_refs.
 
-Write exam-quality questions strictly grounded in the given concepts - do not
+Write exam-quality questions strictly grounded in the given content - do not
 introduce facts, numbers, or terminology not present in the provided context.
 Match the requested Bloom level (REMEMBER/UNDERSTAND/APPLY/ANALYZE/EVALUATE/
 CREATE) and difficulty (EASY/MEDIUM/HARD) for each question as closely as
-the concept content allows, and the requested question_type. Every question
-must cite the concept_id(s) it draws from in source_concept_ids and the
-correct chapter_number/topic it belongs to. Provide a concise reference
-answer for each question. Avoid duplicating the same fact/question across
-different entries - cover distinct concepts where the requested count allows
+the content allows, and the requested question_type. Every question must
+cite the topic_ref(s) it draws from in source_refs and the correct
+chapter_number/topic it belongs to. Provide a concise reference answer for
+each question. Avoid duplicating the same fact/question across different
+entries - cover distinct topics/subtopics where the requested count allows
 it."""
 
 
@@ -80,7 +79,7 @@ def _build_user_message(
         f"Bloom level distribution (level: count): {json.dumps(bloom_distribution)}",
         f"Difficulty distribution (level: count): {json.dumps(difficulty_distribution)}",
         f"Allowed question types: {question_types or list(_QUESTION_TYPES)}",
-        "\nAvailable concepts (grounding context):",
+        "\nAvailable topics/subtopics (grounding context):",
         json.dumps(concept_context, indent=2),
     ]
     return "\n".join(parts)
@@ -103,11 +102,10 @@ ASSESSOR_SYSTEM_PROMPT = """You are writing grounding material for a spoken "Co-
 an AI that has a live voice conversation with a student, exploring a chapter
 through creative real-world scenario questions rather than a written exam.
 
-You are given concepts retrieved from a knowledge graph built from the
-actual NCERT textbook - each with its definitions, formulas, worked
-examples, and figure descriptions. Produce two things, strictly grounded in
-the given concepts only - do not introduce facts, numbers, or terminology
-not present in the provided context:
+You are given topics/subtopics retrieved from the actual NCERT textbook -
+each with its own textbook text, worked examples, and activities. Produce
+two things, strictly grounded in the given content only - do not introduce
+facts, numbers, or terminology not present in the provided context:
 
 1. `reference_questions`: a list of creative, real-world scenario questions
    (household gadgets, appliances, vehicles, weather, sports, design
@@ -115,7 +113,7 @@ not present in the provided context:
    material a live conversational agent will draw from and rephrase on the
    fly, not a fixed script to recite verbatim. Match the requested count.
 2. `textbook_context`: a compact prose/bullet summary of the grounding
-   concepts (definitions, formulas, key relationships) written in plain
+   topics/subtopics (key facts, formulas, relationships) written in plain
    spoken-friendly language - no LaTeX, no raw symbols - suitable to hand
    directly to that conversational agent as its factual grounding."""
 
@@ -126,7 +124,7 @@ def _build_assessor_user_message(
     parts = [
         f"Generate {num_questions} reference scenario questions.",
         f"Target Bloom's Taxonomy levels: {json.dumps(bloom_levels)}",
-        "\nAvailable concepts (grounding context):",
+        "\nAvailable topics/subtopics (grounding context):",
         json.dumps(concept_context, indent=2),
     ]
     return "\n".join(parts)

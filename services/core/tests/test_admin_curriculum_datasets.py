@@ -17,7 +17,7 @@ from src.api.schemas.school_admin import (
     UpdateSchoolCurriculumIn,
     UpdateSchoolDatasetsIn,
 )
-from src.domain.models import Dataset, Role, School, Subject, User, UserStatus
+from src.domain.models import Dataset, Role, School, Subject, SubjectGrade, User, UserStatus
 
 
 async def _seed_super_admin(db_session) -> User:
@@ -37,9 +37,12 @@ async def _seed_school(db_session) -> School:
     return school
 
 
-async def _seed_subject(db_session) -> Subject:
+async def _seed_subject(db_session, *, grades: list[int] | None = None) -> Subject:
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add(subject)
+    await db_session.flush()
+    for grade in grades or [9]:
+        db_session.add(SubjectGrade(subject_id=subject.id, grade=grade))
     await db_session.flush()
     return subject
 
@@ -69,7 +72,7 @@ async def test_create_subject_as_admin_unknown_school_404s(db_session):
     super_admin = await _seed_super_admin(db_session)
     with pytest.raises(NotFoundError):
         await admin.create_subject_as_admin(
-            str(uuid.uuid4()), CreateSchoolSubjectIn(name=f"Subject-{uuid.uuid4()}"),
+            str(uuid.uuid4()), CreateSchoolSubjectIn(name=f"Subject-{uuid.uuid4()}", grades=[9]),
             actor=super_admin, session=db_session,
         )
 
@@ -165,10 +168,10 @@ async def test_create_subject_as_admin_reuses_existing_subject_by_name_across_sc
     name = f"Sanskrit-{uuid.uuid4()}"
 
     result_a = await admin.create_subject_as_admin(
-        str(school_a.id), CreateSchoolSubjectIn(name=name), actor=super_admin, session=db_session
+        str(school_a.id), CreateSchoolSubjectIn(name=name, grades=[9]), actor=super_admin, session=db_session
     )
     result_b = await admin.create_subject_as_admin(
-        str(school_b.id), CreateSchoolSubjectIn(name=name), actor=super_admin, session=db_session
+        str(school_b.id), CreateSchoolSubjectIn(name=name, grades=[9]), actor=super_admin, session=db_session
     )
 
     # Same underlying Subject row reused, not duplicated.
@@ -194,7 +197,7 @@ async def test_create_subject_as_admin_rejects_empty_name(db_session):
     school = await _seed_school(db_session)
     with pytest.raises(ConflictError):
         await admin.create_subject_as_admin(
-            str(school.id), CreateSchoolSubjectIn(name="   "), actor=super_admin, session=db_session
+            str(school.id), CreateSchoolSubjectIn(name="   ", grades=[9]), actor=super_admin, session=db_session
         )
 
 

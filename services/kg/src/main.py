@@ -8,7 +8,7 @@ from shared.tracing import configure_tracing
 
 from src.api.routes import curriculum, health, question_paper, ready, voice_test
 from src.config.settings import get_settings
-from src.services.neo4j_client import dispose_driver, init_driver
+from src.services.nool_kg_client import dispose_client, init_client
 
 
 def create_app() -> FastAPI:
@@ -18,15 +18,10 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Building the driver does not open a connection - that only
-        # happens on first use - so this is safe even if Neo4j/the
-        # required env vars aren't ready yet at boot (mirrors Core's
-        # init_engine, which has the same property for Postgres).
-        if settings.neo4j_uri and settings.neo4j_user and settings.neo4j_password:
-            init_driver(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password)
+        init_client(settings.nool_kg_base_url)
         logger.info("startup_complete")
         yield
-        await dispose_driver()
+        await dispose_client()
         logger.info("shutdown_complete")
 
     app = FastAPI(title="nool-core KG Service", lifespan=lifespan)

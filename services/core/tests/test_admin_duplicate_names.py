@@ -75,7 +75,9 @@ async def test_create_subject_with_duplicate_name_conflicts_not_500(db_session):
     await db_session.flush()
 
     with pytest.raises(ConflictError):
-        await admin_catalog.create_subject(CreateSubjectIn(name=name), actor=super_admin, session=db_session)
+        await admin_catalog.create_subject(
+            CreateSubjectIn(name=name, grades=[9]), actor=super_admin, session=db_session
+        )
 
 
 async def test_rename_subject_to_a_duplicate_name_conflicts_not_500(db_session):
@@ -88,5 +90,5 @@ async def test_rename_subject_to_a_duplicate_name_conflicts_not_500(db_session):
 
     with pytest.raises(ConflictError):
         await admin_catalog.update_subject(
-            str(other.id), UpdateSubjectIn(name=taken_name), actor=super_admin, session=db_session,
+            str(other.id), UpdateSubjectIn(name=taken_name, grades=[9]), actor=super_admin, session=db_session,
         )

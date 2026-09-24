@@ -137,9 +137,7 @@ services:
       SERVICE_NAME: kg
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
-      NEO4J_USER: ${NEO4J_USER:-}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
+      NOOL_KG_BASE_URL: ${NOOL_KG_BASE_URL:-https://nool-data.draco-labs.in}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     volumes:
@@ -157,14 +155,6 @@ services:
       start_period: 5s
     networks:
       - nool_network
-      # The Neo4j knowledge graph lives in the sibling nool-data-ingestion
-      # repo's own Compose project - see nool-data-ingestion/compose.yml,
-      # which joins this same external network so its "neo4j" service is
-      # reachable here by that name. One-time local-dev setup:
-      # `docker network create nool_shared_kg_network`. In production both
-      # would instead point at one managed Neo4j instance via NEO4J_URI -
-      # no network bridging needed.
-      - nool_shared_kg_network
 
   colearner:
     build:
@@ -229,12 +219,6 @@ services:
 networks:
   nool_network:
     driver: bridge
-  # Created once, outside either Compose project: `docker network create
-  # nool_shared_kg_network`. Lets the kg service here and the neo4j
-  # service in nool-data-ingestion's own compose.yml reach each other by
-  # name despite being two separate Compose projects.
-  nool_shared_kg_network:
-    external: true
 
 # Persists across `docker compose down` / `up`. Only removed by
 # `docker compose down -v`, which is destructive for local DB data.

@@ -5,7 +5,7 @@ from shared.errors import ValidationError
 from src.api.schemas import GenerateAssessorContentIn, GenerateAssessorContentOut
 from src.config.settings import get_settings
 from src.services.generator import generate_assessor_content
-from src.services.neo4j_client import get_concept_context_for_scope
+from src.services.nool_kg_client import get_concept_context_for_scope
 
 router = APIRouter(prefix="/voice-tests", tags=["voice-tests"])
 
@@ -26,6 +26,8 @@ async def generate(body: GenerateAssessorContentIn) -> GenerateAssessorContentOu
         chapter_numbers=[c.number for c in body.chapters],
         topic_names=body.topic_names or None,
         subject=body.subject,
+        board=body.board,
+        grade=body.grade,
     )
     result = generate_assessor_content(
         api_key=settings.openai_api_key,

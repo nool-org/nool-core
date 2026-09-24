@@ -41,10 +41,17 @@ async def _post(path: str, json: dict, *, timeout: float) -> dict:
         raise KgServiceUnavailableError("Could not reach the knowledge-graph service. Try again.") from exc
 
 
-async def _get(path: str, params: dict) -> dict:
+async def _get(path: str, params: dict) -> dict | None:
+    """Returns None on a 404 - a legitimate "nothing there" response from
+    the kg service, not a sign it's unreachable. Callers that can get one
+    (get_curriculum_tree) need to handle None explicitly; every other 4xx/5xx
+    still means the service itself is the problem.
+    """
     try:
         async with httpx.AsyncClient(base_url=_base_url(), timeout=30.0) as client:
             response = await client.get(path, params=params)
+            if response.status_code == 404:
+                return None
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as exc:
@@ -52,9 +59,23 @@ async def _get(path: str, params: dict) -> dict:
         raise KgServiceUnavailableError("Could not reach the knowledge-graph service. Try again.") from exc
 
 
-async def get_curriculum_tree(*, board: str = "CBSE", grade: int = 10, subject: str = "Science") -> dict:
-    """Used by POST /admin/curriculum/sync-from-kg (admin_catalog.py)."""
+async def get_curriculum_tree(*, board: str = "CBSE", grade: int = 10, subject: str = "Science") -> dict | None:
+    """Used by POST /admin/curriculum/sync-from-kg and the per-Subject sync
+    (admin_catalog.py). None means nool-kg has nothing for this
+    board/grade/subject combination - not an error.
+    """
     return await _get("/curriculum/tree", params={"board": board, "grade": grade, "subject": subject})
+
+
+async def list_curriculum_subjects() -> list[dict]:
+    """Real, populated subject/grade combinations nool-kg currently has -
+    used by GET /admin/kg-subjects (admin_catalog.py) to let a Super Admin
+    pick an exact KG subject instead of typing a name that has to match
+    nool-kg's own naming exactly (see nool_kg_client.list_subjects's
+    docstring on why a wrong name is worse than just "not found").
+    """
+    result = await _get("/curriculum/subjects", params={})
+    return result or []
 
 
 async def generate_paper_questions(
@@ -73,8 +94,8 @@ async def generate_paper_questions(
     Grounded-question generation is not fast (one LLM call per figure-heavy
     chapter set) - a longer timeout than the other calls here.
 
-    `subject`/`board`/`grade` scope which Curriculum root in the kg
-    service's Neo4j graph to query - the kg service defaults these to
+    `subject`/`board`/`grade` scope which graph in nool-kg the kg service
+    queries - the kg service defaults these to
     CBSE/Grade 10/Science when omitted, so a paper for any other subject
     would otherwise silently generate against the wrong (or a
     coincidentally-named) Curriculum tree with no visible error.
