@@ -58,7 +58,6 @@ from src.domain.models import (
     TestStatus,
     VoiceTest,
 )
-from src.services.homework_autogen import auto_generate_homework
 from src.services.stars import stars_for_mastery_percent
 
 POINTS_PER_ANSWERED_QUESTION = 10
@@ -74,7 +73,7 @@ async def record_test_completion(
     bloom_levels: list[BloomLevel],
     mastery_percent: int | None = None,
     bloom_scores: dict[BloomLevel, int] | None = None,
-) -> None:
+) -> int | None:
     """`mastery_percent`/`bloom_scores` - real per-level scores from
     evaluation_service.evaluate_colearner_session(...), passed by
     ai_assessor.py's stream_session when colearner's report scored the
@@ -112,6 +111,7 @@ async def record_test_completion(
             )
         )
 
+    homework_due = False
     test = await session.get(VoiceTest, test_id)
     if test is not None:
         if not already_completed:
@@ -128,13 +128,11 @@ async def record_test_completion(
             points_row.points += awarded
 
         if test is not None:
-            await auto_generate_homework(
-                session,
-                test=test,
-                student_id=student_id,
-                mastery_percent=mastery_percent,
-                bloom_levels=bloom_levels,
-            )
+            # The follow-up homework is NOT built here: it can take minutes
+            # (question bank + LLM) and must never hold up - or on failure roll
+            # back - the student's results. The caller commits first, then
+            # schedules it (homework_autogen.schedule_auto_homework).
+            homework_due = True
 
             chapter_progress_result = await session.execute(
                 select(StudentChapterProgress).where(
@@ -156,3 +154,6 @@ async def record_test_completion(
             else:
                 chapter_progress.stars = stars
                 chapter_progress.completed_at = datetime.now(timezone.utc)
+
+    # mastery for the follow-up homework, when one is due (first completion only)
+    return mastery_percent if homework_due else None

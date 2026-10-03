@@ -8,6 +8,10 @@ Postgres via db_session, same pattern as test_progress.py.
 
 import uuid
 
+import pytest
+
+from shared.errors import ConflictError, ForbiddenError, ValidationError
+
 from src.api.routes import homework
 from src.api.schemas.homework import AssignHomeworkIn
 from src.api.schemas.roster import AssignmentTarget
@@ -23,6 +27,7 @@ from src.domain.models import (
     StudentHomeworkProgress,
     StudentProfile,
     Subject,
+    TeacherClassAssignment,
     User,
     UserStatus,
     VoiceTest,
@@ -72,7 +77,7 @@ async def _seed_student(db_session, school_id, class_id) -> User:
     return student
 
 
-async def _seed_homework(db_session, school_id) -> tuple[Homework, "SchoolClass"]:
+async def _seed_homework(db_session, school_id, teacher) -> tuple[Homework, "SchoolClass"]:
     school_class = SchoolClass(school_id=school_id, grade=9, section=str(uuid.uuid4())[:1].upper())
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school_class, subject])
@@ -91,6 +96,8 @@ async def _seed_homework(db_session, school_id) -> tuple[Homework, "SchoolClass"
         target_mode=AssignmentTargetMode.WHOLE_CLASS,
     )
     db_session.add(test)
+    # the assigning teacher teaches this class + subject (every homework route checks it)
+    db_session.add(TeacherClassAssignment(teacher_id=teacher.id, class_id=school_class.id, subject_id=subject.id))
     await db_session.flush()
 
     hw = Homework(
@@ -111,7 +118,7 @@ async def _seed_homework(db_session, school_id) -> tuple[Homework, "SchoolClass"
 async def test_assign_whole_class_creates_progress_for_every_roster_student(db_session):
     school = await _seed_school(db_session)
     teacher = await _seed_teacher(db_session, school.id)
-    hw, school_class = await _seed_homework(db_session, school.id)
+    hw, school_class = await _seed_homework(db_session, school.id, teacher)
     student_a = await _seed_student(db_session, school.id, school_class.id)
     student_b = await _seed_student(db_session, school.id, school_class.id)
 
@@ -138,7 +145,7 @@ async def test_assign_whole_class_creates_progress_for_every_roster_student(db_s
 async def test_assign_specific_students_creates_progress_only_for_targets(db_session):
     school = await _seed_school(db_session)
     teacher = await _seed_teacher(db_session, school.id)
-    hw, school_class = await _seed_homework(db_session, school.id)
+    hw, school_class = await _seed_homework(db_session, school.id, teacher)
     targeted = await _seed_student(db_session, school.id, school_class.id)
     not_targeted = await _seed_student(db_session, school.id, school_class.id)
 
@@ -170,16 +177,35 @@ async def test_assign_is_idempotent_on_replay(db_session):
     """
     school = await _seed_school(db_session)
     teacher = await _seed_teacher(db_session, school.id)
-    hw, school_class = await _seed_homework(db_session, school.id)
+    hw, school_class = await _seed_homework(db_session, school.id, teacher)
     await _seed_student(db_session, school.id, school_class.id)
 
     body = AssignHomeworkIn(
         target=AssignmentTarget(mode=AssignmentTargetMode.WHOLE_CLASS),
         completion_window_hours=48,
     )
-    await homework.assign_homework(homework_id=str(hw.id), body=body, user=teacher, session=db_session)
-    result = await homework.assign_homework(
-        homework_id=str(hw.id), body=body, user=teacher, session=db_session
-    )
-
+    result = await homework.assign_homework(homework_id=str(hw.id), body=body, user=teacher, session=db_session)
     assert result.assigned_count == 1
+    # a replay no longer re-runs the assignment (only REVIEW homework can be assigned) - no 500, no duplicates
+    with pytest.raises(ConflictError):
+        await homework.assign_homework(homework_id=str(hw.id), body=body, user=teacher, session=db_session)
+
+
+async def test_assign_rejects_students_outside_the_class_and_teachers_who_dont_teach_it(db_session):
+    school = await _seed_school(db_session)
+    teacher = await _seed_teacher(db_session, school.id)
+    other_teacher = await _seed_teacher(db_session, school.id)
+    hw, school_class = await _seed_homework(db_session, school.id, teacher)
+    other_school = await _seed_school(db_session)
+    outsider_class = SchoolClass(school_id=other_school.id, grade=9, section="Z")
+    db_session.add(outsider_class)
+    await db_session.flush()
+    outsider = await _seed_student(db_session, other_school.id, outsider_class.id)
+    specific = AssignHomeworkIn(
+        target=AssignmentTarget(mode=AssignmentTargetMode.SPECIFIC_STUDENTS, student_ids=[str(outsider.id)]),
+        completion_window_hours=48,
+    )
+    with pytest.raises(ValidationError):
+        await homework.assign_homework(homework_id=str(hw.id), body=specific, user=teacher, session=db_session)
+    with pytest.raises(ForbiddenError):
+        await homework.assign_homework(homework_id=str(hw.id), body=specific, user=other_teacher, session=db_session)

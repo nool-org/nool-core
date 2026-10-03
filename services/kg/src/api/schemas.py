@@ -68,6 +68,9 @@ class GenerateQuestionsIn(BaseModel):
     difficulty_distribution: dict[str, int] = {}
     question_types: list[str] = []
     total_questions: int
+    # Sample of the paper's selected question-bank (QA dataset) questions -
+    # see generator.py's REFERENCE_GUIDANCE for how they're used.
+    reference_questions: list[dict] = []
 
 
 class ReplacementCandidatesIn(BaseModel):

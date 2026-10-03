@@ -45,3 +45,24 @@ services:
       # for the OpenAPI/Swagger UI. Same app the NGINX /api/v1/colearner/
       # route forwards to; both work.
       - "${COLEARNER_PORT_HOST:-8004}:8000"
+
+  generation:
+    ports:
+      # Direct access, e.g. http://localhost:8005/docs - only core calls it otherwise.
+      - "${GENERATION_PORT_HOST:-8005}:8000"
+
+  # Local stand-in for Azure Blob Storage (question images - see
+  # scripts/upload_assets.py). Production points AZURE_STORAGE_CONNECTION_STRING
+  # / ASSET_BASE_URL at a real storage account instead; nothing else changes.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--location", "/data", "--loose"]
+    ports:
+      - "${AZURITE_BLOB_PORT_HOST:-10000}:10000"
+    volumes:
+      - azurite_data:/data
+    networks:
+      - nool_network
+
+volumes:
+  azurite_data:

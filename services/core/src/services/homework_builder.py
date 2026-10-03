@@ -1,0 +1,251 @@
+"""Builds a homework's questions - the one path both the teacher flow
+(POST /homework/{id}/generate) and the automatic post-test homework
+(homework_autogen.py) go through:
+
+1. question bank first: services/question_selector.py picks real questions
+   on the test's topic from the datasets this class may use (and the
+   teacher picked), skipping ones the class has already had;
+2. generation service for the slots the bank couldn't fill, grounded in the
+   topic's own textbook text (services/generation, via generation_client);
+3. if generation couldn't cover them: any unused bank question on the same
+   topic (then chapter), even if its Bloom level/difficulty don't match -
+   a real question beats a placeholder;
+4. the existing KG/deterministic generator only for anything still missing,
+   so a homework never comes back short because a service is down.
+"""
+
+import logging
+import uuid
+from dataclasses import dataclass
+
+from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.domain.models import (
+    AssignmentTargetMode, BloomLevel, Chapter, Dataset, DatasetQuestion, DatasetType, HomeworkDifficulty, HomeworkQuestion, HomeworkStatus,
+    HomeworkTargetStudent, QuestionType,
+    SchoolClass, Subject, Topic, User, VoiceTest,
+)
+from src.domain.models.curriculum import Subtopic
+from src.domain.models.homework import Homework
+from src.repositories.dataset_access import visible_datasets
+from src.services import generation_client, homework_content_resolver
+from src.services.question_selector import Slot, plan_slots, select_questions, text_only_filter
+
+logger = logging.getLogger(__name__)
+
+# Grounding text sent to the generation service - the topic and its
+# subtopics, capped so one request stays well inside the model's context.
+MAX_SECTION_CHARS = 12000
+MAX_EXAMPLES = 4
+
+
+_HANDED_OUT = (HomeworkStatus.ASSIGNED, HomeworkStatus.IN_PROGRESS, HomeworkStatus.COMPLETED)
+
+
+@dataclass
+class QuestionDraft:
+    bloom_level: BloomLevel
+    text: str
+    answer: str
+    dataset_id: uuid.UUID
+    source_question_id: uuid.UUID | None = None  # None = generated
+    source_uid: str | None = None
+
+
+async def build_homework_questions(
+    session: AsyncSession,
+    *,
+    user: User,
+    test: VoiceTest,
+    total: int,
+    bloom_weights: dict[BloomLevel, int],
+    difficulty: HomeworkDifficulty,
+    fallback_dataset_id: uuid.UUID,
+    picked_dataset_ids: list[uuid.UUID | str] | None = None,
+    seed: str | None = None,
+    release_before_generation: bool = False,
+    student_id: uuid.UUID | None = None,
+    keep: list[QuestionDraft] = (),
+) -> list[QuestionDraft]:
+    """`picked_dataset_ids` = the teacher's choice (None = every dataset the
+    user may use); `fallback_dataset_id` is recorded on generated questions
+    (HomeworkQuestion.dataset_id is NOT NULL); `student_id` = the one student
+    this homework is for (auto homework), whose own past homework is excluded too;
+    `keep` = questions staying in this homework (a replacement mustn't repeat them)."""
+    school_class = await session.get(SchoolClass, test.class_id)
+    grade = school_class.grade if school_class else None
+    visible = await visible_datasets(session, user, subject_id=test.subject_id, grade=grade)
+    picked = {str(d) for d in picked_dataset_ids} if picked_dataset_ids else None
+    dataset_ids = [d.id for d in visible if d.type == DatasetType.QA and (picked is None or str(d.id) in picked)]
+
+    slots = plan_slots(total, bloom_weights, difficulty)
+    seen = await _seen_uids(session, test.class_id, student_id) | {d.source_uid for d in keep if d.source_uid}
+    selection = await select_questions(
+        session, dataset_ids=dataset_ids, chapter_id=test.chapter_id, topic_id=test.topic_id, slots=slots,
+        exclude_uids=seen, seed=seed, text_only=True,
+    )
+    drafts = {i: _from_bank(q) for i, q in enumerate(selection.by_slot) if q is not None}
+    open_slots = [i for i, q in enumerate(selection.by_slot) if q is None]
+    counts = {"bank": len(drafts)}
+
+    if open_slots:
+        await _generate(session, test=test, slots=slots, open_slots=open_slots, drafts=drafts,
+                        examples=[q for _, q in selection.picked], fallback_dataset_id=fallback_dataset_id,
+                        release_before_generation=release_before_generation, keep=keep)
+    counts["generated"] = len(drafts) - counts["bank"]
+    still_open = [i for i in range(len(slots)) if i not in drafts]
+    if still_open:
+        await _bank_relaxed_fill(session, test=test, dataset_ids=dataset_ids, open_slots=still_open, drafts=drafts,
+                                 exclude_uids=seen)
+    counts["relaxed_bank"] = len(drafts) - counts["bank"] - counts["generated"]
+    still_open = [i for i in range(len(slots)) if i not in drafts]
+    if still_open:
+        await _legacy_fill(session, test=test, slots=slots, open_slots=still_open, drafts=drafts,
+                           fallback_dataset_id=fallback_dataset_id)
+    counts["legacy"] = len(drafts) - sum(counts.values())
+    logger.info("homework_questions_built", extra={
+        "test_id": str(test.id), "requested": total, "usable_datasets": len(dataset_ids), **counts})
+    return [drafts[i] for i in sorted(drafts)]
+
+
+async def grounding_dataset_id(session: AsyncSession, *, user: User, test: VoiceTest,
+                               picked_dataset_ids: list | None = None) -> uuid.UUID | None:
+    """The dataset recorded on generated questions (HomeworkQuestion.dataset_id
+    is NOT NULL): the teacher's first pick, else the first dataset this class
+    may actually use for the test's subject - never some unassigned catalog
+    dataset. None when the class has no usable dataset at all."""
+    if picked_dataset_ids:
+        return uuid.UUID(str(picked_dataset_ids[0]))
+    school_class = await session.get(SchoolClass, test.class_id)
+    usable = await visible_datasets(session, user, subject_id=test.subject_id,
+                                    grade=school_class.grade if school_class else None)
+    qa = [d for d in usable if d.type == DatasetType.QA]
+    return qa[0].id if qa else None
+
+
+def question_uid(q: DatasetQuestion) -> str:
+    """Identity of a question across its dataset copies (the selector's key)."""
+    return q.external_uid or str(q.id)
+
+
+async def _seen_uids(session: AsyncSession, class_id, student_id=None) -> set[str]:
+    """Questions these students were actually given: homework handed out
+    (ASSIGNED onwards - not drafts in review, not failed runs) to the whole
+    class, or to this one student. Another student's own auto homework
+    doesn't use up the class's pool."""
+    targeted = [Homework.target_mode == AssignmentTargetMode.WHOLE_CLASS]
+    if student_id:
+        targeted.append(Homework.id.in_(select(HomeworkTargetStudent.homework_id)
+                                        .where(HomeworkTargetStudent.student_id == student_id)))
+    rows = await session.execute(
+        select(func.coalesce(DatasetQuestion.external_uid, cast(DatasetQuestion.id, String)))
+        .join(HomeworkQuestion, HomeworkQuestion.source_question_id == DatasetQuestion.id)
+        .join(Homework, Homework.id == HomeworkQuestion.homework_id)
+        .where(Homework.class_id == class_id, Homework.status.in_(_HANDED_OUT), or_(*targeted))
+    )
+    return {uid for (uid,) in rows.all()}
+
+
+def _from_bank(q: DatasetQuestion) -> QuestionDraft:
+    text, answer = q.text, q.answer
+    if q.options and q.question_type in (QuestionType.MCQ, QuestionType.TRUE_FALSE):
+        letters = "abcdefgh"
+        text += "\n" + "\n".join(f"({letters[i]}) {o}" for i, o in enumerate(q.options))
+        if answer in q.options:
+            answer = f"({letters[q.options.index(answer)]}) {answer}"
+    if q.solution and q.solution.strip() != answer.strip():
+        answer = f"{answer}\n\n{q.solution}"
+    return QuestionDraft(bloom_level=q.bloom_level, text=text, answer=answer, dataset_id=q.dataset_id,
+                         source_question_id=q.id, source_uid=question_uid(q))
+
+
+async def _sections(session: AsyncSession, test: VoiceTest) -> tuple[str, list[dict]]:
+    chapter = await session.get(Chapter, test.chapter_id)
+    if test.topic_id:
+        topics = [await session.get(Topic, test.topic_id)]
+    else:
+        topics = (await session.execute(select(Topic).where(Topic.chapter_id == test.chapter_id))).scalars().all()
+    sections, used = [], 0
+    for topic in topics:
+        subs = (await session.execute(select(Subtopic).where(Subtopic.topic_id == topic.id))).scalars().all()
+        for title, text in [(topic.name, topic.text_content), *((s.name, s.text_content) for s in subs)]:
+            if text and used < MAX_SECTION_CHARS:
+                sections.append({"title": title, "text": text[: MAX_SECTION_CHARS - used]})
+                used += len(sections[-1]["text"])
+    return (chapter.name if chapter else ""), sections
+
+
+async def _generate(session, *, test, slots, open_slots, drafts, examples, fallback_dataset_id,
+                    release_before_generation=False, keep=()) -> None:
+    if not generation_client.is_configured():
+        return
+    chapter_name, sections = await _sections(session, test)
+    if not sections:
+        return  # nothing to ground a question in - leave it to the legacy path
+    subject = await session.get(Subject, test.subject_id)
+    school_class = await session.get(SchoolClass, test.class_id)
+    payload = {
+        "subject": subject.name if subject else "Science",
+        "grade": school_class.grade if school_class else 10,
+        "chapter": chapter_name,
+        "sections": sections,
+        "slots": [{"bloom_level": slots[i].bloom_level.value, "difficulty": slots[i].difficulty.value} for i in open_slots],
+        "examples": [{"text": q.text, "answer": q.answer[:400], "bloom_level": q.bloom_level.value,
+                      "difficulty": q.difficulty.value if q.difficulty else None} for q in examples[:MAX_EXAMPLES]],
+        "avoid": [d.text for d in [*keep, *drafts.values()]],
+    }
+    if release_before_generation:
+        # end the read transaction so no connection/lock is held during the (slow) LLM call
+        await session.commit()
+    try:
+        result = await generation_client.gap_fill(payload)
+    except generation_client.GenerationServiceUnavailableError:
+        return  # legacy path covers the gap
+    for q in result.get("questions", []):
+        slot_index = open_slots[q["slot_index"]]
+        text = q["text"]
+        if q.get("options"):
+            text += "\n" + "\n".join(f"({'abcd'[i]}) {o}" for i, o in enumerate(q["options"][:4]))
+        answer = q["answer"] if not q.get("solution") else f"{q['answer']}\n\n{q['solution']}"
+        drafts[slot_index] = QuestionDraft(bloom_level=slots[slot_index].bloom_level, text=text, answer=answer,
+                                           dataset_id=fallback_dataset_id)
+
+
+async def _bank_relaxed_fill(session, *, test, dataset_ids, open_slots, drafts, exclude_uids) -> None:
+    if not dataset_ids:
+        return
+    # what's already in this homework counts as used - by uid, since the same
+    # question sits in several datasets under different row ids
+    used_uids = set(exclude_uids) | {d.source_uid for d in drafts.values() if d.source_uid}
+    query = (select(DatasetQuestion)
+             .where(DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.chapter_id == test.chapter_id,
+                    text_only_filter())
+             # same topic first, then the rest of the chapter
+             .order_by((DatasetQuestion.topic_id == test.topic_id).desc().nulls_last(), DatasetQuestion.id))
+    free = iter(open_slots)
+    slot = next(free, None)
+    for q in (await session.execute(query)).scalars():
+        if slot is None:
+            break
+        uid = question_uid(q)
+        if uid in used_uids:
+            continue
+        used_uids.add(uid)
+        drafts[slot] = _from_bank(q)
+        slot = next(free, None)
+
+
+async def _legacy_fill(session, *, test, slots, open_slots, drafts, fallback_dataset_id) -> None:
+    chapter = await session.get(Chapter, test.chapter_id)
+    weights: dict[BloomLevel, int] = {}
+    for i in open_slots:
+        weights[slots[i].bloom_level] = weights.get(slots[i].bloom_level, 0) + 1
+    generated = await homework_content_resolver.generate_questions(
+        session, chapter_id=test.chapter_id, subject_id=test.subject_id, class_id=test.class_id,
+        topic_id=test.topic_id, topic=chapter.name if chapter else "this topic",
+        bloom_distribution=weights, count=len(open_slots),
+    )
+    for i, q in zip(open_slots, generated):
+        drafts[i] = QuestionDraft(bloom_level=q.bloom_level, text=q.text, answer=q.answer,
+                                  dataset_id=fallback_dataset_id)

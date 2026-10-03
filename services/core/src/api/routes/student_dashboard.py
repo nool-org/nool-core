@@ -20,6 +20,7 @@ from src.domain.models import (
     StudentHomeworkProgress,
     StudentTestResult,
     Subject,
+    TestStatus,
     User,
     VoiceTest,
     VoiceTestTargetStudent,
@@ -75,9 +76,18 @@ async def get_student_dashboard(
         select(VoiceTest, Subject)
         .join(VoiceTestTargetStudent, VoiceTestTargetStudent.test_id == VoiceTest.id)
         .join(Subject, Subject.id == VoiceTest.subject_id)
-        .where(VoiceTestTargetStudent.student_id == user.id, VoiceTest.id.not_in(already_done))
-        .limit(3)
+        .where(
+            VoiceTestTargetStudent.student_id == user.id,
+            VoiceTest.id.not_in(already_done),
+            VoiceTest.status != TestStatus.DRAFT,  # same rule as assigned_test.py
+        )
+        .order_by(VoiceTest.created_at)
     )
+    # One "today" entry per subject (the app keys its subject chips by
+    # subject id - two pending tests in one subject made duplicate chips).
+    first_per_subject: dict = {}
+    for test, subject in pending_tests.all():
+        first_per_subject.setdefault(subject.id, (test, subject))
     subject_today = [
         SubjectTodayOut(
             subject_id=str(subject.id),
@@ -89,7 +99,7 @@ async def get_student_dashboard(
             for_you_title=f"Continue {subject.name}",
             for_you_meta="Recommended from your last session",
         )
-        for test, subject in pending_tests.all()
+        for test, subject in list(first_per_subject.values())[:3]
     ]
 
     results = await session.execute(

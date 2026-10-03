@@ -35,6 +35,7 @@ async def generate(body: GenerateQuestionsIn) -> GenerateQuestionsOut:
         difficulty_distribution=body.difficulty_distribution,
         question_types=body.question_types,
         total_questions=body.total_questions,
+        reference_questions=body.reference_questions,
     )
     return GenerateQuestionsOut(questions=[GeneratedQuestionOut(**q) for q in questions])
 

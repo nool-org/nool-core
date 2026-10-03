@@ -17,23 +17,22 @@ class after reviewing results).
 
 import uuid
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import (
     AssignmentTargetMode,
     BloomLevel,
     Chapter,
-    Dataset,
     Homework,
     HomeworkDifficulty,
     HomeworkQuestion,
     HomeworkStatus,
     HomeworkTargetStudent,
     StudentHomeworkProgress,
+    User,
     VoiceTest,
 )
-from src.services import homework_content_resolver
+from src.services.homework_builder import build_homework_questions, grounding_dataset_id
 
 AUTO_HOMEWORK_QUESTION_COUNT = 5
 AUTO_HOMEWORK_COMPLETION_WINDOW_HOURS = 48
@@ -54,7 +53,8 @@ async def auto_generate_homework(
     (test, student) - guarded by the same `already_completed` check that
     gates the points award, so a WS reconnect replay never double-creates.
     """
-    dataset_id = await _pick_dataset(session, test.subject_id)
+    student = await session.get(User, student_id)
+    dataset_id = await _pick_dataset(session, user=student, test=test)
     if dataset_id is None:
         return
 
@@ -79,25 +79,23 @@ async def auto_generate_homework(
     session.add(HomeworkTargetStudent(homework_id=hw.id, student_id=student_id))
     session.add(StudentHomeworkProgress(homework_id=hw.id, student_id=student_id))
 
-    questions = await homework_content_resolver.generate_questions(
-        session,
-        chapter_id=test.chapter_id,
-        subject_id=test.subject_id,
-        class_id=test.class_id,
-        topic_id=test.topic_id,
-        topic=gap_topic,
-        bloom_distribution=_even_bloom_distribution(bloom_levels, AUTO_HOMEWORK_QUESTION_COUNT),
-        count=AUTO_HOMEWORK_QUESTION_COUNT,
+    student = await session.get(User, student_id)
+    drafts = await build_homework_questions(
+        session, user=student, test=test, total=AUTO_HOMEWORK_QUESTION_COUNT,
+        bloom_weights=_even_bloom_distribution(bloom_levels, AUTO_HOMEWORK_QUESTION_COUNT),
+        difficulty=HomeworkDifficulty.MIXED, fallback_dataset_id=dataset_id, seed=str(hw.id),
+        student_id=student_id,
     )
-    for order, q in enumerate(questions, start=1):
+    for order, d in enumerate(drafts, start=1):
         session.add(
             HomeworkQuestion(
                 homework_id=hw.id,
                 order=order,
-                bloom_level=q.bloom_level,
-                dataset_id=dataset_id,
-                text=q.text,
-                answer=q.answer,
+                bloom_level=d.bloom_level,
+                dataset_id=d.dataset_id,
+                source_question_id=d.source_question_id,
+                text=d.text,
+                answer=d.answer,
             )
         )
 
@@ -115,13 +113,37 @@ def _even_bloom_distribution(levels: list[BloomLevel], count: int) -> dict[Bloom
     return {level: base + (1 if i < remainder else 0) for i, level in enumerate(levels)}
 
 
-async def _pick_dataset(session: AsyncSession, subject_id: uuid.UUID) -> uuid.UUID | None:
-    subject_match = await session.execute(select(Dataset.id).where(Dataset.subject_id == subject_id).limit(1))
-    dataset_id = subject_match.scalar_one_or_none()
-    if dataset_id is not None:
-        return dataset_id
-    # No dataset scoped to this subject (e.g. a smoke-test subject with no
-    # real question bank yet) - fall back to any dataset in the catalog
-    # rather than leaving the student with no follow-up at all.
-    any_dataset = await session.execute(select(Dataset.id).limit(1))
-    return any_dataset.scalar_one_or_none()
+# kept under its old name: tests monkeypatch homework_autogen._pick_dataset
+_pick_dataset = grounding_dataset_id
+
+
+# Strong refs so scheduled tasks aren't garbage-collected mid-run.
+_background: set = set()
+
+
+def schedule_auto_homework(*, test_id: uuid.UUID, student_id: uuid.UUID, mastery_percent: int,
+                           bloom_levels: list[BloomLevel]) -> None:
+    """Build the student's follow-up homework in the background, in its own
+    session, after their results are committed - so it can neither delay the
+    completion acknowledgement nor roll the results back when it fails."""
+    import asyncio
+    import logging
+
+    from src.repositories import get_session
+
+    async def run() -> None:
+        try:
+            async with get_session() as session:
+                test = await session.get(VoiceTest, test_id)
+                if test is None:
+                    return
+                await auto_generate_homework(session, test=test, student_id=student_id,
+                                             mastery_percent=mastery_percent, bloom_levels=bloom_levels)
+                await session.commit()
+        except Exception:  # logged, never raised: the test result already stands
+            logging.getLogger(__name__).exception(
+                "auto_homework_failed", extra={"test_id": str(test_id), "student_id": str(student_id)})
+
+    task = asyncio.get_running_loop().create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)

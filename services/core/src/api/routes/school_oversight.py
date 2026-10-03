@@ -6,6 +6,7 @@ Admin never creates/edits this content - only observes it - so every
 route here is a GET.
 """
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -27,7 +28,8 @@ from src.api.schemas.school_oversight import (
 from src.domain.models import (
     AuditLog,
     Chapter,
-    CustomQuestion,
+    Dataset,
+    DatasetQuestion,
     Homework,
     HomeworkQuestion,
     QuestionPaper,
@@ -199,7 +201,9 @@ async def list_school_question_papers(
             id=str(paper.id),
             name=paper.name,
             exam_type=paper.exam_type,
+            subject_id=str(paper.subject_id),
             subject_name=subject.name,
+            grade=paper.grade,
             created_by_name=creator.display_name,
             status=paper.status,
             created_at=paper.created_at,
@@ -298,31 +302,36 @@ async def list_school_question_bank(
     # for "the general bank" - keeps the two cases unambiguous rather
     # than relying on empty-string-vs-omitted query semantics.
     general_bank_only: bool = Query(default=False, alias="generalBankOnly", description="True = only rows with no named set"),
+    dataset_id: Annotated[str | None, Query(alias="datasetId", description="One own bank, CUSTOM rows only")] = None,
     limit: int = 50,
     offset: int = 0,
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolQuestionBankEntryOut]:
-    """Not a separate table - every Question Paper and Homework a
-    teacher has ever generated already has its questions sitting in
-    QuestionPaperQuestion/HomeworkQuestion; this just surfaces all of it
-    in one school-wide, topic-labelled view instead of it being locked
-    inside whichever paper/homework it was first generated for. The two
-    sources are fetched and merged in Python rather than one SQL UNION -
-    they don't share a topic/answer shape (paper questions have no
-    per-question topic or answer; homework questions have both, just
-    keyed differently) - and school-scale volumes make that entirely
-    fine perf-wise.
-    """
+    """Not a separate table - every Question Paper and Homework a teacher
+    has generated, plus the school's own banks, in one topic-labelled view."""
+    return await question_bank_entries(
+        session, user.school_id, source=source, topic=topic, collection_name=collection_name,
+        general_bank_only=general_bank_only, dataset_id=dataset_id, limit=limit, offset=offset)
+
+
+async def question_bank_entries(
+    session: AsyncSession, school_id, *, source: str | None, topic: str | None, collection_name: str | None,
+    general_bank_only: bool, dataset_id: str | None, limit: int, offset: int,
+) -> ListEnvelope[SchoolQuestionBankEntryOut]:
+    """Every question generated at (or written by) a school - shared by the
+    School Admin view and the Super Admin's cross-tenant one."""
     entries: list[SchoolQuestionBankEntryOut] = []
 
-    if source is None or source == "QUESTION_PAPER":
+    bank_only = bool(dataset_id or general_bank_only or collection_name)
+
+    if (source is None or source == "QUESTION_PAPER") and not bank_only:
         paper_rows = (
             await session.execute(
                 select(QuestionPaperQuestion, QuestionPaper, Subject)
                 .join(QuestionPaper, QuestionPaper.id == QuestionPaperQuestion.paper_id)
                 .join(Subject, Subject.id == QuestionPaper.subject_id)
-                .where(QuestionPaper.school_id == user.school_id)
+                .where(QuestionPaper.school_id == school_id)
             )
         ).all()
         paper_ids = {paper.id for _, paper, _ in paper_rows}
@@ -346,14 +355,14 @@ async def list_school_question_bank(
                 )
             )
 
-    if source is None or source == "HOMEWORK":
+    if (source is None or source == "HOMEWORK") and not bank_only:
         hw_rows = (
             await session.execute(
                 select(HomeworkQuestion, Homework, SchoolClass, VoiceTest.subject_id)
                 .join(Homework, Homework.id == HomeworkQuestion.homework_id)
                 .join(SchoolClass, SchoolClass.id == Homework.class_id)
                 .join(VoiceTest, VoiceTest.id == Homework.test_id)
-                .where(SchoolClass.school_id == user.school_id)
+                .where(SchoolClass.school_id == school_id)
             )
         ).all()
         subject_ids = {subject_id for *_, subject_id in hw_rows}
@@ -367,32 +376,32 @@ async def list_school_question_bank(
                     id=str(question.id), text=question.text, answer=question.answer,
                     bloom_level=question.bloom_level, subject_name=subject_names.get(subject_id, ""),
                     topic_label=hw.gap_topic, source="HOMEWORK",
-                    source_name=_class_label(school_class), created_at=None,
+                    source_name=_class_label(school_class), created_at=hw.created_at,
                 )
             )
 
     if source is None or source == "CUSTOM":
-        # Outer join on class - a grade-level question (CustomQuestion.
-        # class_id NULL, grade set instead) has no single SchoolClass row.
+        # The school's own question banks (Dataset.school_id) - grade-level,
+        # one dataset per bank; "General bank" is the unnamed default.
         custom_rows = (
             await session.execute(
-                select(CustomQuestion, Subject, Chapter, Topic, SchoolClass)
-                .join(Subject, Subject.id == CustomQuestion.subject_id)
-                .join(Chapter, Chapter.id == CustomQuestion.chapter_id)
-                .outerjoin(Topic, Topic.id == CustomQuestion.topic_id)
-                .outerjoin(SchoolClass, SchoolClass.id == CustomQuestion.class_id)
-                .where(CustomQuestion.school_id == user.school_id)
+                select(DatasetQuestion, Dataset, Subject, Chapter, Topic)
+                .join(Dataset, Dataset.id == DatasetQuestion.dataset_id)
+                .join(Subject, Subject.id == Dataset.subject_id)
+                .join(Chapter, Chapter.id == DatasetQuestion.chapter_id)
+                .outerjoin(Topic, Topic.id == DatasetQuestion.topic_id)
+                .where(Dataset.school_id == school_id, *([Dataset.id == dataset_id] if dataset_id else []))
             )
         ).all()
-        for question, subject, chapter, question_topic, school_class in custom_rows:
-            source_name = _class_label(school_class) if school_class else f"Class {question.grade} (all sections)"
+        for question, bank, subject, chapter, question_topic in custom_rows:
             entries.append(
                 SchoolQuestionBankEntryOut(
                     id=str(question.id), text=question.text, answer=question.answer,
                     bloom_level=question.bloom_level, subject_name=subject.name,
                     topic_label=question_topic.name if question_topic else chapter.name,
-                    source="CUSTOM", source_name=source_name, created_at=question.created_at,
-                    collection_name=question.collection_name,
+                    source="CUSTOM", source_name=f"Class {bank.grade}", created_at=question.created_at,
+                    collection_name=None if bank.name == "General bank" else bank.name,
+                    dataset_id=str(bank.id),
                 )
             )
 
@@ -400,14 +409,16 @@ async def list_school_question_bank(
         needle = topic.strip().lower()
         entries = [e for e in entries if needle in e.topic_label.lower()]
 
+    # bank filters describe CUSTOM rows only - asking for one excludes the other sources
+    if dataset_id or general_bank_only or collection_name:
+        entries = [e for e in entries if e.source == "CUSTOM"]
     if general_bank_only:
         entries = [e for e in entries if e.collection_name is None]
     elif collection_name:
         entries = [e for e in entries if e.collection_name == collection_name]
 
-    # created_at=None (Homework has no timestamp column at all) sorts last,
-    # not first - datetime.min is the oldest possible instant, so it never
-    # outranks a real date under reverse=True (newest-first).
+    # created_at=None sorts last - datetime.min never outranks a real date
+    # under reverse=True (newest-first).
     entries.sort(key=lambda e: e.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     total = len(entries)
     return ListEnvelope(items=entries[offset : offset + limit], total=total)

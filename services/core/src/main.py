@@ -9,6 +9,7 @@ from shared.logging import RequestContextMiddleware, configure_logging, get_logg
 from shared.tracing import configure_tracing
 
 from src.api.routes import (
+    school_question_bank,
     admin,
     admin_catalog,
     ai_assessor,
@@ -16,7 +17,6 @@ from src.api.routes import (
     assistant,
     bloom_result,
     curriculum,
-    custom_question,
     dataset,
     gamification,
     health,
@@ -102,7 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_catalog.router)
     app.include_router(school_admin.router)
     app.include_router(school_oversight.router)
-    app.include_router(custom_question.router)
+    app.include_router(school_question_bank.router)
     app.include_router(support_ticket.router)
 
     return app

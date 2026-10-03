@@ -66,6 +66,16 @@ async def test_get_concept_context_for_scope_returns_real_topic_text(live_client
 
 
 @pytest.mark.asyncio
+async def test_get_concept_context_for_scope_matches_topic_names_ignoring_case(live_client):
+    """Core stores synced topic names upper-cased ("1.2 TYPES OF CHEMICAL
+    REACTIONS"); nool-kg's title is "1.2 Types of Chemical Reactions"."""
+    context = await nool_kg_client.get_concept_context_for_scope(
+        chapter_numbers=[1], topic_names=["1.2 TYPES OF CHEMICAL REACTIONS"], subject="Science", board="CBSE", grade=10
+    )
+    assert [c["topic_ref"] for c in context] == ["CH01_T02"]
+
+
+@pytest.mark.asyncio
 async def test_list_curriculum_subjects_includes_science_and_excludes_empty_stray_graphs(live_client):
     """Also a regression check on the stray graphs a past typo'd lookup
     left behind (e.g. "Class 10 Science_Grade_10_NCERT", empty) - these

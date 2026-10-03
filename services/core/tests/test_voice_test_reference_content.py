@@ -33,6 +33,7 @@ from src.domain.models import (
     Role,
     School,
     SchoolClass,
+    SchoolCurriculum,
     Subject,
     TeacherClassAssignment,
     Topic,
@@ -100,6 +101,8 @@ async def test_create_test_schedules_generation_in_the_background_without_awaiti
     )
     teacher = await _seed_teacher(db_session, school.id)
     db_session.add(TeacherClassAssignment(teacher_id=teacher.id, class_id=school_class.id, subject_id=subject.id))
+    # a Super Admin has given the school this subject
+    db_session.add(SchoolCurriculum(school_id=school_class.school_id, subject_id=subject.id, enabled=True))
     await db_session.flush()
 
     called = False

@@ -10,7 +10,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from shared.errors import NotFoundError, ValidationError
+from shared.errors import ForbiddenError, NotFoundError, ValidationError
 
 from src.api.routes import admin_catalog
 from src.api.schemas.admin_catalog import (
@@ -33,7 +33,7 @@ async def _seed_super_admin(db_session) -> User:
 
 
 async def _seed_subject(db_session) -> Subject:
-    subject = Subject(name=f"Subject-{uuid.uuid4()}")
+    subject = Subject(name=f"Subject-{uuid.uuid4()}", grade=10)  # subjects are per grade
     db_session.add(subject)
     await db_session.flush()
     return subject
@@ -49,7 +49,7 @@ async def _seed_chapter(db_session, subject_id) -> Chapter:
 async def _seed_dataset(db_session, *, subject_id=None, question_count=10) -> Dataset:
     dataset = Dataset(
         name=f"Dataset-{uuid.uuid4()}", question_count=question_count, description="A dataset",
-        subject_id=subject_id,
+        subject_id=subject_id, grade=10,
     )
     db_session.add(dataset)
     await db_session.flush()
@@ -64,7 +64,7 @@ async def test_create_dataset_with_subject(db_session):
     subject = await _seed_subject(db_session)
 
     result = await admin_catalog.create_dataset(
-        CreateDatasetIn(name="Algebra Bank", question_count=0, description="d", subject_id=str(subject.id)),
+        CreateDatasetIn(name="Algebra Bank", question_count=0, description="d", subject_id=str(subject.id), grade=10),
         actor=super_admin, session=db_session,
     )
     assert result.subject_id == str(subject.id)
@@ -82,15 +82,40 @@ async def test_update_dataset_subject(db_session):
     assert result.subject_id == str(subject_b.id)
 
 
-async def test_update_dataset_can_clear_subject(db_session):
+async def test_update_dataset_cant_clear_subject_or_grade(db_session):
+    # every catalog dataset belongs to one class (subject + grade)
     super_admin = await _seed_super_admin(db_session)
     subject = await _seed_subject(db_session)
     dataset = await _seed_dataset(db_session, subject_id=subject.id)
 
-    result = await admin_catalog.update_dataset(
-        str(dataset.id), UpdateDatasetIn(subject_id=None), actor=super_admin, session=db_session,
-    )
-    assert result.subject_id is None
+    for body in (UpdateDatasetIn(subject_id=None), UpdateDatasetIn(grade=None)):
+        with pytest.raises(ValidationError):
+            await admin_catalog.update_dataset(str(dataset.id), body, actor=super_admin, session=db_session)
+
+
+async def test_create_dataset_requires_subject_and_matching_grade(db_session):
+    super_admin = await _seed_super_admin(db_session)
+    subject = await _seed_subject(db_session)  # grade 10
+    for body in (CreateDatasetIn(name="x", question_count=0, description="d"),
+                 CreateDatasetIn(name="x", question_count=0, description="d", subject_id=str(subject.id), grade=9)):
+        with pytest.raises(ValidationError):
+            await admin_catalog.create_dataset(body, actor=super_admin, session=db_session)
+
+
+async def test_super_admin_cant_write_to_a_schools_own_bank(db_session):
+    from src.domain.models import School
+    super_admin = await _seed_super_admin(db_session)
+    subject = await _seed_subject(db_session)
+    school = School(name=f"S-{uuid.uuid4()}", board="CBSE", city="Pune", contact_email=f"{uuid.uuid4()}@b.com")
+    db_session.add(school)
+    await db_session.flush()
+    bank = Dataset(name="Own bank", question_count=0, description="", subject_id=subject.id, grade=10,
+                   school_id=school.id)
+    db_session.add(bank)
+    await db_session.flush()
+    with pytest.raises(ForbiddenError):
+        await admin_catalog.update_dataset(str(bank.id), UpdateDatasetIn(name="x"), actor=super_admin,
+                                           session=db_session)
 
 
 # --- question_count resolution: real rows win over the manual value --------
@@ -329,3 +354,22 @@ async def test_dataset_questions_scoped_to_own_dataset(db_session):
 
     listed_b = await admin_catalog.list_dataset_questions(str(dataset_b.id), _=super_admin, session=db_session)
     assert listed_b.total == 0
+
+
+async def test_an_edit_reaches_every_catalog_copy_of_the_question_and_is_marked(db_session):
+    super_admin = await _seed_super_admin(db_session)
+    subject = await _seed_subject(db_session)
+    other_subject = await _seed_subject(db_session)
+    here, there = await _seed_dataset(db_session, subject_id=subject.id), await _seed_dataset(db_session, subject_id=subject.id)
+    elsewhere = await _seed_dataset(db_session, subject_id=other_subject.id)   # same uid, another subject
+    uid = f"CH01:{uuid.uuid4()}"
+    rows = [DatasetQuestion(dataset_id=d.id, created_by=super_admin.id, external_uid=uid, text="Old",
+                            answer="A", bloom_level=BloomLevel.REMEMBER, question_type=QuestionType.SHORT_ANSWER)
+            for d in (here, there, elsewhere)]
+    db_session.add_all(rows)
+    await db_session.flush()
+
+    await admin_catalog.update_dataset_question(str(here.id), str(rows[0].id), UpdateDatasetQuestionIn(text="New"),
+                                                actor=super_admin, session=db_session)
+    assert [r.text for r in rows] == ["New", "New", "Old"]
+    assert rows[1].source == {"edited": True} and not (rows[2].source or {}).get("edited")

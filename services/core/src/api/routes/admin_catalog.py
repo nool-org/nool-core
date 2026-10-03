@@ -6,11 +6,15 @@ unchanged). Giving School Admin write access here would silently change
 these for every other school too.
 """
 
+import re
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ConflictError, NotFoundError, ValidationError
+from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.admin_catalog import (
@@ -46,40 +50,86 @@ from src.domain.models import (
     Dataset,
     DatasetQuestion,
     DatasetType,
+    GradeSubject,
+    QuestionPaper,
     QuestionType,
     Role,
+    School,
     Subject,
+    SubjectGrade,
     Subtopic,
+    TeacherClassAssignment,
     Topic,
     User,
+    VoiceTest,
 )
+from src.domain.models.question_paper import PaperDifficultyLevel
 from src.repositories import audit_repository
-from src.services import kg_client
+from src.services import kg_client, question_bank
+from src.services.assets import asset_url
 from src.services.realtime import curriculum_updates, sync_progress_channel
-from src.services.subject_grades import grades_by_subject, set_subject_grades
+from src.services.subject_grades import ensure_subjects_fit_grade, grades_by_subject, set_subject_grades
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-catalog"])
 
 
 # ---- Subjects ---------------------------------------------------------
 
+
+async def _delete_curriculum(session: AsyncSession, node, *, actor: User, kind: str) -> None:
+    """Deletes a subject/chapter/topic/subtopic with its own curriculum subtree.
+    Anything else still pointing at it (questions, tests, papers, progress,
+    school assignments) is left to the foreign keys, which refuse - reported
+    as 409 rather than a 500, and nothing is half-deleted."""
+    subject_ids = [node.id] if isinstance(node, Subject) else []
+    chapter_ids = [node.id] if isinstance(node, Chapter) else []
+    topic_ids = [node.id] if isinstance(node, Topic) else []
+    if subject_ids:
+        chapter_ids = list((await session.execute(select(Chapter.id).where(Chapter.subject_id.in_(subject_ids)))).scalars())
+    if chapter_ids:
+        topic_ids = list((await session.execute(select(Topic.id).where(Topic.chapter_id.in_(chapter_ids)))).scalars())
+    try:
+        async with session.begin_nested():
+            if topic_ids:
+                await session.execute(delete(Subtopic).where(Subtopic.topic_id.in_(topic_ids)))
+            if chapter_ids and not isinstance(node, Topic):
+                await session.execute(delete(Topic).where(Topic.chapter_id.in_(chapter_ids)))
+            if subject_ids:
+                await session.execute(delete(SubjectGrade).where(SubjectGrade.subject_id.in_(subject_ids)))
+                await session.execute(delete(GradeSubject).where(GradeSubject.subject_id.in_(subject_ids)))
+                await session.execute(delete(Chapter).where(Chapter.subject_id.in_(subject_ids)))
+            await session.delete(node)
+            await session.flush()
+    except IntegrityError as exc:
+        match = re.search(r'from table "(\w+)"', str(exc.orig))
+        used_by = match.group(1).replace("_", " ") if match else "other records"
+        raise ConflictError(f"This {kind} is still used by {used_by} - remove or move those first.") from exc
+    await audit_repository.record(session, actor_id=actor.id, action=f"{kind}.deleted", target_type=kind,
+                                  target_id=str(node.id))
+    await session.commit()
+
+
 @router.get("/subjects")
 async def list_subjects(
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SubjectOut]:
-    result = await session.execute(select(Subject))
+    result = await session.execute(select(Subject).order_by(func.lower(Subject.name), Subject.grade.nulls_last()))
     subjects = result.scalars().all()
     grades_map = await grades_by_subject(session, [s.id for s in subjects])
     items = [
-        SubjectOut(id=str(s.id), name=s.name, grades=grades_map.get(str(s.id), []), kg_subject_name=s.kg_subject_name)
+        SubjectOut(id=str(s.id), name=s.name, grade=s.grade, grades=grades_map.get(str(s.id), []),
+                   kg_subject_name=s.kg_subject_name)
         for s in subjects
     ]
     return ListEnvelope(items=items, total=len(items))
 
 
-async def _subject_name_taken(session: AsyncSession, name: str, *, exclude_subject_id: str | None = None) -> bool:
-    query = select(Subject.id).where(Subject.name == name)
+async def _subject_name_taken(session: AsyncSession, name: str, grade: int, *,
+                              exclude_subject_id: str | None = None) -> bool:
+    """Names are unique per grade: "Science" can exist once for grade 9 and
+    once for grade 10 (case-insensitive, so "science" doesn't sneak past)."""
+    query = select(Subject.id).where(func.lower(Subject.name) == name.strip().lower(), Subject.grade == grade)
     if exclude_subject_id is not None:
         query = query.where(Subject.id != exclude_subject_id)
     result = await session.execute(query)
@@ -92,20 +142,21 @@ async def create_subject(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> SubjectOut:
-    if await _subject_name_taken(session, body.name):
-        raise ConflictError(f'A subject named "{body.name}" already exists.')
+    if await _subject_name_taken(session, body.name, body.grade):
+        raise ConflictError(f'A subject named "{body.name}" already exists for grade {body.grade}.')
 
-    subject = Subject(name=body.name, kg_subject_name=body.kg_subject_name)
+    subject = Subject(name=body.name.strip(), grade=body.grade, kg_subject_name=body.kg_subject_name)
     session.add(subject)
     await session.flush()
-    await set_subject_grades(session, subject.id, set(body.grades))
+    await set_subject_grades(session, subject.id, {body.grade})
     await audit_repository.record(
         session, actor_id=actor.id, action="subject.created", target_type="subject", target_id=str(subject.id),
         detail=f"grades {body.grades}",
     )
     await session.commit()
     await session.refresh(subject)
-    return SubjectOut(id=str(subject.id), name=subject.name, grades=body.grades, kg_subject_name=subject.kg_subject_name)
+    return SubjectOut(id=str(subject.id), name=subject.name, grade=subject.grade, grades=[subject.grade],
+                      kg_subject_name=subject.kg_subject_name)
 
 
 @router.patch("/subjects/{subject_id}")
@@ -119,17 +170,29 @@ async def update_subject(
     subject = result.scalar_one_or_none()
     if subject is None:
         raise NotFoundError(f'No subject with id "{subject_id}".')
-    if await _subject_name_taken(session, body.name, exclude_subject_id=subject_id):
-        raise ConflictError(f'A subject named "{body.name}" already exists.')
-    subject.name = body.name
+    if await _subject_name_taken(session, body.name, body.grade, exclude_subject_id=subject_id):
+        raise ConflictError(f'A subject named "{body.name}" already exists for grade {body.grade}.')
+    if subject.grade is not None and body.grade != subject.grade:
+        # its chapters/topics came from that grade's knowledge graph
+        # its chapters/topics came from that grade's knowledge graph, and classes/datasets/tests use it as grade N
+        users = [(Chapter.subject_id, "chapters"), (TeacherClassAssignment.subject_id, "class assignments"),
+                 (Dataset.subject_id, "datasets"), (VoiceTest.subject_id, "tests"),
+                 (QuestionPaper.subject_id, "question papers")]
+        for column, what in users:
+            if (await session.execute(select(column).where(column == subject.id).limit(1))).first():
+                raise ConflictError(f"This grade-{subject.grade} subject already has {what} - "
+                                    f"create a separate subject for grade {body.grade}.")
+    subject.name = body.name.strip()
+    subject.grade = body.grade
     subject.kg_subject_name = body.kg_subject_name
-    await set_subject_grades(session, subject.id, set(body.grades))
+    await set_subject_grades(session, subject.id, {body.grade})
     await audit_repository.record(
         session, actor_id=actor.id, action="subject.updated", target_type="subject", target_id=subject_id,
         detail=f"grades {body.grades}",
     )
     await session.commit()
-    return SubjectOut(id=str(subject.id), name=subject.name, grades=body.grades, kg_subject_name=subject.kg_subject_name)
+    return SubjectOut(id=str(subject.id), name=subject.name, grade=subject.grade, grades=[subject.grade],
+                      kg_subject_name=subject.kg_subject_name)
 
 
 @router.delete("/subjects/{subject_id}")
@@ -141,11 +204,7 @@ async def delete_subject(
     result = await session.execute(select(Subject).where(Subject.id == subject_id))
     subject = result.scalar_one_or_none()
     if subject is not None:
-        await session.delete(subject)
-        await audit_repository.record(
-            session, actor_id=actor.id, action="subject.deleted", target_type="subject", target_id=subject_id
-        )
-        await session.commit()
+        await _delete_curriculum(session, subject, actor=actor, kind="subject")
     return {"deleted": True}
 
 
@@ -157,7 +216,8 @@ async def list_chapters(
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[ChapterOut]:
-    result = await session.execute(select(Chapter).where(Chapter.subject_id == subject_id))
+    result = await session.execute(select(Chapter).where(Chapter.subject_id == subject_id)
+                                   .order_by(Chapter.order_index.nulls_last(), Chapter.name))
     items = [ChapterOut(id=str(c.id), subject_id=subject_id, name=c.name) for c in result.scalars().all()]
     return ListEnvelope(items=items, total=len(items))
 
@@ -208,11 +268,7 @@ async def delete_chapter(
     result = await session.execute(select(Chapter).where(Chapter.id == chapter_id))
     chapter = result.scalar_one_or_none()
     if chapter is not None:
-        await session.delete(chapter)
-        await audit_repository.record(
-            session, actor_id=actor.id, action="chapter.deleted", target_type="chapter", target_id=chapter_id
-        )
-        await session.commit()
+        await _delete_curriculum(session, chapter, actor=actor, kind="chapter")
     return {"deleted": True}
 
 
@@ -275,11 +331,7 @@ async def delete_topic(
     result = await session.execute(select(Topic).where(Topic.id == topic_id))
     topic = result.scalar_one_or_none()
     if topic is not None:
-        await session.delete(topic)
-        await audit_repository.record(
-            session, actor_id=actor.id, action="topic.deleted", target_type="topic", target_id=topic_id
-        )
-        await session.commit()
+        await _delete_curriculum(session, topic, actor=actor, kind="topic")
     return {"deleted": True}
 
 
@@ -342,11 +394,7 @@ async def delete_subtopic(
     result = await session.execute(select(Subtopic).where(Subtopic.id == subtopic_id))
     subtopic = result.scalar_one_or_none()
     if subtopic is not None:
-        await session.delete(subtopic)
-        await audit_repository.record(
-            session, actor_id=actor.id, action="subtopic.deleted", target_type="subtopic", target_id=subtopic_id
-        )
-        await session.commit()
+        await _delete_curriculum(session, subtopic, actor=actor, kind="subtopic")
     return {"deleted": True}
 
 
@@ -367,6 +415,8 @@ async def _dataset_out(session: AsyncSession, dataset: Dataset) -> DatasetOut:
         description=dataset.description,
         subject_id=str(dataset.subject_id) if dataset.subject_id else None,
         board=dataset.board, grade=dataset.grade, restricted=dataset.restricted, type=dataset.type,
+        school_id=str(dataset.school_id) if dataset.school_id else None,
+        school_name=(await session.get(School, dataset.school_id)).name if dataset.school_id else None,
     )
 
 
@@ -386,6 +436,11 @@ async def create_dataset(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> DatasetOut:
+    # every catalog dataset belongs to one class - a dataset without subject
+    # and grade would be usable by no school (see dataset_access)
+    if not body.subject_id or body.grade is None:
+        raise ValidationError("Pick the dataset's subject and grade.")
+    await ensure_subjects_fit_grade(session, [body.subject_id], body.grade, what=f"a grade-{body.grade} dataset")
     dataset = Dataset(
         name=body.name, question_count=body.question_count, description=body.description,
         subject_id=body.subject_id, board=body.board, grade=body.grade, restricted=body.restricted,
@@ -409,6 +464,15 @@ async def _get_dataset(session: AsyncSession, dataset_id: str) -> Dataset:
     return dataset
 
 
+async def _get_catalog_dataset_for_write(session: AsyncSession, dataset_id: str) -> Dataset:
+    """A school's own question bank is view-only for a Super Admin - it
+    belongs to that school, which alone edits it."""
+    dataset = await _get_dataset(session, dataset_id)
+    if dataset.school_id is not None:
+        raise ForbiddenError("This is a school's own question bank - only that school can change it.")
+    return dataset
+
+
 @router.get("/datasets/{dataset_id}")
 async def get_dataset(
     dataset_id: str,
@@ -426,10 +490,11 @@ async def update_dataset(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> DatasetOut:
-    dataset = await _get_dataset(session, dataset_id)
+    dataset = await _get_catalog_dataset_for_write(session, dataset_id)
     if body.name is not None:
         dataset.name = body.name
-    if body.question_count is not None:
+    if body.question_count is not None and await _real_question_count(session, dataset.id) == 0:
+        # only a dataset with no real questions yet has a hand-typed count
         dataset.question_count = body.question_count
     if body.description is not None:
         dataset.description = body.description
@@ -443,6 +508,10 @@ async def update_dataset(
         dataset.restricted = body.restricted
     if body.type is not None:
         dataset.type = body.type
+    if not dataset.subject_id or dataset.grade is None:
+        raise ValidationError("A dataset needs both a subject and a grade.")
+    await ensure_subjects_fit_grade(session, [dataset.subject_id], dataset.grade,
+                                    what=f"a grade-{dataset.grade} dataset")
     await audit_repository.record(
         session, actor_id=actor.id, action="dataset.updated", target_type="dataset", target_id=dataset_id
     )
@@ -459,23 +528,37 @@ def _dataset_question_out(q: DatasetQuestion) -> DatasetQuestionOut:
         topic_id=str(q.topic_id) if q.topic_id else None,
         bloom_level=q.bloom_level, question_type=q.question_type, text=q.text,
         options=q.options, answer=q.answer, created_by=str(q.created_by), created_at=q.created_at,
+        figures=[{**f, "url": asset_url(f["blob"])} for f in q.figures] if q.figures else None,
+        solution=q.solution, marks=q.marks, format=q.format,
+        subtopic_id=str(q.subtopic_id) if q.subtopic_id else None, difficulty=q.difficulty,
     )
 
 
 @router.get("/datasets/{dataset_id}/questions")
 async def list_dataset_questions(
     dataset_id: str,
+    chapter_id: Annotated[str | None, Query(alias="chapterId")] = None,
+    topic_id: Annotated[str | None, Query(alias="topicId")] = None,
+    difficulty: PaperDifficultyLevel | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[DatasetQuestionOut]:
+    """One page (`total` = every matching question) - catalog datasets hold thousands."""
     await _get_dataset(session, dataset_id)
+    conditions = [DatasetQuestion.dataset_id == dataset_id]
+    for column, value in ((DatasetQuestion.chapter_id, chapter_id), (DatasetQuestion.topic_id, topic_id),
+                          (DatasetQuestion.difficulty, difficulty)):
+        if value is not None:
+            conditions.append(column == value)
+    total = (await session.execute(select(func.count()).select_from(DatasetQuestion).where(*conditions))).scalar_one()
     result = await session.execute(
-        select(DatasetQuestion).where(DatasetQuestion.dataset_id == dataset_id).order_by(
-            DatasetQuestion.created_at.desc()
-        )
+        select(DatasetQuestion).where(*conditions)
+        .order_by(DatasetQuestion.created_at.desc(), DatasetQuestion.id).limit(limit).offset(offset)
     )
     items = [_dataset_question_out(q) for q in result.scalars().all()]
-    return ListEnvelope(items=items, total=len(items))
+    return ListEnvelope(items=items, total=total)
 
 
 @router.post("/datasets/{dataset_id}/questions", status_code=201)
@@ -485,14 +568,8 @@ async def create_dataset_question(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> DatasetQuestionOut:
-    await _get_dataset(session, dataset_id)
-    question = DatasetQuestion(
-        dataset_id=dataset_id, chapter_id=body.chapter_id, topic_id=body.topic_id,
-        bloom_level=body.bloom_level, question_type=body.question_type, text=body.text,
-        options=body.options, answer=body.answer, created_by=actor.id,
-    )
-    session.add(question)
-    await session.flush()
+    dataset = await _get_catalog_dataset_for_write(session, dataset_id)
+    question = await question_bank.create_question(session, dataset, body, actor)
     await audit_repository.record(
         session, actor_id=actor.id, action="dataset.question.created",
         target_type="dataset_question", target_id=str(question.id), detail=f"Dataset {dataset_id}",
@@ -522,42 +599,16 @@ async def update_dataset_question(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> DatasetQuestionOut:
+    dataset = await _get_catalog_dataset_for_write(session, dataset_id)
     question = await _get_dataset_question(session, dataset_id, question_id)
-
-    if "chapter_id" in body.model_fields_set:
-        question.chapter_id = body.chapter_id
-    if "topic_id" in body.model_fields_set:
-        question.topic_id = body.topic_id
-    if body.bloom_level is not None:
-        question.bloom_level = body.bloom_level
-
-    question_type = body.question_type or question.question_type
-    options = body.options if "options" in body.model_fields_set else question.options
-    answer = body.answer or question.answer
-    # Inline, not the shared _check_dataset_question_options helper - that
-    # one's written to raise plain ValueError for Pydantic's
-    # @model_validator to catch (see CreateDatasetQuestionIn), but route
-    # code needs shared.errors.ValidationError instead so FastAPI's own
-    # error-envelope handler produces the right 422 - same split
-    # custom_question.py's update_custom_question already uses.
-    if question_type in (QuestionType.MCQ, QuestionType.TRUE_FALSE):
-        if not options or len(options) < 2:
-            raise ValidationError(f"{question_type.value} questions need at least 2 options.")
-        if answer not in options:
-            raise ValidationError("answer must exactly match one of the given options.")
-    elif options is not None:
-        raise ValidationError(f"{question_type.value} questions don't take options - leave it blank.")
-    question.question_type = question_type
-    question.options = options
-    question.answer = answer
-    if body.text is not None:
-        question.text = body.text
-
+    await question_bank.update_question(session, dataset, question, body)
+    await question_bank.propagate_catalog_edit(session, dataset, question)
     await audit_repository.record(
         session, actor_id=actor.id, action="dataset.question.updated",
         target_type="dataset_question", target_id=question_id,
     )
     await session.commit()
+    await session.refresh(question)
     return _dataset_question_out(question)
 
 
@@ -568,6 +619,7 @@ async def delete_dataset_question(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, bool]:
+    await _get_catalog_dataset_for_write(session, dataset_id)
     result = await session.execute(
         select(DatasetQuestion).where(
             DatasetQuestion.id == question_id, DatasetQuestion.dataset_id == dataset_id
@@ -577,6 +629,8 @@ async def delete_dataset_question(
     if question is None:
         return {"deleted": True}
     await session.delete(question)
+    await session.flush()
+    await question_bank.refresh_question_count(session, await _get_dataset(session, dataset_id))
     await audit_repository.record(
         session, actor_id=actor.id, action="dataset.question.deleted",
         target_type="dataset_question", target_id=question_id,
@@ -632,9 +686,11 @@ async def _sync_chapters_topics_from_kg(
     and the Subject-keyed one (the one the Curriculum page's per-Subject
     "Sync" action actually uses) - upserts Chapter/Topic/Subtopic under
     `subject`, tagged with `grade` (Chapter.grade) so a second sync of the
-    same Subject at a different grade (e.g. "Science" grade 9 vs 10) never
-    merges into the same flat, ungraded chapter list. Idempotent via
-    kg_ref - safe to re-run.
+    same Subject at a different grade never merges into the same flat,
+    ungraded chapter list. A subject belongs to one grade, so syncing it
+    from another grade's graph is refused. Idempotent via kg_ref, matched
+    within this subject (chapters), chapter (topics) and topic (subtopics) -
+    every grade's graph numbers from CH01, so refs are only unique there.
 
     `kg_name` overrides `_kg_name(subject)` for this one call - lets the
     Curriculum page's KG-subject picker (GET /admin/kg-subjects) sync from
@@ -646,6 +702,12 @@ async def _sync_chapters_topics_from_kg(
     incrementally as the KG grows. Returns (chapters_synced, topics_synced,
     subtopics_synced).
     """
+    if subject.grade is None:
+        # a legacy grade-less subject would mix grades' chapters - give it a grade first
+        raise ValidationError(f'"{subject.name}" has no grade yet - set its grade before syncing.')
+    if grade != subject.grade:
+        raise ValidationError(
+            f'"{subject.name}" is the grade-{subject.grade} subject - sync grade {grade} into its own subject.')
     tree = await kg_client.get_curriculum_tree(board=board, grade=grade, subject=kg_name or _kg_name(subject))
     if tree is None:
         return 0, 0, 0
@@ -657,12 +719,12 @@ async def _sync_chapters_topics_from_kg(
     for chapter_data in tree["chapters"]:
         if include_chapter_refs is not None and chapter_data["ref"] not in include_chapter_refs:
             continue
-        result = await session.execute(select(Chapter).where(Chapter.kg_ref == chapter_data["ref"]))
+        result = await session.execute(
+            select(Chapter).where(Chapter.subject_id == subject.id, Chapter.kg_ref == chapter_data["ref"]))
         chapter = result.scalar_one_or_none()
         if chapter is None:
             chapter = Chapter(kg_ref=chapter_data["ref"], subject_id=subject.id)
             session.add(chapter)
-        chapter.subject_id = subject.id
         chapter.name = chapter_data["name"]
         chapter.order_index = chapter_data["number"]
         chapter.grade = grade
@@ -676,12 +738,12 @@ async def _sync_chapters_topics_from_kg(
         for topic_data in chapter_data["topics"]:
             if include_topic_refs is not None and topic_data["ref"] not in include_topic_refs:
                 continue
-            result = await session.execute(select(Topic).where(Topic.kg_ref == topic_data["ref"]))
+            result = await session.execute(
+                select(Topic).where(Topic.chapter_id == chapter.id, Topic.kg_ref == topic_data["ref"]))
             topic = result.scalar_one_or_none()
             if topic is None:
                 topic = Topic(kg_ref=topic_data["ref"], chapter_id=chapter.id)
                 session.add(topic)
-            topic.chapter_id = chapter.id
             topic.name = topic_data["name"]
             await session.flush()
             topics_synced += 1
@@ -693,12 +755,12 @@ async def _sync_chapters_topics_from_kg(
             for subtopic_data in topic_data.get("subtopics", []):
                 if include_subtopic_refs is not None and subtopic_data["ref"] not in include_subtopic_refs:
                     continue
-                result = await session.execute(select(Subtopic).where(Subtopic.kg_ref == subtopic_data["ref"]))
+                result = await session.execute(
+                    select(Subtopic).where(Subtopic.topic_id == topic.id, Subtopic.kg_ref == subtopic_data["ref"]))
                 subtopic = result.scalar_one_or_none()
                 if subtopic is None:
                     subtopic = Subtopic(kg_ref=subtopic_data["ref"], topic_id=topic.id)
                     session.add(subtopic)
-                subtopic.topic_id = topic.id
                 subtopic.name = subtopic_data["name"]
                 subtopics_synced += 1
                 if progress:

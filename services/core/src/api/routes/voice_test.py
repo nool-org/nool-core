@@ -2,7 +2,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import ConflictError, ForbiddenError, ValidationError
@@ -20,6 +20,7 @@ from src.domain.models import (
     SchoolClass,
     StudentProfile,
     Subject,
+    TeacherClassAssignment,
     TestStatus,
     Topic,
     User,
@@ -28,7 +29,8 @@ from src.domain.models import (
     VoiceTestTargetStudent,
 )
 from src.repositories import get_session
-from src.repositories.lookups import get_test_in_school
+from src.services.subject_grades import ensure_subjects_enabled_for_school
+from src.repositories.lookups import ensure_students_in_class, get_test_for_teacher
 from src.repositories.roster_repository import teaches_class_subject
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_tests
@@ -138,6 +140,11 @@ async def list_tests(
     result = await session.execute(
         select(VoiceTest)
         .join(SchoolClass, SchoolClass.id == VoiceTest.class_id)
+        # only tests of classes + subjects this teacher teaches
+        .join(TeacherClassAssignment, and_(
+            TeacherClassAssignment.class_id == VoiceTest.class_id,
+            TeacherClassAssignment.subject_id == VoiceTest.subject_id,
+            TeacherClassAssignment.teacher_id == user.id))
         .where(SchoolClass.school_id == user.school_id)
     )
     tests = result.scalars().all()
@@ -152,7 +159,7 @@ async def get_test(
     _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
     session: AsyncSession = Depends(get_db_session),
 ) -> VoiceTestOut:
-    test = await get_test_in_school(session, test_id, user.school_id)
+    test = await get_test_for_teacher(session, test_id, user)
     return await _serialize(session, test)
 
 
@@ -166,6 +173,14 @@ async def create_test(
 ) -> VoiceTestOut:
     if not await teaches_class_subject(session, user.id, body.class_id, body.subject_id):
         raise ForbiddenError("You don't teach that subject in that class.")
+    await ensure_subjects_enabled_for_school(session, [body.subject_id], user.school_id)
+    chapter = await session.get(Chapter, body.chapter_id)
+    if chapter is None or str(chapter.subject_id) != str(body.subject_id):
+        raise ValidationError("That chapter isn't part of this subject.")
+    if body.topic_id:
+        topic = await session.get(Topic, body.topic_id)
+        if topic is None or str(topic.chapter_id) != str(body.chapter_id):
+            raise ValidationError("That topic isn't part of this chapter.")
     if body.target.mode == AssignmentTargetMode.SPECIFIC_STUDENTS and not body.target.student_ids:
         raise ValidationError("target.studentIds must be non-empty when mode is SPECIFIC_STUDENTS.")
 
@@ -190,7 +205,11 @@ async def create_test(
     for level in body.bloom_levels:
         session.add(VoiceTestBloomLevel(test_id=test.id, bloom_level=level))
     if body.target.mode == AssignmentTargetMode.SPECIFIC_STUDENTS:
-        target_student_ids = list(body.target.student_ids or [])
+        # only students of the test's class - never another class/school
+        target_student_ids = [str(s) for s in await ensure_students_in_class(
+            session, body.target.student_ids or [], body.class_id)]
+        if not target_student_ids:
+            raise ValidationError("Pick at least one student.")
     else:
         # WHOLE_CLASS previously left VoiceTestTargetStudent completely
         # empty - every read path a student's own app uses to see "my
@@ -234,7 +253,7 @@ async def schedule_test(
     _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
     session: AsyncSession = Depends(get_db_session),
 ) -> VoiceTestOut:
-    test = await get_test_in_school(session, test_id, user.school_id)
+    test = await get_test_for_teacher(session, test_id, user)
     if test.status != TestStatus.DRAFT:
         raise ConflictError("Test isn't in a schedulable state.")
     test.status = TestStatus.SCHEDULED

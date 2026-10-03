@@ -3,15 +3,29 @@ from datetime import datetime
 from pydantic import Field, field_validator, model_validator
 
 from src.domain.models import BloomLevel, DatasetType, QuestionType
+from src.domain.models.question_paper import PaperDifficultyLevel
 
 from .common import CamelModel
 
 _CHOICE_TYPES = (QuestionType.MCQ, QuestionType.TRUE_FALSE)
 
 
+def single_grade(grade: int | None, grades: list[int]) -> int:
+    """A subject belongs to exactly one grade (see Subject's docstring).
+    `grades` is the older list form, still accepted when it has one entry."""
+    picked = {grade} if grade is not None else set(grades)
+    if len(picked) != 1:
+        raise ValueError(
+            "A subject belongs to exactly one grade - create it once per grade (e.g. Science for 9 and for 10).")
+    return picked.pop()
+
+
 class SubjectOut(CamelModel):
     id: str
     name: str
+    # The one grade this subject is for (None only for a legacy subject
+    # linked to several grades before subjects became per-grade).
+    grade: int | None = None
     # Which grades this Subject applies to - see SubjectGrade's docstring.
     # A Subject can't be newly assigned to a school or Class curriculum
     # until this is non-empty.
@@ -24,31 +38,30 @@ class SubjectOut(CamelModel):
 
 class CreateSubjectIn(CamelModel):
     name: str
-    # Required, non-empty: a Subject with no grade link can't be assigned
-    # to anything yet, so creating one without picking at least one grade
-    # would just produce a dead-end catalog row - see SubjectGrade.
-    grades: list[int] = Field(min_length=1)
+    grade: int | None = None
+    # Older list form - must hold exactly one grade when `grade` isn't given.
+    grades: list[int] = Field(default_factory=list)
     kg_subject_name: str | None = None
 
-    @field_validator("grades")
-    @classmethod
-    def _unique_grades(cls, grades: list[int]) -> list[int]:
-        return sorted(set(grades))
+    @model_validator(mode="after")
+    def _one_grade(self) -> "CreateSubjectIn":
+        self.grade = single_grade(self.grade, self.grades)
+        self.grades = [self.grade]
+        return self
 
 
 class UpdateSubjectIn(CamelModel):
     name: str
-    # Full replace of this Subject's grade links, same convention as
-    # GradeSubject/SchoolCurriculum's PUT endpoints. Required (not
-    # optional) for the same reason as CreateSubjectIn - a rename that
-    # dropped every grade would silently orphan the subject.
-    grades: list[int] = Field(min_length=1)
+    grade: int | None = None
+    # Older list form - must hold exactly one grade when `grade` isn't given.
+    grades: list[int] = Field(default_factory=list)
     kg_subject_name: str | None = None
 
-    @field_validator("grades")
-    @classmethod
-    def _unique_grades(cls, grades: list[int]) -> list[int]:
-        return sorted(set(grades))
+    @model_validator(mode="after")
+    def _one_grade(self) -> "UpdateSubjectIn":
+        self.grade = single_grade(self.grade, self.grades)
+        self.grades = [self.grade]
+        return self
 
 
 class SyncFromKgResultOut(CamelModel):
@@ -218,6 +231,10 @@ class DatasetOut(CamelModel):
     # ingested source content backing a KG Curriculum root) - see
     # DatasetType's docstring.
     type: DatasetType = DatasetType.QA
+    # Set for a school's own question bank (view-only for a Super Admin,
+    # never assignable to another school); None for a platform catalog dataset.
+    school_id: str | None = None
+    school_name: str | None = None
 
 
 class CreateDatasetIn(CamelModel):
@@ -254,6 +271,15 @@ class DatasetQuestionOut(CamelModel):
     answer: str
     created_by: str
     created_at: datetime
+    # Imported rows only (see DatasetQuestion.figures); each item gains a
+    # resolved `url` (None when ASSET_BASE_URL is unset). Text refers to
+    # them inline as [figure:N].
+    figures: list[dict] | None = None
+    solution: str | None = None
+    marks: float | None = None
+    format: str | None = None
+    subtopic_id: str | None = None
+    difficulty: PaperDifficultyLevel | None = None
 
 
 def _check_dataset_question_options(question_type: QuestionType, options: list[str] | None, answer: str) -> None:
@@ -269,11 +295,15 @@ def _check_dataset_question_options(question_type: QuestionType, options: list[s
 class CreateDatasetQuestionIn(CamelModel):
     chapter_id: str | None = None
     topic_id: str | None = None
+    subtopic_id: str | None = None
     bloom_level: BloomLevel
     question_type: QuestionType
+    difficulty: PaperDifficultyLevel | None = None
+    marks: float | None = Field(default=None, ge=0, le=20)
     text: str
     options: list[str] | None = None
     answer: str
+    solution: str | None = None
 
     @model_validator(mode="after")
     def _validate_options(self) -> "CreateDatasetQuestionIn":
@@ -284,8 +314,12 @@ class CreateDatasetQuestionIn(CamelModel):
 class UpdateDatasetQuestionIn(CamelModel):
     chapter_id: str | None = None
     topic_id: str | None = None
+    subtopic_id: str | None = None
     bloom_level: BloomLevel | None = None
     question_type: QuestionType | None = None
+    difficulty: PaperDifficultyLevel | None = None
+    marks: float | None = Field(default=None, ge=0, le=20)
     text: str | None = None
     options: list[str] | None = None
     answer: str | None = None
+    solution: str | None = None

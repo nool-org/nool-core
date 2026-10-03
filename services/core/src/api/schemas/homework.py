@@ -1,3 +1,5 @@
+from pydantic import Field
+
 from src.domain.models import BloomLevel, HomeworkDifficulty, HomeworkStatus
 
 from .bloom import BloomTarget
@@ -20,12 +22,16 @@ class HomeworkOut(CamelModel):
     status: HomeworkStatus
     assigned_count: int
     completed_count: int
+    chapter_name: str | None = None
+    # names of the targeted students (SPECIFIC_STUDENTS), in the same order as target.student_ids
+    target_student_names: list[str] | None = None
 
 
 class CreateHomeworkIn(CamelModel):
     test_id: str
     dataset_ids: list[str]
-    total_questions: int
+    # bounded: each question may cost an LLM call, and a non-positive count used to hang slot planning
+    total_questions: int = Field(ge=1, le=30)
     difficulty: HomeworkDifficulty
     bloom_distribution: list[BloomTarget]
 
@@ -46,4 +52,6 @@ class HomeworkQuestionOut(CamelModel):
 
 
 class UpdateHomeworkQuestionIn(CamelModel):
-    text: str
+    """PATCH: send text, answer or both."""
+    text: str | None = Field(default=None, min_length=1)
+    answer: str | None = Field(default=None, min_length=1)

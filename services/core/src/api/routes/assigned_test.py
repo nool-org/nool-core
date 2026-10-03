@@ -10,6 +10,7 @@ from src.api.schemas.common import ListEnvelope
 from src.domain.models import (
     Role,
     StudentTestResult,
+    TestStatus,
     Subject,
     User,
     VoiceTest,
@@ -57,7 +58,11 @@ async def list_my_tests(
     result = await session.execute(
         select(VoiceTest)
         .join(VoiceTestTargetStudent, VoiceTestTargetStudent.test_id == VoiceTest.id)
-        .where(VoiceTestTargetStudent.student_id == user.id, VoiceTest.id.not_in(already_done))
+        .where(
+            VoiceTestTargetStudent.student_id == user.id,
+            VoiceTest.id.not_in(already_done),
+            VoiceTest.status != TestStatus.DRAFT,  # a teacher's unpublished draft
+        )
     )
     items = [await _serialize(session, t) for t in result.scalars().all()]
     return ListEnvelope(items=items, total=len(items))
@@ -72,7 +77,11 @@ async def get_my_test(
     result = await session.execute(
         select(VoiceTest)
         .join(VoiceTestTargetStudent, VoiceTestTargetStudent.test_id == VoiceTest.id)
-        .where(VoiceTest.id == test_id, VoiceTestTargetStudent.student_id == user.id)
+        .where(
+            VoiceTest.id == test_id,
+            VoiceTestTargetStudent.student_id == user.id,
+            VoiceTest.status != TestStatus.DRAFT,
+        )
     )
     test = result.scalar_one_or_none()
     if test is None:

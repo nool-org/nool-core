@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,11 +11,19 @@ from .mixins import IdMixin
 class Subject(IdMixin, Base):
     """A global catalog, not per-school - SchoolCurriculum below controls
     which subjects a given school has enabled.
+
+    A subject belongs to ONE grade: "Science" grade 9 and "Science" grade 10
+    are two subjects, each with its own knowledge-graph content and so its
+    own chapters/topics/subtopics (grades don't share a syllabus). Hence
+    names are unique per grade, not globally. `grade` is NULL only for a
+    legacy subject that was linked to several grades before this rule.
     """
 
     __tablename__ = "subjects"
+    __table_args__ = (UniqueConstraint("name", "grade", name="uq_subjects_name_grade"),)
 
-    name: Mapped[str] = mapped_column(String, unique=True)
+    name: Mapped[str] = mapped_column(String)
+    grade: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # nool-kg names its graphs after the bare subject name it ingested
     # (e.g. "Science" -> Science_Grade_{grade}_NCERT) - a catalog Subject's
     # own display `name` can be anything ("Class 10 Science", "Physical
@@ -57,28 +65,39 @@ class Chapter(IdMixin, Base):
     # Stable match key for POST /admin/curriculum/sync-from-kg (see
     # admin_catalog.py) - the kg-service's Chapter node id. NULL for every
     # chapter created by hand through the ordinary admin CRUD below; only
-    # sync-written rows carry one. Unique so re-sync upserts, never
+    # sync-written rows carry one. Unique within the subject (every grade's
+    # KG numbers its chapters CH01, CH02, ...) so re-sync upserts, never
     # duplicates.
-    kg_ref: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    kg_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (UniqueConstraint("subject_id", "kg_ref", name="uq_chapters_subject_kg_ref"),)
 
 
 class Topic(IdMixin, Base):
     __tablename__ = "topics"
+    __table_args__ = (UniqueConstraint("chapter_id", "kg_ref", name="uq_topics_chapter_kg_ref"),)
 
     chapter_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chapters.id"))
     name: Mapped[str] = mapped_column(String)
-    # Same role as Chapter.kg_ref above, one level down (the KG's Section id).
-    kg_ref: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    # Same role as Chapter.kg_ref above, one level down (the KG's Section id);
+    # unique within the chapter.
+    kg_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    # The section's own textbook text (markdown) - grounding for generated
+    # questions, fetched by id. Filled by scripts/sync_curriculum_from_json.py.
+    text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Subtopic(IdMixin, Base):
     __tablename__ = "subtopics"
+    __table_args__ = (UniqueConstraint("topic_id", "kg_ref", name="uq_subtopics_topic_kg_ref"),)
 
     topic_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"))
     name: Mapped[str] = mapped_column(String)
     # Same role as Chapter.kg_ref/Topic.kg_ref, one level down (the KG's
-    # Subtopic id).
-    kg_ref: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    # Subtopic id); unique within the topic.
+    kg_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Same as Topic.text_content.
+    text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SubjectGrade(IdMixin, Base):

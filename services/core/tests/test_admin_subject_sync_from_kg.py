@@ -27,7 +27,7 @@ async def _seed_super_admin(db_session) -> User:
 
 
 async def _seed_subject(db_session, *, grades: list[int]) -> Subject:
-    subject = Subject(name=f"Science-{uuid.uuid4()}")
+    subject = Subject(name=f"Science-{uuid.uuid4()}", grade=grades[0] if len(grades) == 1 else None)
     db_session.add(subject)
     await db_session.flush()
     for grade in grades:
@@ -165,3 +165,32 @@ async def test_get_subject_kg_tree_rejects_a_grade_not_linked_to_the_subject(db_
         await admin_catalog.get_subject_kg_tree(
             str(subject.id), grade=9, kg_subject_name=None, _=actor, session=db_session
         )
+
+
+@pytest.mark.asyncio
+async def test_same_subject_name_per_grade_syncs_its_own_curriculum_with_the_same_refs(db_session, monkeypatch):
+    """Every grade's graph numbers from CH01: "Science" 9 and "Science" 10
+    must each get their own chapter/topic rows, and one grade's graph can't
+    be synced into the other grade's subject."""
+    actor = await _seed_super_admin(db_session)
+    name = f"Science-{uuid.uuid4()}"
+    nine, ten = Subject(name=name, grade=9), Subject(name=name, grade=10)
+    db_session.add_all([nine, ten])
+    await db_session.flush()
+    db_session.add_all([SubjectGrade(subject_id=nine.id, grade=9), SubjectGrade(subject_id=ten.id, grade=10)])
+    await db_session.flush()
+    monkeypatch.setattr("src.api.routes.admin_catalog.kg_client.get_curriculum_tree", _fake_tree_for(name, "SAME"))
+
+    for subject, grade in ((nine, 9), (ten, 10), (ten, 10)):  # the last one re-syncs: idempotent
+        await admin_catalog.sync_subject_from_kg(str(subject.id), SyncSubjectFromKgIn(grade=grade), actor=actor,
+                                                 session=db_session)
+
+    chapters = (await db_session.execute(select(Chapter).where(Chapter.kg_ref == "SAME-CH01",
+                                                               Chapter.subject_id.in_([nine.id, ten.id])))).scalars().all()
+    assert sorted((c.grade, c.subject_id == ten.id) for c in chapters) == [(9, False), (10, True)]
+    topics = (await db_session.execute(select(Topic).where(Topic.chapter_id.in_([c.id for c in chapters])))).scalars().all()
+    assert len(topics) == 2 and {t.kg_ref for t in topics} == {"SAME-T01"}
+
+    with pytest.raises(ValidationError):
+        await admin_catalog.sync_subject_from_kg(str(ten.id), SyncSubjectFromKgIn(grade=9), actor=actor,
+                                                 session=db_session)

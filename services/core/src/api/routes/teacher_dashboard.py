@@ -32,7 +32,7 @@ async def get_teacher_dashboard(
     assigned = await session.execute(
         select(SchoolClass)
         .join(TeacherClassAssignment, TeacherClassAssignment.class_id == SchoolClass.id)
-        .where(TeacherClassAssignment.teacher_id == user.id)
+        .where(TeacherClassAssignment.teacher_id == user.id, SchoolClass.school_id == user.school_id)
         .distinct()
     )
     classes = assigned.scalars().all()

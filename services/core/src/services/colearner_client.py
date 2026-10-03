@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -103,3 +104,42 @@ class ColearnerSession:
             await self._ws.close()
         except Exception:
             pass
+
+
+# ---- Realtime (live WebRTC voice) - plain HTTP, not the per-turn WS above ----
+
+def _http_base() -> str:
+    settings = get_settings()
+    if not settings.colearner_service_url:
+        raise ColearnerUnavailableError("COLEARNER_SERVICE_URL is not configured.")
+    return settings.colearner_service_url.rstrip("/")
+
+
+async def _realtime_post(path: str, body: dict, *, token: str, timeout: float) -> dict:
+    try:
+        async with httpx.AsyncClient(base_url=_http_base(), timeout=timeout) as client:
+            response = await client.post(path, json=body, headers={"Authorization": f"Bearer {token}"})
+    except httpx.HTTPError as exc:
+        raise ColearnerUnavailableError("Could not reach the colearner service.") from exc
+    if response.status_code == 404:
+        raise ColearnerUnavailableError("This voice session has expired - please start it again.")
+    if response.status_code >= 300:
+        raise ColearnerUnavailableError("The live voice service couldn't handle the request.")
+    return response.json()
+
+
+async def create_realtime_call(*, sdp: str, config: dict, owner_ref: str, token: str) -> dict:
+    """{"sdp": <answer>, "call_id": ...} - see colearner's routes/realtime.py."""
+    return await _realtime_post(
+        "/api/v1/colearner/realtime/calls",
+        {"sdp": sdp, "config": config, "owner_ref": owner_ref}, token=token, timeout=30.0,
+    )
+
+
+async def finish_realtime_call(*, call_id: str, owner_ref: str, token: str) -> dict:
+    """{"report", "turns", "answered", "model_completed"} - scoring runs an
+    LLM call, hence the longer timeout."""
+    return await _realtime_post(
+        f"/api/v1/colearner/realtime/calls/{call_id}/finish",
+        {"owner_ref": owner_ref}, token=token, timeout=90.0,
+    )

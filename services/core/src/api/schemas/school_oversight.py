@@ -41,7 +41,9 @@ class SchoolQuestionPaperOut(CamelModel):
     id: str
     name: str
     exam_type: str
+    subject_id: str
     subject_name: str
+    grade: int
     created_by_name: str
     status: QuestionPaperStatus
     created_at: datetime
@@ -80,6 +82,8 @@ class SchoolQuestionBankEntryOut(CamelModel):
     # HOMEWORK rows, which have no such concept. See
     # CustomQuestion.collection_name's docstring.
     collection_name: str | None = None
+    # CUSTOM rows only: the school-owned bank (dataset) the question is in.
+    dataset_id: str | None = None
 
 
 class SchoolAuditLogEntryOut(CamelModel):

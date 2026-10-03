@@ -9,7 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
 from .bloom import BloomLevel
-from .mixins import IdMixin
+from .mixins import IdMixin, TimestampMixin
 from .voice_test import AssignmentTargetMode
 
 
@@ -38,7 +38,7 @@ class StudentHomeworkStatus(str, Enum):
     COMPLETED = "COMPLETED"
 
 
-class Homework(IdMixin, Base):
+class Homework(IdMixin, TimestampMixin, Base):
     __tablename__ = "homework"
 
     test_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("voice_tests.id"))
@@ -72,6 +72,10 @@ class Homework(IdMixin, Base):
     insight_key_idea_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     insight_connection_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     insight_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set while POST /homework/{id}/generate is building questions - a second
+    # call (double click, client retry after a timeout) gets 409 instead of
+    # doubling the questions. Stale after GENERATION_LOCK_MINUTES (crash).
+    generation_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class HomeworkDataset(Base):
@@ -119,6 +123,12 @@ class HomeworkQuestion(IdMixin, Base):
     dataset_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("datasets.id"))
     text: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
+    # The question-bank row this was taken from (services/homework_builder.py);
+    # NULL for a generated question. Lets later homework skip questions the
+    # class has already had.
+    source_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dataset_questions.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class StudentHomeworkProgress(IdMixin, Base):

@@ -20,6 +20,17 @@ def _error_body(code: str, message: str) -> dict:
     }
 
 
+def validation_message(errors) -> str:
+    """The first error as "<field>: <reason>" (the model's own text for a
+    model-level rule) - never the submitted input itself."""
+    if not errors:
+        return "Invalid request."
+    first = errors[0]
+    reason = str(first.get("msg", "invalid")).removeprefix("Value error, ")
+    field = ".".join(str(p) for p in first.get("loc", ()) if p not in ("body", "query", "path", "header"))
+    return f"{field}: {reason}" if field else reason
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Registers handlers so every error - expected or not - renders the
     standard error envelope and never leaks stack traces, DB errors, or
@@ -39,7 +50,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         return JSONResponse(
             status_code=422,
-            content=_error_body("VALIDATION_ERROR", "Invalid request."),
+            content=_error_body("VALIDATION_ERROR", validation_message(exc.errors())),
         )
 
     @app.exception_handler(StarletteHTTPException)

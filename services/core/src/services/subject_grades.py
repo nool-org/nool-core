@@ -11,7 +11,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ValidationError
+from shared.errors import ConflictError, ValidationError
 
 from src.domain.models import GradeSubject, SchoolCurriculum, Subject, SubjectGrade
 
@@ -114,3 +114,52 @@ async def add_subject_grades(session: AsyncSession, subject_id, grades: set[int]
     have = {row[0] for row in existing.all()}
     for grade in grades - have:
         session.add(SubjectGrade(subject_id=subject_id, grade=grade))
+
+
+async def ensure_subjects_enabled_for_school(session: AsyncSession, subject_ids, school_id) -> None:
+    """Only a Super Admin gives a school its subjects (school_curriculum);
+    a school can assign teachers only to subjects it has been given."""
+    ids = {str(s) for s in subject_ids if s}
+    if not ids:
+        return
+    enabled = {str(row[0]) for row in (await session.execute(
+        select(SchoolCurriculum.subject_id).where(
+            SchoolCurriculum.school_id == school_id, SchoolCurriculum.enabled.is_(True),
+            SchoolCurriculum.subject_id.in_(ids))
+    )).all()}
+    if missing := ids - enabled:
+        names = [name for (name,) in (await session.execute(select(Subject.name).where(Subject.id.in_(missing)))).all()]
+        raise ValidationError(
+            f"{', '.join(sorted(names)) or 'That subject'} isn't enabled for this school - "
+            "a Super Admin assigns a school's subjects.")
+
+
+async def ensure_subjects_fit_grade(session: AsyncSession, subject_ids, grade: int, *, what: str) -> None:
+    """A subject belongs to one grade (Subject.grade): a grade-9 "Science"
+    must never be attached to a grade-10 class, paper or question bank -
+    its chapters and topics are grade 9's. Legacy grade-less subjects pass."""
+    ids = {str(s) for s in subject_ids if s}
+    if not ids:
+        return
+    mismatched = (await session.execute(
+        select(Subject.name, Subject.grade).where(
+            Subject.id.in_(ids), Subject.grade.is_not(None), Subject.grade != grade)
+    )).all()
+    if mismatched:
+        names = ", ".join(f"{name} (grade {g})" for name, g in mismatched)
+        raise ValidationError(f"{names} can't be used for {what} - it belongs to another grade.")
+
+
+async def ensure_class_grade_change_allowed(session: AsyncSession, school_class, new_grade: int) -> None:
+    """A class's subjects, tests and homework are its grade's (grade-N
+    chapters/topics). Changing the grade is only allowed while nothing is
+    attached yet - otherwise a grade-9 class would keep grade-10 content."""
+    if new_grade == school_class.grade:
+        return
+    from src.domain.models import Homework, TeacherClassAssignment, VoiceTest
+
+    for column, what in ((TeacherClassAssignment.class_id, "teacher assignments"), (VoiceTest.class_id, "tests"),
+                         (Homework.class_id, "homework")):
+        if (await session.execute(select(column).where(column == school_class.id).limit(1))).first():
+            raise ConflictError(f"This class already has {what} for grade {school_class.grade} - "
+                                f"create a new grade-{new_grade} class instead of changing this one.")

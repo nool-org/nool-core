@@ -27,7 +27,8 @@ async def list_classes(
     result = await session.execute(
         select(SchoolClass)
         .join(TeacherClassAssignment, TeacherClassAssignment.class_id == SchoolClass.id)
-        .where(TeacherClassAssignment.teacher_id == user.id)
+        # school filter too: an assignment row must never surface another school's class
+        .where(TeacherClassAssignment.teacher_id == user.id, SchoolClass.school_id == user.school_id)
         .distinct()
     )
     classes = result.scalars().all()

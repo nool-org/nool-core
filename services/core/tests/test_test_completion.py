@@ -30,6 +30,7 @@ from src.domain.models import (
     UserStatus,
     VoiceTest,
 )
+from src.services.homework_autogen import auto_generate_homework
 from src.services.test_completion import POINTS_PER_ANSWERED_QUESTION, record_test_completion
 
 
@@ -179,20 +180,30 @@ async def test_record_test_completion_auto_generates_homework_for_the_completing
     the wiring: one Homework, targeted only at the completing student, and
     not duplicated on a replay of the same completion.
     """
-    test = await _seed_test(db_session)
-    student = await _seed_student(db_session)
-    db_session.add(Dataset(name="Bank", question_count=10, description="", subject_id=test.subject_id))
-    await db_session.flush()
+    from tests.test_homework_autogen import _assign, _seed_student as _seed_class_student, _seed_test as _seed_class_test
 
-    await record_test_completion(
+    test = await _seed_class_test(db_session)   # subject enabled for the school, bank assigned to it
+    student = await _seed_class_student(db_session, test)
+    bank = Dataset(name="Bank", question_count=10, description="", subject_id=test.subject_id, grade=9)
+    db_session.add(bank)
+    await db_session.flush()
+    await _assign(db_session, test, bank)
+
+    # completion itself no longer builds the homework (it's scheduled after the
+    # results commit) - it reports "homework due" with the mastery, once.
+    first = await record_test_completion(
         db_session, student_id=student.id, test_id=test.id,
         answered=3, total_questions=5, bloom_levels=[BloomLevel.REMEMBER],
     )
     await db_session.flush()
-    await record_test_completion(
+    replay = await record_test_completion(
         db_session, student_id=student.id, test_id=test.id,
         answered=5, total_questions=5, bloom_levels=[BloomLevel.REMEMBER],
     )
+    await db_session.flush()
+    assert (first, replay) == (60, None)
+    await auto_generate_homework(db_session, test=test, student_id=student.id, mastery_percent=first,
+                                 bloom_levels=[BloomLevel.REMEMBER])  # what schedule_auto_homework runs
     await db_session.flush()
 
     rows = (await db_session.execute(select(Homework).where(Homework.test_id == test.id))).scalars().all()
@@ -228,33 +239,21 @@ async def test_points_are_not_re_awarded_by_homework_confirmation(db_session):
     asserts StudentPoints never moves past what the original Test awarded;
     confirming Homework has no points-awarding effect of its own.
     """
-    school = School(name=f"School-{uuid.uuid4()}", board="CBSE", city="Bengaluru", contact_email="a@b.com")
-    subject = Subject(name=f"Subject-{uuid.uuid4()}")
-    db_session.add_all([school, subject])
-    await db_session.flush()
-    student = User(
-        firebase_uid=f"student-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com",
-        display_name="Student", role=Role.STUDENT, school_id=school.id, status=UserStatus.ACTIVE,
-    )
-    db_session.add(student)
-    await db_session.flush()
-    school_class = SchoolClass(school_id=school.id, grade=9, section=str(uuid.uuid4())[:1].upper())
-    chapter = Chapter(subject_id=subject.id, name="Chapter 1")
-    db_session.add_all([school_class, chapter])
-    await db_session.flush()
-    test = VoiceTest(
-        class_id=school_class.id, subject_id=subject.id, chapter_id=chapter.id, topic_id=None,
-        duration_minutes=20, completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS,
-    )
-    db_session.add(test)
-    await db_session.flush()
-    db_session.add(Dataset(name="Bank", question_count=10, description="", subject_id=subject.id))
-    await db_session.flush()
+    from tests.test_homework_autogen import _assign, _seed_student as _seed_class_student, _seed_test as _seed_class_test
 
-    await record_test_completion(
+    test = await _seed_class_test(db_session)
+    student = await _seed_class_student(db_session, test)
+    bank = Dataset(name="Bank", question_count=10, description="", subject_id=test.subject_id, grade=9)
+    db_session.add(bank)
+    await db_session.flush()
+    await _assign(db_session, test, bank)
+
+    mastery = await record_test_completion(
         db_session, student_id=student.id, test_id=test.id,
         answered=4, total_questions=5, bloom_levels=[BloomLevel.REMEMBER],
     )
+    await auto_generate_homework(db_session, test=await db_session.get(VoiceTest, test.id), student_id=student.id,
+                                 mastery_percent=mastery, bloom_levels=[BloomLevel.REMEMBER])
     await db_session.flush()
     points_after_test = (
         await db_session.execute(select(StudentPoints).where(StudentPoints.student_id == student.id))

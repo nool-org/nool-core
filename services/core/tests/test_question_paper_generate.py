@@ -12,7 +12,10 @@ import pytest
 from src.api.routes import question_paper
 from src.api.schemas.dataset import DatasetShare
 from src.api.schemas.question_paper import CreateQuestionPaperIn
-from src.domain.models import Chapter, Dataset, DatasetType, Role, School, Subject, User, UserStatus
+from src.domain.models import (
+    Chapter, Dataset, DatasetType, Role, School, SchoolClass, SchoolCurriculum, SchoolDataset, Subject, TeacherClassAssignment,
+    User, UserStatus,
+)
 
 
 async def _seed_paper_ready_to_generate(db_session) -> tuple[User, dict]:
@@ -20,7 +23,7 @@ async def _seed_paper_ready_to_generate(db_session) -> tuple[User, dict]:
     db_session.add(school)
     await db_session.flush()
 
-    subject = Subject(name=f"Mathematics-{uuid.uuid4()}")
+    subject = Subject(name=f"Mathematics-{uuid.uuid4()}", grade=8)
     db_session.add(subject)
     await db_session.flush()
 
@@ -32,7 +35,11 @@ async def _seed_paper_ready_to_generate(db_session) -> tuple[User, dict]:
         firebase_uid=f"t-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com",
         display_name="Teacher", role=Role.TEACHER, school_id=school.id, status=UserStatus.ACTIVE,
     )
-    db_session.add(teacher)
+    section = SchoolClass(school_id=school.id, grade=8, section="A")
+    db_session.add_all([teacher, section])
+    await db_session.flush()
+    db_session.add_all([TeacherClassAssignment(teacher_id=teacher.id, class_id=section.id, subject_id=subject.id),
+                        SchoolCurriculum(school_id=school.id, subject_id=subject.id, enabled=True)])
     await db_session.flush()
 
     paper = await question_paper.create_paper(
@@ -69,19 +76,21 @@ async def test_generate_paper_passes_the_papers_own_subject_board_and_grade_to_t
 
 
 @pytest.mark.asyncio
-async def test_generate_paper_prefers_its_shared_datasets_board_and_grade_over_its_own(
+async def test_generate_paper_prefers_its_shared_datasets_board_over_its_own(
     db_session, monkeypatch,
 ):
-    """A Dataset *is* a KG root (e.g. "10th Science") - if the paper shares
-    from one that has board/grade set, that's the authoritative scope,
-    even though the paper's own (denormalized-at-creation) board/grade
-    say something else."""
+    """A Dataset *is* a KG root (e.g. "8th Maths, CBSE") - if the paper shares
+    from one that has a board set, that's the authoritative scope, even
+    though the paper's own (denormalized-at-creation) board says something
+    else. Its grade must be the paper's (a mismatch is refused at update)."""
     teacher, seeded = await _seed_paper_ready_to_generate(db_session)
     kg_dataset = Dataset(
-        name="10th Science", question_count=0, description="",
-        subject_id=seeded["subject"].id, board="CBSE", grade=10, type=DatasetType.PRIMARY_CONTENT,
+        name="8th Maths", question_count=0, description="",
+        subject_id=seeded["subject"].id, board="CBSE", grade=8, type=DatasetType.PRIMARY_CONTENT,
     )
     db_session.add(kg_dataset)
+    await db_session.flush()
+    db_session.add(SchoolDataset(school_id=teacher.school_id, dataset_id=kg_dataset.id, enabled=True))
     await db_session.flush()
 
     await question_paper.update_paper(
@@ -109,4 +118,4 @@ async def test_generate_paper_prefers_its_shared_datasets_board_and_grade_over_i
     await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
 
     assert captured["board"] == "CBSE"
-    assert captured["grade"] == 10
+    assert captured["grade"] == 8

@@ -47,6 +47,30 @@ async def _get_or_create_state(session: AsyncSession, student_id) -> StudentGami
     return state
 
 
+SESSION_XP = 50  # matches the app's FLAT_SESSION_XP ("Finish for +50 XP")
+HINT_XP_COST = 5  # matches the app's HINT_XP_COST
+
+
+def session_xp(hints_used: int) -> int:
+    return max(0, SESSION_XP - max(hints_used, 0) * HINT_XP_COST)
+
+
+async def apply_xp(session: AsyncSession, student_id, xp_earned: int, goal_key: str | None = None) -> StudentGamification:
+    """Adds XP (rolling over levels) and optionally marks a daily goal done.
+    Caller commits."""
+    state = await _get_or_create_state(session, student_id)
+    xp = state.xp + max(xp_earned, 0)
+    level = state.level
+    while xp >= state.xp_for_next_level:
+        xp -= state.xp_for_next_level
+        level += 1
+    state.xp = xp
+    state.level = level
+    if goal_key:
+        await _mark_goal_complete(session, student_id, goal_key)
+    return state
+
+
 async def _completed_goal_keys_today(session: AsyncSession, student_id) -> set[str]:
     today = datetime.now(timezone.utc).date()
     result = await session.execute(
@@ -171,19 +195,10 @@ async def award_session_xp(
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> StudentGamificationOut:
-    state = await _get_or_create_state(session, user.id)
-
-    xp = state.xp + body.xp_earned
-    level = state.level
-    while xp >= state.xp_for_next_level:
-        xp -= state.xp_for_next_level
-        level += 1
-    state.xp = xp
-    state.level = level
-
-    if body.completed_goal_id:
-        await _mark_goal_complete(session, user.id, body.completed_goal_id)
-
+    # Voice-test XP is awarded server-side at completion (ai_assessor.py's
+    # _record_completion); this client-reported award is capped so it can't
+    # be used to mint XP.
+    state = await apply_xp(session, user.id, min(body.xp_earned, SESSION_XP), body.completed_goal_id)
     await session.commit()
 
     completed_keys = await _completed_goal_keys_today(session, user.id)

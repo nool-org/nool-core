@@ -1,3 +1,4 @@
+from typing import Annotated
 import csv
 import io
 
@@ -110,8 +111,8 @@ from src.domain.models import (
     AssistantMessage,
     AuditLog,
     Chapter,
-    CustomQuestion,
     Dataset,
+    DatasetQuestion,
     GradeSubject,
     Homework,
     HomeworkQuestion,
@@ -127,7 +128,6 @@ from src.domain.models import (
     School,
     SchoolClass,
     SchoolCurriculum,
-    SchoolDataset,
     SchoolGrade,
     SchoolStatus,
     StudentHomeworkProgress,
@@ -149,6 +149,12 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestTargetStudent,
 )
+from src.services.subject_grades import (
+    ensure_class_grade_change_allowed, ensure_subjects_enabled_for_school, ensure_subjects_fit_grade,
+)
+from src.repositories.lookups import ensure_teachers_of_school, get_class_in_school
+from src.api.routes.school_oversight import question_bank_entries
+from src.repositories.dataset_access import assign_catalog_datasets, school_dataset_listing, subject_names
 from src.repositories import audit_repository
 from src.repositories.roster_repository import (
     get_or_create_grade,
@@ -282,6 +288,7 @@ async def create_school(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> SchoolOut:
+    await _assignable_plan(session, body.plan_id)
     school = School(
         name=body.name,
         board=body.board,
@@ -471,6 +478,13 @@ async def list_plans(
     return ListEnvelope(items=items, total=len(items))
 
 
+async def _assignable_plan(session: AsyncSession, plan_id) -> Plan:
+    plan = await _get_plan(session, plan_id)
+    if not plan.active:
+        raise ValidationError(f'The "{plan.name}" plan is inactive - pick an active plan.')
+    return plan
+
+
 async def _plan_name_taken(session: AsyncSession, name: str, *, exclude_plan_id: str | None = None) -> bool:
     query = select(Plan.id).where(Plan.name == name)
     if exclude_plan_id is not None:
@@ -518,10 +532,14 @@ async def update_plan(
     if body.name is not None and await _plan_name_taken(session, body.name, exclude_plan_id=plan_id):
         raise ConflictError(f'A plan named "{body.name}" already exists.')
 
-    for field in ("name", "price_label", "teacher_limit", "student_limit", "test_limit", "question_paper_limit", "active"):
+    for field in ("name", "price_label", "teacher_limit", "student_limit", "active"):
         value = getattr(body, field)
         if value is not None:
             setattr(plan, field, value)
+    # these may be unlimited: an explicit null clears the limit, omitted keeps it
+    for field in ("test_limit", "question_paper_limit"):
+        if field in body.model_fields_set:
+            setattr(plan, field, getattr(body, field))
 
     await audit_repository.record(
         session, actor_id=actor.id, action="plan.updated", target_type="plan", target_id=plan_id
@@ -606,9 +624,7 @@ async def create_school_subscription(
     if existing.scalar_one_or_none() is not None:
         raise ConflictError("This school already has a subscription - use PUT to change it instead.")
 
-    plan_result = await session.execute(select(Plan).where(Plan.id == body.plan_id))
-    if plan_result.scalar_one_or_none() is None:
-        raise NotFoundError(f'No plan with id "{body.plan_id}".')
+    await _assignable_plan(session, body.plan_id)
 
     sub = Subscription(
         school_id=school_id,
@@ -638,10 +654,7 @@ async def update_school_subscription(
         raise NotFoundError(f'No subscription for school "{school_id}".')
 
     if body.plan_id is not None:
-        plan_result = await session.execute(select(Plan).where(Plan.id == body.plan_id))
-        plan = plan_result.scalar_one_or_none()
-        if plan is None:
-            raise NotFoundError(f'No plan with id "{body.plan_id}".')
+        plan = await _assignable_plan(session, body.plan_id)
         teacher_count, student_count = await _counts_for_school(session, school_id)
         if teacher_count > plan.teacher_limit or student_count > plan.student_limit:
             raise ConflictError("New plan's limit is below the school's current seat usage.")
@@ -1190,6 +1203,7 @@ async def create_student_as_admin(
     session: AsyncSession = Depends(get_db_session),
 ) -> CreateStudentOut:
     await _get_school(session, school_id)
+    await get_class_in_school(session, body.class_id, school_id)  # the class must be this school's
     plan = await get_active_plan(session, school_id)
     if plan is not None:
         current = await count_students(session, school_id)
@@ -1362,6 +1376,7 @@ async def update_student_as_admin(
 ) -> SchoolStudentOut:
     student_user, profile = await _get_student(session, student_id)
     if body.class_id is not None:
+        await get_class_in_school(session, body.class_id, student_user.school_id)  # stay within the school
         profile.class_id = body.class_id
     if body.status is not None:
         student_user.status = body.status
@@ -1568,6 +1583,7 @@ async def update_class_as_admin(
 ) -> SchoolAdminClassOut:
     school_class = await _get_class(session, class_id)
     old_label = f"Class {school_class.grade} · {school_class.section}"
+    await ensure_class_grade_change_allowed(session, school_class, body.grade)
     if body.grade != school_class.grade:
         grade_row = await get_or_create_grade(session, school_class.school_id, body.grade)
         school_class.grade_id = grade_row.id
@@ -1749,7 +1765,7 @@ async def _grade_subjects_out(session: AsyncSession, grade_id: str, grade: int) 
         grade_id=grade_id,
         subjects=[
             SubjectToggle(
-                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
+                id=str(s.id), name=s.name, grade=s.grade, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
             )
             for s in subjects
         ],
@@ -1780,6 +1796,7 @@ async def update_grade_subjects_as_admin(
     enabled_ids = set(body.subject_ids)
     new_grants = enabled_ids - set(by_subject.keys())
     await validate_new_grants_for_grade(session, new_grants, school_grade.grade)
+    await ensure_subjects_enabled_for_school(session, new_grants, school_grade.school_id)
 
     for subject_id, row in by_subject.items():
         row.enabled = subject_id in enabled_ids
@@ -1812,6 +1829,12 @@ async def update_class_assignments_as_admin(
         await session.delete(row)
     await session.flush()
 
+    # a grade-10 class can only be taught grade-10 subjects (their chapters/topics)
+    await ensure_subjects_fit_grade(session, [a.subject_id for a in body.assignments], school_class.grade,
+                                    what=f"a grade-{school_class.grade} class")
+    await ensure_subjects_enabled_for_school(session, [a.subject_id for a in body.assignments],
+                                             school_class.school_id)
+    await ensure_teachers_of_school(session, [a.teacher_id for a in body.assignments], school_class.school_id)
     for a in body.assignments:
         session.add(
             TeacherClassAssignment(teacher_id=a.teacher_id, class_id=class_id, subject_id=a.subject_id)
@@ -1843,7 +1866,7 @@ async def get_curriculum_as_admin(
         board="",
         subjects=[
             SubjectToggle(
-                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
+                id=str(s.id), name=s.name, grade=s.grade, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
             )
             for s in subjects
         ],
@@ -1907,17 +1930,19 @@ async def create_subject_as_admin(
     if not name:
         raise ConflictError("Subject name can't be empty.")
 
-    existing = await session.execute(select(Subject).where(func.lower(Subject.name) == name.lower()))
+    # subjects are per grade: reuse this name's subject for *this* grade only
+    existing = await session.execute(
+        select(Subject).where(func.lower(Subject.name) == name.lower(), Subject.grade == body.grade))
     subject = existing.scalar_one_or_none()
     if subject is None:
-        subject = Subject(name=name)
+        subject = Subject(name=name, grade=body.grade)
         session.add(subject)
         await session.flush()
         await audit_repository.record(
             session, actor_id=actor.id, action="subject.created", target_type="subject", target_id=str(subject.id),
             detail=subject.name,
         )
-    await add_subject_grades(session, subject.id, set(body.grades))
+    await add_subject_grades(session, subject.id, {body.grade})
 
     curriculum_row = await session.execute(
         select(SchoolCurriculum).where(
@@ -1936,60 +1961,45 @@ async def create_subject_as_admin(
     await session.commit()
     grades_map = await grades_by_subject(session, [subject.id])
     return SubjectToggle(
-        id=str(subject.id), name=subject.name, enabled=True, grades=grades_map.get(str(subject.id), [])
+        id=str(subject.id), name=subject.name, grade=subject.grade, enabled=True, grades=grades_map.get(str(subject.id), [])
     )
 
 
-@router.get("/schools/{school_id}/datasets", summary="View a school's enabled datasets (cross-tenant)")
+@router.get("/schools/{school_id}/datasets", summary="A school's datasets: assigned catalog + its own (cross-tenant)")
 async def get_datasets_as_admin(
     school_id: str,
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolDatasetOut]:
+    """Every catalog dataset with whether it's assigned to this school
+    (`enabled`), plus the school's own datasets (`owned`, view only here)."""
     await _get_school(session, school_id)
-    datasets_result = await session.execute(select(Dataset))
-    datasets = datasets_result.scalars().all()
-    enabled_result = await session.execute(
-        select(SchoolDataset.dataset_id).where(
-            SchoolDataset.school_id == school_id, SchoolDataset.enabled.is_(True)
-        )
-    )
-    enabled_ids = {row[0] for row in enabled_result.all()}
+    listing = await school_dataset_listing(session, school_id, include_unassigned=True)
+    names = await subject_names(session, [d for d, *_ in listing])
     items = [
         SchoolDatasetOut(
-            id=str(d.id),
-            name=d.name,
-            question_count=d.question_count,
-            description=d.description,
-            enabled=d.id in enabled_ids,
-            restricted=d.restricted,
+            id=str(d.id), name=d.name, question_count=d.question_count, description=d.description,
+            enabled=assigned, restricted=d.restricted, owned=owned, subject_enabled=subject_on,
+            subject_id=str(d.subject_id) if d.subject_id else None, subject_name=names.get(d.subject_id),
+            grade=d.grade,
         )
-        for d in datasets
+        for d, assigned, owned, subject_on in listing
     ]
     return ListEnvelope(items=items, total=len(items))
 
 
-@router.put("/schools/{school_id}/datasets", summary="Enable/disable datasets for a school (cross-tenant)")
+@router.put("/schools/{school_id}/datasets", summary="Assign catalog datasets to a school (cross-tenant)")
 async def update_datasets_as_admin(
     school_id: str,
     body: UpdateSchoolDatasetsIn,
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolDatasetOut]:
+    """`datasetIds` = the full set of catalog datasets the school should have.
+    Only a Super Admin assigns datasets; a school's own datasets aren't part
+    of this (and can't be assigned to another school)."""
     await _get_school(session, school_id)
-    existing = await session.execute(
-        select(SchoolDataset).where(SchoolDataset.school_id == school_id)
-    )
-    # Keyed by str(dataset_id), same reasoning as school_admin.py's
-    # update_school_datasets: body.dataset_ids is list[str] off the wire,
-    # while row.dataset_id is a UUID object.
-    by_dataset = {str(row.dataset_id): row for row in existing.scalars().all()}
-
-    enabled_ids = set(body.dataset_ids)
-    for dataset_id, row in by_dataset.items():
-        row.enabled = dataset_id in enabled_ids
-    for dataset_id in enabled_ids - set(by_dataset.keys()):
-        session.add(SchoolDataset(school_id=school_id, dataset_id=dataset_id, enabled=True))
+    await assign_catalog_datasets(session, school_id, body.dataset_ids)
     await audit_repository.record(
         session, actor_id=actor.id, action="datasets.updated", target_type="school", target_id=school_id
     )
@@ -2000,18 +2010,24 @@ async def update_datasets_as_admin(
 
 @router.get("/audit-log")
 async def list_audit_log(
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[AuditLogEntryOut]:
-    result = await session.execute(select(AuditLog).order_by(AuditLog.created_at.desc()))
+    total = (await session.execute(select(func.count()).select_from(AuditLog))).scalar_one()
+    result = await session.execute(
+        select(AuditLog, User.display_name).outerjoin(User, User.id == AuditLog.actor_id)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id).limit(limit).offset(offset)
+    )
     items = [
         AuditLogEntryOut(
-            id=str(a.id), actor_id=str(a.actor_id), action=a.action,
-            target_type=a.target_type, target_id=a.target_id, created_at=a.created_at,
+            id=str(a.id), actor_id=str(a.actor_id), actor_name=actor_name, action=a.action,
+            target_type=a.target_type, target_id=a.target_id, detail=a.detail, created_at=a.created_at,
         )
-        for a in result.scalars().all()
+        for a, actor_name in result.all()
     ]
-    return ListEnvelope(items=items, total=len(items))
+    return ListEnvelope(items=items, total=total)
 
 
 @router.get("/upgrade-requests", summary="Super Admin's upgrade-request inbox")
@@ -2354,7 +2370,9 @@ async def list_school_question_papers_as_admin(
             id=str(paper.id),
             name=paper.name,
             exam_type=paper.exam_type,
+            subject_id=str(paper.subject_id),
             subject_name=subject.name,
+            grade=paper.grade,
             created_by_name=creator.display_name,
             status=paper.status,
             created_at=paper.created_at,
@@ -2468,119 +2486,16 @@ async def list_school_question_bank_as_admin(
     # for "the general bank" - keeps the two cases unambiguous rather
     # than relying on empty-string-vs-omitted query semantics.
     general_bank_only: bool = Query(default=False, alias="generalBankOnly", description="True = only rows with no named set"),
+    dataset_id: Annotated[str | None, Query(alias="datasetId", description="One own bank, CUSTOM rows only")] = None,
     limit: int = 50,
     offset: int = 0,
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolQuestionBankEntryOut]:
-    """Not a separate table - every Question Paper and Homework a teacher
-    has ever generated already has its questions sitting in
-    QuestionPaperQuestion/HomeworkQuestion; this just surfaces all of it in
-    one school-wide, topic-labelled view instead of it being locked inside
-    whichever paper/homework it was first generated for. The two sources
-    are fetched and merged in Python rather than one SQL UNION - they
-    don't share a topic/answer shape (paper questions have no per-question
-    topic or answer; homework questions have both, just keyed differently)
-    - and school-scale volumes make that entirely fine perf-wise.
-    """
     await _get_school(session, school_id)
-    entries: list[SchoolQuestionBankEntryOut] = []
-
-    if source is None or source == "QUESTION_PAPER":
-        paper_rows = (
-            await session.execute(
-                select(QuestionPaperQuestion, QuestionPaper, Subject)
-                .join(QuestionPaper, QuestionPaper.id == QuestionPaperQuestion.paper_id)
-                .join(Subject, Subject.id == QuestionPaper.subject_id)
-                .where(QuestionPaper.school_id == school_id)
-            )
-        ).all()
-        paper_ids = {paper.id for _, paper, _ in paper_rows}
-        topics_by_paper: dict = {}
-        if paper_ids:
-            topic_rows = await session.execute(
-                select(QuestionPaperTopic.paper_id, Topic.name)
-                .join(Topic, Topic.id == QuestionPaperTopic.topic_id)
-                .where(QuestionPaperTopic.paper_id.in_(paper_ids))
-            )
-            for paper_id, topic_name in topic_rows.all():
-                topics_by_paper.setdefault(paper_id, []).append(topic_name)
-        for question, paper, subject in paper_rows:
-            topic_names = topics_by_paper.get(paper.id)
-            entries.append(
-                SchoolQuestionBankEntryOut(
-                    id=str(question.id), text=question.text, answer=None,
-                    bloom_level=question.bloom_level, subject_name=subject.name,
-                    topic_label=", ".join(topic_names) if topic_names else subject.name,
-                    source="QUESTION_PAPER", source_name=paper.name, created_at=paper.created_at,
-                )
-            )
-
-    if source is None or source == "HOMEWORK":
-        hw_rows = (
-            await session.execute(
-                select(HomeworkQuestion, Homework, SchoolClass, VoiceTest.subject_id)
-                .join(Homework, Homework.id == HomeworkQuestion.homework_id)
-                .join(SchoolClass, SchoolClass.id == Homework.class_id)
-                .join(VoiceTest, VoiceTest.id == Homework.test_id)
-                .where(SchoolClass.school_id == school_id)
-            )
-        ).all()
-        subject_ids = {subject_id for *_, subject_id in hw_rows}
-        subject_names: dict = {}
-        if subject_ids:
-            subject_result = await session.execute(select(Subject).where(Subject.id.in_(subject_ids)))
-            subject_names = {s.id: s.name for s in subject_result.scalars().all()}
-        for question, hw, school_class, subject_id in hw_rows:
-            entries.append(
-                SchoolQuestionBankEntryOut(
-                    id=str(question.id), text=question.text, answer=question.answer,
-                    bloom_level=question.bloom_level, subject_name=subject_names.get(subject_id, ""),
-                    topic_label=hw.gap_topic, source="HOMEWORK",
-                    source_name=_class_label(school_class), created_at=None,
-                )
-            )
-
-    if source is None or source == "CUSTOM":
-        # Outer join on class - a grade-level question (CustomQuestion.
-        # class_id NULL, grade set instead) has no single SchoolClass row.
-        custom_rows = (
-            await session.execute(
-                select(CustomQuestion, Subject, Chapter, Topic, SchoolClass)
-                .join(Subject, Subject.id == CustomQuestion.subject_id)
-                .join(Chapter, Chapter.id == CustomQuestion.chapter_id)
-                .outerjoin(Topic, Topic.id == CustomQuestion.topic_id)
-                .outerjoin(SchoolClass, SchoolClass.id == CustomQuestion.class_id)
-                .where(CustomQuestion.school_id == school_id)
-            )
-        ).all()
-        for question, subject, chapter, question_topic, school_class in custom_rows:
-            source_name = _class_label(school_class) if school_class else f"Class {question.grade} (all sections)"
-            entries.append(
-                SchoolQuestionBankEntryOut(
-                    id=str(question.id), text=question.text, answer=question.answer,
-                    bloom_level=question.bloom_level, subject_name=subject.name,
-                    topic_label=question_topic.name if question_topic else chapter.name,
-                    source="CUSTOM", source_name=source_name, created_at=question.created_at,
-                    collection_name=question.collection_name,
-                )
-            )
-
-    if topic:
-        needle = topic.strip().lower()
-        entries = [e for e in entries if needle in e.topic_label.lower()]
-
-    if general_bank_only:
-        entries = [e for e in entries if e.collection_name is None]
-    elif collection_name:
-        entries = [e for e in entries if e.collection_name == collection_name]
-
-    # created_at=None (Homework has no timestamp column at all) sorts last,
-    # not first - datetime.min is the oldest possible instant, so it never
-    # outranks a real date under reverse=True (newest-first).
-    entries.sort(key=lambda e: e.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    total = len(entries)
-    return ListEnvelope(items=entries[offset : offset + limit], total=total)
+    return await question_bank_entries(
+        session, school_id, source=source, topic=topic, collection_name=collection_name,
+        general_bank_only=general_bank_only, dataset_id=dataset_id, limit=limit, offset=offset)
 
 
 # --- Advanced Reporting (Super Admin) ---------------------------------------

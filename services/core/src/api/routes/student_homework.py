@@ -57,7 +57,8 @@ async def get_current_homework(
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> CurrentHomeworkResponse:
-    """homework: null when nothing is assigned right now - a real empty state."""
+    """homework: null when nothing is assigned right now - a real empty state.
+    With several open, the newest one that hasn't expired."""
     result = await session.execute(
         select(StudentHomeworkProgress, Homework)
         .join(Homework, Homework.id == StudentHomeworkProgress.homework_id)
@@ -65,12 +66,28 @@ async def get_current_homework(
             StudentHomeworkProgress.student_id == user.id,
             StudentHomeworkProgress.status != StudentHomeworkStatus.COMPLETED,
         )
+        .order_by(StudentHomeworkProgress.expired, Homework.created_at.desc(), Homework.id)
         .limit(1)
     )
     row = result.first()
     if row is None:
         return CurrentHomeworkResponse(homework=None)
-    progress, hw = row
+    return _overview(*row)
+
+
+@router.get("/me/homework/{homework_id}")
+async def get_my_homework(
+    homework_id: str,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> CurrentHomeworkResponse:
+    """One of the caller's homework by id (same envelope as /current) - 404
+    unless it's assigned to them."""
+    progress = await _progress_in(session, homework_id, user.id)
+    return _overview(progress, await session.get(Homework, progress.homework_id))
+
+
+def _overview(progress: StudentHomeworkProgress, hw: Homework) -> CurrentHomeworkResponse:
     return CurrentHomeworkResponse(
         homework=StudentHomeworkOverviewOut(
             homework_id=str(hw.id),

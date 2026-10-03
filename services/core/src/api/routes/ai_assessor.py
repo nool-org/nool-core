@@ -1,11 +1,12 @@
 import asyncio
 import time
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import UnauthorizedError
+from shared.errors import ForbiddenError, NotFoundError, UnauthorizedError
 from shared.logging import get_logger
 
 from src.api.deps import get_current_user, get_db_session, require_feature
@@ -15,12 +16,16 @@ from src.api.schemas.ai_assessor import (
     ErrorEvent,
     ErrorPayload,
     ExitedEvent,
+    FinishSessionIn,
+    FinishSessionOut,
     HintEvent,
     OpenSessionIn,
     OpenSessionOut,
     ProgressEvent,
     QuestionEvent,
     QuestionPayload,
+    RealtimeAnswerOut,
+    RealtimeOfferIn,
     SessionSummary,
     TimedOutEvent,
     TimerEvent,
@@ -36,18 +41,29 @@ from src.domain.models import (
     School,
     SchoolClass,
     Subject,
+    TestStatus,
     User,
     VoiceTest,
+    Role,
+    VoiceTestTargetStudent,
 )
 from src.repositories import get_by_firebase_uid, get_session
-from src.services.colearner_client import ColearnerSession, ColearnerUnavailableError
+from src.services.colearner_client import (
+    ColearnerSession,
+    ColearnerUnavailableError,
+    create_realtime_call,
+    finish_realtime_call,
+)
+from src.api.routes.gamification import apply_xp, session_xp
 from src.services.evaluation_service import evaluate_colearner_session
+from src.services.homework_autogen import schedule_auto_homework
 from src.services.test_completion import record_test_completion
 
 router = APIRouter(prefix="/api/v1", tags=["ai-assessor"])
 logger = get_logger(__name__)
 
 _DEFAULT_PIPELINE = "chained"
+VOICE_TEST_GOAL_KEY = "goal-finish-voice-test"
 
 
 @router.post("/ai-assessor/sessions", status_code=201, summary="Open a session")
@@ -56,6 +72,23 @@ async def open_session(
     app_user: User = Depends(require_feature(Feature.VOICE_TEST)),
     db: AsyncSession = Depends(get_db_session),
 ) -> OpenSessionOut:
+    if body.test_id is not None:
+        # A test session only for a student the test actually targets - it
+        # streams the test's content and completing it records results on
+        # the test, so it must never open against another class/school's test.
+        if app_user.role != Role.STUDENT:
+            raise ForbiddenError("Only a student the test is assigned to can take it.")
+        targeted = (await db.execute(
+            select(VoiceTestTargetStudent.id)
+            .join(VoiceTest, VoiceTest.id == VoiceTestTargetStudent.test_id)
+            .where(
+                VoiceTestTargetStudent.test_id == body.test_id,
+                VoiceTestTargetStudent.student_id == app_user.id,
+                VoiceTest.status != TestStatus.DRAFT,  # not published yet
+            )
+        )).first()
+        if targeted is None:
+            raise NotFoundError("This test isn't assigned to you.")
     ai_session = AiAssessorSession(
         student_id=app_user.id,
         test_id=body.test_id,
@@ -88,6 +121,126 @@ def _headline_from(text: str, *, limit: int = 80) -> str:
     return text.strip()[:limit]
 
 
+async def _colearner_config(
+    db: AsyncSession, ai_session: AiAssessorSession, bloom_levels: list[BloomLevel]
+) -> tuple[dict, int]:
+    """colearner's SessionConfig for this session, plus its question count."""
+    test = await db.get(VoiceTest, ai_session.test_id) if ai_session.test_id else None
+    chapter = await db.get(Chapter, test.chapter_id) if test else None
+    subject = await db.get(Subject, test.subject_id) if test else None
+    school_class = await db.get(SchoolClass, test.class_id) if test else None
+
+    num_questions = max(len(bloom_levels), 2)
+    config = {
+        "grade": f"Grade {school_class.grade}" if school_class else ai_session.context_label,
+        "subject": subject.name if subject else ai_session.context_label,
+        "chapter_name": chapter.name if chapter else ai_session.context_label,
+        "num_questions": num_questions,
+        "blooms_attributes": [level.value for level in bloom_levels] or [BloomLevel.UNDERSTAND.value],
+        "session_max_time_seconds": ai_session.duration_seconds,
+    }
+    # Both keys must be OMITTED, not set to None, when there's nothing to
+    # ground the session in - colearner's SessionConfig.reference_questions
+    # is a plain (non-Optional) list with a default_factory, so an explicit
+    # `null` fails Pydantic validation instead of falling back to it (only
+    # a genuinely absent key does). See Phase 2's _generate_reference_content
+    # in voice_test.py for when these are actually populated.
+    if test and test.textbook_context:
+        config["textbook_context"] = test.textbook_context
+    if test and test.reference_questions:
+        config["reference_questions"] = test.reference_questions
+    return config, num_questions
+
+
+async def _record_completion(
+    ai_session: AiAssessorSession, bloom_levels: list[BloomLevel], final_report: dict | None,
+    answered: int, num_questions: int, hints_used: int = 0,
+) -> None:
+    """Scores the colearner report and records the test result, XP (first
+    completion only) and auto homework. No-op for a session not tied to a test."""
+    if ai_session.test_id is None:
+        return
+    evaluation = evaluate_colearner_session(final_report, bloom_levels)
+    scores = {}
+    if evaluation is not None:
+        mastery_percent, bloom_scores = evaluation
+        scores = {"mastery_percent": mastery_percent, "bloom_scores": bloom_scores}
+    async with get_session() as completion_db:
+        homework_mastery = await record_test_completion(
+            completion_db,
+            student_id=ai_session.student_id,
+            test_id=ai_session.test_id,
+            answered=answered,
+            total_questions=num_questions,
+            bloom_levels=bloom_levels,
+            **scores,
+        )
+        if homework_mastery is not None:  # first completion of this test
+            await apply_xp(completion_db, ai_session.student_id, session_xp(hints_used), VOICE_TEST_GOAL_KEY)
+        await completion_db.commit()
+    if homework_mastery is not None:
+        # after the results are saved; runs on its own and never blocks `completed`
+        schedule_auto_homework(test_id=ai_session.test_id, student_id=ai_session.student_id,
+                               mastery_percent=homework_mastery, bloom_levels=bloom_levels)
+
+
+async def _owned_session(db: AsyncSession, session_id: str, app_user: User) -> tuple[AiAssessorSession, list[BloomLevel]]:
+    ai_session = await db.get(AiAssessorSession, session_id)
+    if ai_session is None or ai_session.student_id != app_user.id:
+        raise NotFoundError("Voice session not found.")
+    bloom_levels = list((await db.execute(
+        select(AiAssessorSessionBloomLevel.bloom_level).where(AiAssessorSessionBloomLevel.session_id == ai_session.id)
+    )).scalars().all())
+    return ai_session, bloom_levels
+
+
+def _bearer(authorization: str | None) -> str:
+    return (authorization or "").split(" ", 1)[-1].strip()
+
+
+@router.post("/ai-assessor/sessions/{session_id}/realtime", summary="Connect live voice (WebRTC offer/answer)")
+async def realtime_offer(
+    session_id: str,
+    body: RealtimeOfferIn,
+    authorization: str | None = Header(default=None),
+    app_user: User = Depends(require_feature(Feature.VOICE_TEST)),
+    db: AsyncSession = Depends(get_db_session),
+) -> RealtimeAnswerOut:
+    """The app's WebRTC SDP offer in, the live call's SDP answer out. Audio
+    then flows directly between the app and the voice model; colearner
+    records the transcript server-side (see its realtime_service.py)."""
+    ai_session, bloom_levels = await _owned_session(db, session_id, app_user)
+    config, _ = await _colearner_config(db, ai_session, bloom_levels)
+    answer = await create_realtime_call(
+        sdp=body.sdp, config=config, owner_ref=str(ai_session.id), token=_bearer(authorization)
+    )
+    return RealtimeAnswerOut(sdp=answer["sdp"], call_id=answer["call_id"])
+
+
+@router.post("/ai-assessor/sessions/{session_id}/finish", summary="End live voice and record the result")
+async def finish_session(
+    session_id: str,
+    body: FinishSessionIn,
+    authorization: str | None = Header(default=None),
+    app_user: User = Depends(require_feature(Feature.VOICE_TEST)),
+    db: AsyncSession = Depends(get_db_session),
+) -> FinishSessionOut:
+    ai_session, bloom_levels = await _owned_session(db, session_id, app_user)
+    num_questions = max(len(bloom_levels), 2)
+    result = await finish_realtime_call(call_id=body.call_id, owner_ref=str(ai_session.id), token=_bearer(authorization))
+    answered = min(int(result.get("answered") or 0), num_questions)
+    elapsed = int((datetime.now(timezone.utc) - ai_session.created_at).total_seconds())
+    summary = SessionSummary(questions_answered=answered, total_questions=num_questions, elapsed_seconds=elapsed)
+
+    if body.exited:
+        return FinishSessionOut(outcome="exited", summary=summary)
+    await _record_completion(
+        ai_session, bloom_levels, result.get("report"), answered, num_questions, hints_used=body.hints_used
+    )
+    finished = result.get("model_completed") or answered >= num_questions
+    return FinishSessionOut(outcome="completed" if finished else "timed_out", summary=summary)
+
+
 @router.websocket("/ai-assessor/sessions/{session_id}/stream")
 async def stream_session(websocket: WebSocket, session_id: str, token: str = Query(...)) -> None:
     """One JSON frame per message, both directions - see
@@ -118,35 +271,17 @@ async def stream_session(websocket: WebSocket, session_id: str, token: str = Que
         bloom_levels = [row[0] for row in bloom_result.all()]
 
         app_user = await get_by_firebase_uid(db, auth_user.uid)
+        if app_user is None or ai_session.student_id != app_user.id:
+            # only the student who opened the session may stream it
+            await websocket.close(code=4403)
+            return
         school = (
             await db.get(School, app_user.school_id) if app_user and app_user.school_id else None
         )
 
-        test = await db.get(VoiceTest, ai_session.test_id) if ai_session.test_id else None
-        chapter = await db.get(Chapter, test.chapter_id) if test else None
-        subject = await db.get(Subject, test.subject_id) if test else None
-        school_class = await db.get(SchoolClass, test.class_id) if test else None
+        colearner_config, num_questions = await _colearner_config(db, ai_session, bloom_levels)
 
     pipeline = (school.voice_pipeline if school else None) or _DEFAULT_PIPELINE
-    num_questions = max(len(bloom_levels), 2)
-    colearner_config = {
-        "grade": f"Grade {school_class.grade}" if school_class else ai_session.context_label,
-        "subject": subject.name if subject else ai_session.context_label,
-        "chapter_name": chapter.name if chapter else ai_session.context_label,
-        "num_questions": num_questions,
-        "blooms_attributes": [level.value for level in bloom_levels] or [BloomLevel.UNDERSTAND.value],
-        "session_max_time_seconds": ai_session.duration_seconds,
-    }
-    # Both keys must be OMITTED, not set to None, when there's nothing to
-    # ground the session in - colearner's SessionConfig.reference_questions
-    # is a plain (non-Optional) list with a default_factory, so an explicit
-    # `null` fails Pydantic validation instead of falling back to it (only
-    # a genuinely absent key does). See Phase 2's _generate_reference_content
-    # in voice_test.py for when these are actually populated.
-    if test and test.textbook_context:
-        colearner_config["textbook_context"] = test.textbook_context
-    if test and test.reference_questions:
-        colearner_config["reference_questions"] = test.reference_questions
 
     await websocket.accept()
     await websocket.send_json(ConnectionEvent(state="connecting").model_dump(by_alias=True))
@@ -385,31 +520,7 @@ async def stream_session(websocket: WebSocket, session_id: str, token: str = Que
         if stopped:
             await websocket.send_json(ExitedEvent().model_dump(by_alias=True))
         else:
-            if ai_session.test_id is not None:
-                evaluation = evaluate_colearner_session(final_report, bloom_levels)
-                async with get_session() as completion_db:
-                    if evaluation is not None:
-                        mastery_percent, bloom_scores = evaluation
-                        await record_test_completion(
-                            completion_db,
-                            student_id=ai_session.student_id,
-                            test_id=ai_session.test_id,
-                            answered=answered,
-                            total_questions=num_questions,
-                            bloom_levels=bloom_levels,
-                            mastery_percent=mastery_percent,
-                            bloom_scores=bloom_scores,
-                        )
-                    else:
-                        await record_test_completion(
-                            completion_db,
-                            student_id=ai_session.student_id,
-                            test_id=ai_session.test_id,
-                            answered=answered,
-                            total_questions=num_questions,
-                            bloom_levels=bloom_levels,
-                        )
-                    await completion_db.commit()
+            await _record_completion(ai_session, bloom_levels, final_report, answered, num_questions)
             summary = SessionSummary(
                 questions_answered=answered, total_questions=num_questions, elapsed_seconds=_elapsed()
             )

@@ -1,0 +1,6 @@
+# Host-side data scripts (import_dataset.py, upload_assets.py, embed_questions.py):
+#   python -m venv .venv-scripts && .venv-scripts/Scripts/pip install -r scripts/requirements.txt
+psycopg2-binary==2.9.10
+azure-storage-blob==12.24.1
+llama-index-embeddings-openai==0.3.1
+openai==3.19.2

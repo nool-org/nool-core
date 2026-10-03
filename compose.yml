@@ -2,7 +2,10 @@ name: nool-core
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # postgres:16-alpine + pgvector - see database/postgres/Dockerfile.
+    build:
+      context: database/postgres
+    image: nool-core-postgres:16-pgvector
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -100,6 +103,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
       KG_SERVICE_URL: http://kg:8000
       COLEARNER_SERVICE_URL: http://colearner:8000
+      GENERATION_SERVICE_URL: http://generation:8000
+      ASSET_BASE_URL: ${ASSET_BASE_URL:-http://localhost:10000/devstoreaccount1/question-assets}
     volumes:
       - ${FIREBASE_CREDENTIALS_HOST_PATH:-./secrets/firebase-service-account.json}:/app/secrets/firebase-service-account.json:ro
       # database/migrations is otherwise only COPY'd into the image at
@@ -143,6 +148,37 @@ services:
     volumes:
       - ./shared:/app/shared
       - ./services/kg/src:/app/src
+    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src", "--reload-dir", "/app/shared"]
+    depends_on:
+      jaeger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - nool_network
+
+  # Stateless LLM question generation (LlamaIndex workflows) - see
+  # services/generation/README.md. Only core calls it; it has no database.
+  generation:
+    build:
+      context: .
+      dockerfile: services/generation/Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: generation
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GENERATION_MODEL: ${GENERATION_MODEL:-gpt-5.1}
+      VERIFY_MODEL: ${VERIFY_MODEL:-gpt-5-mini}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    volumes:
+      - ./shared:/app/shared
+      - ./services/generation/src:/app/src
     command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src", "--reload-dir", "/app/shared"]
     depends_on:
       jaeger:

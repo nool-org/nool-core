@@ -26,27 +26,30 @@ async def _seed_super_admin(db_session) -> User:
 
 
 @pytest.mark.asyncio
-async def test_two_datasets_under_the_same_subject_sync_to_separately_graded_chapters(
+async def test_each_grades_subject_syncs_its_own_chapters(
     db_session, monkeypatch,
 ):
+    """Subjects are per grade: "Science" 9 and "Science" 10 are two subjects,
+    each syncing its own grade's chapters from its own dataset."""
     actor = await _seed_super_admin(db_session)
-    subject = Subject(name=f"Science-{uuid.uuid4()}")
-    db_session.add(subject)
+    name = f"Science-{uuid.uuid4()}"
+    subject_9, subject_10 = Subject(name=name, grade=9), Subject(name=name, grade=10)
+    db_session.add_all([subject_9, subject_10])
     await db_session.flush()
 
     ninth = Dataset(
-        name="9th Science", question_count=0, description="", subject_id=subject.id, board="CBSE", grade=9,
+        name="9th Science", question_count=0, description="", subject_id=subject_9.id, board="CBSE", grade=9,
         type=DatasetType.PRIMARY_CONTENT,
     )
     tenth = Dataset(
-        name="10th Science", question_count=0, description="", subject_id=subject.id, board="CBSE", grade=10,
+        name="10th Science", question_count=0, description="", subject_id=subject_10.id, board="CBSE", grade=10,
         type=DatasetType.PRIMARY_CONTENT,
     )
     db_session.add_all([ninth, tenth])
     await db_session.flush()
 
     ref_9, ref_10 = f"kg-9-{uuid.uuid4()}", f"kg-10-{uuid.uuid4()}"
-    own_subject_name = subject.name
+    own_subject_name = name
 
     async def fake_get_curriculum_tree(*, board, grade, subject):
         # Keyed on this test's own subject name too, not just grade - the
@@ -78,8 +81,8 @@ async def test_two_datasets_under_the_same_subject_sync_to_separately_graded_cha
 
     assert chapter_9.grade == 9
     assert chapter_10.grade == 10
-    assert chapter_9.subject_id == subject.id
-    assert chapter_10.subject_id == subject.id
+    assert chapter_9.subject_id == subject_9.id
+    assert chapter_10.subject_id == subject_10.id
 
 
 @pytest.mark.asyncio

@@ -85,9 +85,9 @@ async def test_an_assignment_to_a_currently_enabled_subject_is_still_returned(db
     assert [item.name for item in result.items] == [subject.name]
 
 
-async def test_a_school_with_no_curriculum_config_yet_trusts_the_assignment(db_session):
-    """Not configured yet shouldn't look identical to "explicitly enabled
-    nothing" - same rule GET /subjects already applies."""
+async def test_a_school_the_super_admin_gave_no_subjects_has_none_even_with_an_assignment(db_session):
+    """Only a Super Admin controls a school's subjects (school_curriculum) -
+    there's no "not configured -> every subject" fallback any more."""
     teacher, school = await _seed_school_and_teacher(db_session)
     subject = Subject(name=f"Mathematics-{uuid.uuid4()}")
     db_session.add(subject)
@@ -97,4 +97,4 @@ async def test_a_school_with_no_curriculum_config_yet_trusts_the_assignment(db_s
 
     result = await curriculum.list_subjects_for_class(class_id, user=teacher, session=db_session)
 
-    assert [item.name for item in result.items] == [subject.name]
+    assert result.items == []

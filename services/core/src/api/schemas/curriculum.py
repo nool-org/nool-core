@@ -4,6 +4,9 @@ from .common import CamelModel
 class SubjectOut(CamelModel):
     id: str
     name: str
+    # Subjects are per grade - "Science" (9) and "Science" (10) share a name,
+    # so clients show/filter by this.
+    grade: int | None = None
 
 
 class ChapterOut(CamelModel):

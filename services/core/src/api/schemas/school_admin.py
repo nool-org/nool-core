@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import Field, field_validator
+from pydantic import model_validator, Field, field_validator
 
 from src.domain.models import SubscriptionStatus, UserStatus
 
@@ -224,6 +224,7 @@ class UpdateClassAssignmentsIn(CamelModel):
 class SubjectToggle(CamelModel):
     id: str
     name: str
+    grade: int | None = None  # subjects are per grade; label "<name> · Grade <grade>"
     enabled: bool
     # Which grades this Subject applies to - see SubjectGrade's docstring.
     # An already-enabled subject can show up here with no grades (or a
@@ -264,8 +265,17 @@ class CreateSchoolSubjectIn(CamelModel):
     # CreateSubjectIn: without at least one grade, the enable-for-my-school
     # half of this call would have nothing eligible to grant. Unioned onto
     # an existing (possibly still ungraded) Subject rather than replacing
-    # its links when reusing one by name.
-    grades: list[int] = Field(min_length=1)
+    # its links when reusing one by name. A subject is per grade, so this
+    # must resolve to exactly one grade (`grade`, or a one-item `grades`).
+    grade: int | None = None
+    grades: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _one_grade(self) -> "CreateSchoolSubjectIn":
+        from .admin_catalog import single_grade
+        self.grade = single_grade(self.grade, self.grades)
+        self.grades = [self.grade]
+        return self
 
 
 class SchoolDatasetOut(CamelModel):
@@ -273,12 +283,21 @@ class SchoolDatasetOut(CamelModel):
     name: str
     question_count: int
     description: str
+    # Assigned to this school (catalog datasets) - always true for the
+    # school's own datasets. Only a Super Admin can change it.
     enabled: bool
-    # See Dataset.restricted's docstring - surfaced here so a School Admin
-    # can tell a school-exclusive dataset (e.g. one meant only for this
-    # school) apart from the shared default catalog when deciding what to
-    # toggle on.
+    # Kept for API compatibility - see Dataset.restricted's docstring.
     restricted: bool
+    # True = the school's own question bank (Dataset.school_id), editable by
+    # its School Admin; False = a platform catalog dataset.
+    owned: bool = False
+    subject_id: str | None = None
+    subject_name: str | None = None
+    grade: int | None = None
+    # False when the dataset's subject is disabled for this school - the
+    # dataset is then unusable (hidden from teachers/homework/papers) even
+    # though it stays assigned/owned; re-enabling the subject restores it.
+    subject_enabled: bool = True
 
 
 class UpdateSchoolDatasetsIn(CamelModel):

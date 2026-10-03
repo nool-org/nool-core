@@ -9,7 +9,7 @@ from .assistant import AssistantMessage, ChatRole
 from .bloom import BloomLevel
 from .curriculum import Chapter, GradeSubject, SchoolCurriculum, Subject, SubjectGrade, Subtopic, Topic
 from .custom_question import CustomQuestion, QuestionType
-from .dataset import Dataset, DatasetQuestion, DatasetType, SchoolDataset
+from .dataset import Dataset, DatasetQuestion, DatasetType, QuestionEmbedding, SchoolDataset
 from .gamification import StudentDailyGoalCompletion, StudentGamification
 from .journey import StudentChapterProgress
 from .foundation import (
@@ -84,6 +84,7 @@ __all__ = [
     "Dataset",
     "DatasetQuestion",
     "DatasetType",
+    "QuestionEmbedding",
     "SchoolDataset",
     "StudentDailyGoalCompletion",
     "StudentGamification",

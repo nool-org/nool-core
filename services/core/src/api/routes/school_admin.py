@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError
@@ -52,7 +52,6 @@ from src.api.schemas.school_admin import (
     UpdateClassStatusIn,
     UpdateGradeStatusIn,
     UpdateSchoolAdminMeIn,
-    UpdateSchoolDatasetsIn,
     UpdateStudentIn,
     UpdateTeacherIn,
     UpdateTeacherStatusIn,
@@ -62,8 +61,6 @@ from src.api.schemas.school_admin import (
 from src.domain.models import (
     AssistantMessage,
     AuditLog,
-    Dataset,
-    GradeSubject,
     Homework,
     ImportJobType,
     Plan,
@@ -75,7 +72,6 @@ from src.domain.models import (
     SchoolClass,
     SchoolCurriculum,
     SchoolGrade,
-    SchoolDataset,
     StudentHomeworkProgress,
     StudentPoints,
     StudentProfile,
@@ -89,6 +85,11 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestTargetStudent,
 )
+from src.services.subject_grades import (
+    ensure_class_grade_change_allowed, ensure_subjects_enabled_for_school, ensure_subjects_fit_grade,
+)
+from src.repositories.lookups import ensure_teachers_of_school, get_class_in_school
+from src.repositories.dataset_access import school_dataset_listing, subject_names
 from src.repositories import audit_repository, import_job_repository
 from src.repositories.roster_repository import (
     get_or_create_grade,
@@ -104,7 +105,6 @@ from src.repositories.usage_repository import (
     count_tests,
 )
 from src.services import reporting
-from src.services.subject_grades import grades_by_subject, picker_subjects_for_grade
 from src.services.bulk_import import BulkRowResult, parse_rows
 from src.services.email import send_email
 from src.services.school_analytics import compute_school_analytics
@@ -471,6 +471,7 @@ async def create_student(
                 f"Your plan allows up to {plan.student_limit} students - you already have {current}."
             )
 
+    await get_class_in_school(session, body.class_id, user.school_id)  # never another school's class
     provisioned = create_firebase_user(email=body.email, display_name=body.display_name, role=Role.STUDENT)
 
     student_user = User(
@@ -643,6 +644,7 @@ async def update_student(
         raise NotFoundError(f'No student with id "{student_id}" in your school.')
     student_user, profile = row
     if body.class_id is not None:
+        await get_class_in_school(session, body.class_id, user.school_id)  # never another school's class
         profile.class_id = body.class_id
     if body.status is not None:
         student_user.status = body.status
@@ -843,6 +845,7 @@ async def update_school_class(
     if school_class is None:
         raise NotFoundError(f'No class with id "{class_id}" in your school.')
     old_label = f"Class {school_class.grade} · {school_class.section}"
+    await ensure_class_grade_change_allowed(session, school_class, body.grade)
     if body.grade != school_class.grade:
         school_class.grade_id = (await get_or_create_grade(session, user.school_id, body.grade)).id
     school_class.grade = body.grade
@@ -1063,21 +1066,24 @@ async def get_grade_subjects(
     session: AsyncSession = Depends(get_db_session),
 ) -> GradeSubjectsOut:
     school_grade = await _get_own_grade(session, grade_id, user.school_id)
-    subjects = await picker_subjects_for_grade(session, grade_id, school_grade.grade)
-    grades_map = await grades_by_subject(session, [s.id for s in subjects])
-    enabled_result = await session.execute(
-        select(GradeSubject.subject_id).where(GradeSubject.grade_id == grade_id, GradeSubject.enabled.is_(True))
-    )
-    enabled_ids = {row[0] for row in enabled_result.all()}
+    # exactly the subjects a teacher can be assigned to in this grade's classes
+    subjects = await _enabled_subjects(session, user.school_id, grade=school_grade.grade)
     return GradeSubjectsOut(
         grade_id=grade_id,
-        subjects=[
-            SubjectToggle(
-                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
-            )
-            for s in subjects
-        ],
+        subjects=[SubjectToggle(id=str(s.id), name=s.name, grade=s.grade, enabled=True, grades=[s.grade])
+                  for s in subjects],
     )
+
+
+async def _enabled_subjects(session: AsyncSession, school_id, *, grade: int | None = None) -> list[Subject]:
+    """Subjects a Super Admin enabled for the school (optionally of one grade)."""
+    query = (select(Subject)
+             .join(SchoolCurriculum, SchoolCurriculum.subject_id == Subject.id)
+             .where(SchoolCurriculum.school_id == school_id, SchoolCurriculum.enabled.is_(True))
+             .order_by(Subject.grade.nulls_last(), func.lower(Subject.name)))
+    if grade is not None:
+        query = query.where(Subject.grade == grade)
+    return list((await session.execute(query)).scalars().all())
 
 
 @router.put("/classes/{class_id}/assignments", summary="Assign teacher + subject")
@@ -1104,6 +1110,12 @@ async def update_class_assignments(
         await session.delete(row)
     await session.flush()
 
+    # a grade-10 class can only be taught grade-10 subjects (their chapters/topics)
+    await ensure_subjects_fit_grade(session, [a.subject_id for a in body.assignments], school_class.grade,
+                                    what=f"a grade-{school_class.grade} class")
+    await ensure_subjects_enabled_for_school(session, [a.subject_id for a in body.assignments],
+                                             school_class.school_id)
+    await ensure_teachers_of_school(session, [a.teacher_id for a in body.assignments], school_class.school_id)
     for a in body.assignments:
         session.add(
             TeacherClassAssignment(teacher_id=a.teacher_id, class_id=class_id, subject_id=a.subject_id)
@@ -1139,23 +1151,13 @@ async def get_school_curriculum(
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> SchoolCurriculumOut:
-    subjects_result = await session.execute(select(Subject))
-    subjects = subjects_result.scalars().all()
-    grades_map = await grades_by_subject(session, [s.id for s in subjects])
-    enabled_result = await session.execute(
-        select(SchoolCurriculum.subject_id).where(
-            SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.enabled.is_(True)
-        )
-    )
-    enabled_ids = {row[0] for row in enabled_result.all()}
+    school = await session.get(School, user.school_id)
+    subjects = await _enabled_subjects(session, user.school_id)
     return SchoolCurriculumOut(
-        board="",
-        subjects=[
-            SubjectToggle(
-                id=str(s.id), name=s.name, enabled=s.id in enabled_ids, grades=grades_map.get(str(s.id), [])
-            )
-            for s in subjects
-        ],
+        board=school.board if school else "",
+        subjects=[SubjectToggle(id=str(s.id), name=s.name, grade=s.grade, enabled=True,
+                                grades=[s.grade] if s.grade is not None else [])
+                  for s in subjects],
     )
 
 
@@ -1164,54 +1166,21 @@ async def get_school_datasets(
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolDatasetOut]:
-    datasets_result = await session.execute(select(Dataset))
-    datasets = datasets_result.scalars().all()
-    enabled_result = await session.execute(
-        select(SchoolDataset.dataset_id).where(
-            SchoolDataset.school_id == user.school_id, SchoolDataset.enabled.is_(True)
-        )
-    )
-    enabled_ids = {row[0] for row in enabled_result.all()}
+    """What this school can use: the catalog datasets a Super Admin assigned
+    (read-only here - schools can't assign themselves) and its own
+    question banks (`owned`, managed under /school/datasets/{id}/...)."""
+    listing = await school_dataset_listing(session, user.school_id, include_unassigned=False)
+    names = await subject_names(session, [d for d, *_ in listing])
     items = [
         SchoolDatasetOut(
-            id=str(d.id),
-            name=d.name,
-            question_count=d.question_count,
-            description=d.description,
-            enabled=d.id in enabled_ids,
-            restricted=d.restricted,
+            id=str(d.id), name=d.name, question_count=d.question_count, description=d.description,
+            enabled=assigned, restricted=d.restricted, owned=owned, subject_enabled=subject_on,
+            subject_id=str(d.subject_id) if d.subject_id else None, subject_name=names.get(d.subject_id),
+            grade=d.grade,
         )
-        for d in datasets
+        for d, assigned, owned, subject_on in listing
     ]
     return ListEnvelope(items=items, total=len(items))
-
-
-@router.put("/datasets")
-async def update_school_datasets(
-    body: UpdateSchoolDatasetsIn,
-    user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
-    session: AsyncSession = Depends(get_db_session),
-) -> ListEnvelope[SchoolDatasetOut]:
-    existing = await session.execute(
-        select(SchoolDataset).where(SchoolDataset.school_id == user.school_id)
-    )
-    # Keyed by str(dataset_id): body.dataset_ids is list[str] off the wire,
-    # while row.dataset_id is a UUID object - comparing/diffing them
-    # directly would silently never match (see update_school_curriculum's
-    # identical-shaped code just above, which has this exact bug today).
-    by_dataset = {str(row.dataset_id): row for row in existing.scalars().all()}
-
-    enabled_ids = set(body.dataset_ids)
-    for dataset_id, row in by_dataset.items():
-        row.enabled = dataset_id in enabled_ids
-    for dataset_id in enabled_ids - set(by_dataset.keys()):
-        session.add(SchoolDataset(school_id=user.school_id, dataset_id=dataset_id, enabled=True))
-    await audit_repository.record(
-        session, actor_id=user.id, action="datasets.updated", target_type="school", target_id=str(user.school_id)
-    )
-    await session.commit()
-
-    return await get_school_datasets(user=user, session=session)
 
 
 @router.get("/analytics")

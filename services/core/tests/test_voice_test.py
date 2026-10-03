@@ -21,6 +21,7 @@ from src.domain.models import (
     Role,
     School,
     SchoolClass,
+    SchoolCurriculum,
     StudentProfile,
     Subject,
     TeacherClassAssignment,
@@ -79,6 +80,8 @@ async def test_whole_class_target_resolves_current_roster_at_creation_time(db_se
     school_class, subject, chapter, topic = await _seed_class_subject_chapter_topic(db_session, school.id)
     teacher = await _seed_teacher(db_session, school.id)
     db_session.add(TeacherClassAssignment(teacher_id=teacher.id, class_id=school_class.id, subject_id=subject.id))
+    # a Super Admin has given the school this subject
+    db_session.add(SchoolCurriculum(school_id=school_class.school_id, subject_id=subject.id, enabled=True))
     student_a = await _seed_student(db_session, school.id, school_class.id, roll_number=1)
     student_b = await _seed_student(db_session, school.id, school_class.id, roll_number=2)
     await db_session.flush()
@@ -112,6 +115,8 @@ async def test_specific_students_target_still_only_delivers_to_the_picked_studen
     school_class, subject, chapter, topic = await _seed_class_subject_chapter_topic(db_session, school.id)
     teacher = await _seed_teacher(db_session, school.id)
     db_session.add(TeacherClassAssignment(teacher_id=teacher.id, class_id=school_class.id, subject_id=subject.id))
+    # a Super Admin has given the school this subject
+    db_session.add(SchoolCurriculum(school_id=school_class.school_id, subject_id=subject.id, enabled=True))
     picked = await _seed_student(db_session, school.id, school_class.id, roll_number=1)
     not_picked = await _seed_student(db_session, school.id, school_class.id, roll_number=2)
     await db_session.flush()

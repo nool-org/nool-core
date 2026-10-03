@@ -62,8 +62,28 @@ the content allows, and the requested question_type. Every question must
 cite the topic_ref(s) it draws from in source_refs and the correct
 chapter_number/topic it belongs to. Provide a concise reference answer for
 each question. Avoid duplicating the same fact/question across different
-entries - cover distinct topics/subtopics where the requested count allows
-it."""
+entries. Spread questions across ALL the provided topics as evenly as the
+requested count allows - do not concentrate on the first or introductory
+topic."""
+
+
+# ponytail: the 20-30% bank share is prompt-enforced, not checked after the
+# fact - add a similarity check against reference texts if it drifts.
+REFERENCE_GUIDANCE = """
+The teacher selected question-bank datasets for this paper. Below is a
+sample of their questions on the chosen topics (previous-year / sample-paper
+style). Use them as grounding for scope, style, difficulty and marking:
+- Take 20-30% of the paper (at least 1 question) straight from this bank -
+  verbatim, or with only minimal edits - picking ones that fit a requested
+  Bloom/difficulty slot. For each of these put "dataset" in source_refs
+  alongside the topic_ref.
+- Every other question must be NEW: a different fact, scenario, numbers or
+  angle on the same syllabus content - not a paraphrase of a bank question.
+- Never include the same underlying question twice.
+- Any fact in a new question must still come from the textbook context
+  above or from these bank questions/answers - nothing outside them.
+
+Question-bank sample:"""
 
 
 def _build_user_message(
@@ -73,6 +93,7 @@ def _build_user_message(
     difficulty_distribution: dict[str, int],
     question_types: list[str],
     total_questions: int,
+    reference_questions: list[dict] | None = None,
 ) -> str:
     parts = [
         f"Generate exactly {total_questions} questions.",
@@ -82,6 +103,8 @@ def _build_user_message(
         "\nAvailable topics/subtopics (grounding context):",
         json.dumps(concept_context, indent=2),
     ]
+    if reference_questions:
+        parts += [REFERENCE_GUIDANCE, json.dumps(reference_questions, indent=2)]
     return "\n".join(parts)
 
 
@@ -180,8 +203,9 @@ def generate_questions(
     difficulty_distribution: dict[str, int],
     question_types: list[str],
     total_questions: int,
+    reference_questions: list[dict] | None = None,
 ) -> list[dict]:
-    if not concept_context:
+    if not concept_context and not reference_questions:
         return []
 
     client = OpenAI(api_key=api_key)
@@ -198,6 +222,7 @@ def generate_questions(
                     difficulty_distribution=difficulty_distribution,
                     question_types=question_types,
                     total_questions=total_questions,
+                    reference_questions=reference_questions,
                 ),
             },
         ],

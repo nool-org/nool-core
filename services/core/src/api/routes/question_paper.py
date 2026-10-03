@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ConflictError, NotFoundError, ValidationError
+from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 
 from src.api.deps import get_db_session, require_feature, require_role
 from src.api.schemas.bloom import BloomTarget
@@ -23,6 +23,7 @@ from src.api.schemas.question_paper import (
 from src.domain.models import (
     Chapter,
     Dataset,
+    DatasetQuestion,
     DatasetType,
     Feature,
     QuestionPaper,
@@ -37,10 +38,14 @@ from src.domain.models import (
     QuestionPaperValidation,
     Role,
     School,
+    SchoolClass,
     Subject,
+    TeacherClassAssignment,
     Topic,
     User,
 )
+from src.repositories.dataset_access import ensure_datasets_visible
+from src.services.subject_grades import ensure_subjects_enabled_for_school, ensure_subjects_fit_grade
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import kg_client
@@ -191,6 +196,46 @@ async def _apply_body(session: AsyncSession, paper: QuestionPaper, body: CreateQ
         )
 
 
+async def _check_blueprint(session: AsyncSession, user: User, body: CreateQuestionPaperIn) -> None:
+    """A paper is one subject of one grade, set by a teacher of it: the
+    subject is enabled for the school and is that grade's, every chapter
+    belongs to it, every topic to a chosen chapter, and every dataset share
+    to the same subject + grade (and is one this teacher may use)."""
+    teaches = (await session.execute(
+        select(TeacherClassAssignment.id)
+        .join(SchoolClass, SchoolClass.id == TeacherClassAssignment.class_id)
+        .where(TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.subject_id == body.subject_id,
+               SchoolClass.grade == body.grade, SchoolClass.school_id == user.school_id)
+        .limit(1)
+    )).first()
+    if teaches is None:
+        raise ForbiddenError(f"You don't teach this subject in grade {body.grade}.")
+    await ensure_subjects_enabled_for_school(session, [body.subject_id], user.school_id)
+    await ensure_subjects_fit_grade(session, [body.subject_id], body.grade, what=f"a grade-{body.grade} paper")
+
+    chapter_ids = {str(c) for c in body.chapter_ids or []}
+    if chapter_ids:
+        found = {str(i) for (i,) in (await session.execute(
+            select(Chapter.id).where(Chapter.id.in_(chapter_ids), Chapter.subject_id == body.subject_id))).all()}
+        if chapter_ids - found:
+            raise ValidationError("Every chapter must belong to the paper's subject.")
+    topic_ids = {str(t) for t in body.topic_ids or []}
+    if topic_ids:
+        in_scope = Topic.chapter_id.in_(chapter_ids) if chapter_ids else Topic.chapter_id.in_(
+            select(Chapter.id).where(Chapter.subject_id == body.subject_id))
+        found = {str(i) for (i,) in (await session.execute(
+            select(Topic.id).where(Topic.id.in_(topic_ids), in_scope))).all()}
+        if topic_ids - found:
+            raise ValidationError("Every topic must belong to one of the paper's chapters.")
+
+    share_ids = [str(share.dataset_id) for share in body.dataset_shares or []]
+    if share_ids:
+        datasets = (await session.execute(select(Dataset).where(Dataset.id.in_(share_ids)))).scalars().all()
+        if any(str(d.subject_id) != str(body.subject_id) or d.grade != body.grade for d in datasets):
+            raise ValidationError(f"Every dataset must be for this subject and grade {body.grade}.")
+        await ensure_datasets_visible(session, user, share_ids, subject_id=body.subject_id, grade=body.grade)
+
+
 @router.get("/question-papers")
 async def list_papers(
     user: User = Depends(require_role(Role.TEACHER)),
@@ -225,6 +270,8 @@ async def create_paper(
         if await count_question_papers(session, user.school_id) >= plan.question_paper_limit:
             raise ConflictError(f"Your plan allows up to {plan.question_paper_limit} Question Papers.")
 
+    await _check_blueprint(session, user, body)
+
     # The NOT NULL scalar columns (name/examType/board/grade/language/
     # subjectId) must be set before this flush, not only inside
     # _apply_body afterward - _apply_body needs paper.id already assigned
@@ -254,6 +301,9 @@ async def update_paper(
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
     paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    if paper.status == QuestionPaperStatus.FINALIZED:
+        raise ConflictError("This paper is finalized and can't be changed.")
+    await _check_blueprint(session, user, body)
     await _apply_body(session, paper, body)
     await session.commit()
     await session.refresh(paper)
@@ -337,6 +387,70 @@ async def _paper_kg_identity(session: AsyncSession, paper: QuestionPaper) -> tup
     return subject_name, paper.board, paper.grade
 
 
+_REFERENCE_POOL_SIZE = 40
+
+
+async def _dataset_reference_questions(session: AsyncSession, paper: QuestionPaper) -> list[dict]:
+    """Question-bank grounding for generation: a fresh random sample of the
+    paper's QA-dataset questions on its selected topics (or, with no topics
+    picked, its chapters), split across datasets by their share percent.
+    Random on purpose - regenerating the same blueprint sees a different
+    slice of the bank, so papers don't come out identical. The kg service
+    decides how much to reuse verbatim vs. write fresh (see its prompt).
+    """
+    topic_ids = (
+        (await session.execute(select(QuestionPaperTopic.topic_id).where(QuestionPaperTopic.paper_id == paper.id)))
+        .scalars()
+        .all()
+    )
+    chapter_ids = (
+        (await session.execute(select(QuestionPaperChapter.chapter_id).where(QuestionPaperChapter.paper_id == paper.id)))
+        .scalars()
+        .all()
+    )
+    if not topic_ids and not chapter_ids:
+        return []
+    in_scope = DatasetQuestion.topic_id.in_(topic_ids) if topic_ids else DatasetQuestion.chapter_id.in_(chapter_ids)
+
+    shares = (
+        await session.execute(
+            select(QuestionPaperDatasetShare.dataset_id, QuestionPaperDatasetShare.percent)
+            .join(Dataset, Dataset.id == QuestionPaperDatasetShare.dataset_id)
+            .where(QuestionPaperDatasetShare.paper_id == paper.id, Dataset.type == DatasetType.QA)
+        )
+    ).all()
+    total_percent = sum(p for _, p in shares) or 1
+
+    seen: set[str] = set()
+    references: list[dict] = []
+    for dataset_id, percent in shares:
+        limit = max(1, round(_REFERENCE_POOL_SIZE * percent / total_percent))
+        rows = (
+            await session.execute(
+                select(DatasetQuestion)
+                .where(DatasetQuestion.dataset_id == dataset_id, in_scope)
+                .order_by(func.random())
+                .limit(limit)
+            )
+        ).scalars().all()
+        for q in rows:
+            key = q.external_uid or str(q.id)
+            if key in seen:  # same question sits in several datasets
+                continue
+            seen.add(key)
+            references.append(
+                {
+                    "text": q.text,
+                    "answer": q.answer,
+                    "options": q.options,
+                    "bloom_level": q.bloom_level.value,
+                    "difficulty": q.difficulty.value if q.difficulty else None,
+                    "question_type": q.question_type.value,
+                }
+            )
+    return references
+
+
 def _assign_marks(paper: QuestionPaper, sections: list[QuestionPaperSection], question_count: int) -> list[int]:
     """Real per-question marks, replacing the old hardcoded `marks=1`:
     follow the paper's own QuestionPaperSections (marks_each per slot) if
@@ -397,6 +511,7 @@ async def generate_paper(
             difficulty_distribution=difficulty_distribution,
             question_types=paper.question_types or [],
             total_questions=target_count,
+            reference_questions=await _dataset_reference_questions(session, paper),
         )
 
     existing = await session.execute(
@@ -557,7 +672,9 @@ async def reorder_questions(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[QuestionPaperQuestionOut]:
-    await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    if paper.status != QuestionPaperStatus.REVIEW:
+        raise ConflictError("Paper isn't in REVIEW.")
     result = await session.execute(
         select(QuestionPaperQuestion).where(QuestionPaperQuestion.paper_id == paper_id)
     )
@@ -579,6 +696,8 @@ async def finalize_paper(
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
     paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    if paper.status != QuestionPaperStatus.REVIEW:
+        raise ConflictError("Only a paper in review can be finalized.")
     paper.status = QuestionPaperStatus.FINALIZED
     await session.commit()
     await session.refresh(paper)

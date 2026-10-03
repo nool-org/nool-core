@@ -186,13 +186,16 @@ async def get_concept_context_for_scope(
         return []
     chapters = {c["number"]: c for c in chapters_response.json() if c["number"] in chapter_numbers}
 
+    # Core's synced topic names can differ in case from nool-kg's titles
+    # (e.g. "1.2 TYPES OF CHEMICAL REACTIONS" vs "1.2 Types of Chemical Reactions").
+    wanted = {name.strip().casefold() for name in topic_names or []}
     context: list[dict] = []
     for chapter_number, chapter in chapters.items():
         topics_response = await client.get(f"/api/subjects/{graph}/chapters/{chapter['id']}/topics")
         if topics_response.status_code != 200:
             continue
         for topic in topics_response.json():
-            if topic_names and topic["title"] not in topic_names:
+            if wanted and topic["title"].strip().casefold() not in wanted:
                 continue
             content_response = await client.get(
                 f"/api/subjects/{graph}/content", params={"title_or_id": topic["id"]}

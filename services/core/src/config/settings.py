@@ -40,6 +40,17 @@ class CoreSettings(BaseServiceSettings):
     # instead of connecting to a real voice pipeline).
     colearner_service_url: str | None = None
 
+    # Base URL of the generation service (services/generation) - see
+    # src/services/generation_client.py. Blank-safe: homework is then built
+    # from the question bank plus the existing KG/deterministic fallback.
+    generation_service_url: str | None = None
+
+    # Public base of the question-assets blob container - figure `blob`
+    # paths (DatasetQuestion.figures) are resolved against it in responses,
+    # so moving storage accounts (Azurite -> Azure) is config-only.
+    # Blank-safe: figures come back with url=None.
+    asset_base_url: str | None = None
+
     @property
     def database_url(self) -> str:
         """Async SQLAlchemy connection string.

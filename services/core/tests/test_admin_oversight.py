@@ -529,26 +529,24 @@ async def test_list_school_question_bank_as_admin_topic_filters(db_session):
 
 
 async def test_list_school_question_bank_as_admin_collection_name_and_general_bank_only_filter(db_session):
-    from src.domain.models import CustomQuestion, QuestionType
+    from src.domain.models import Dataset, DatasetQuestion, QuestionType
 
     super_admin = await _seed_super_admin(db_session)
     school = await _seed_school(db_session)
     school_class, subject, chapter = await _seed_class_subject_chapter(db_session, school.id)
     teacher = await _seed_teacher(db_session, school.id)
     collection = f"Collection-{uuid.uuid4()}"
+    # a school's own question banks are school-owned datasets; "General bank" = no collection
+    named_bank = Dataset(name=collection, question_count=1, description="", subject_id=subject.id,
+                         grade=school_class.grade, school_id=school.id)
+    general_bank = Dataset(name="General bank", question_count=1, description="", subject_id=subject.id,
+                           grade=school_class.grade, school_id=school.id)
+    db_session.add_all([named_bank, general_bank])
+    await db_session.flush()
     db_session.add_all([
-        CustomQuestion(
-            school_id=school.id, subject_id=subject.id, chapter_id=chapter.id, class_id=school_class.id,
-            text="Named-set question", answer="Answer", bloom_level=BloomLevel.REMEMBER,
-            question_type=QuestionType.SHORT_ANSWER, created_by=teacher.id,
-            collection_name=collection,
-        ),
-        CustomQuestion(
-            school_id=school.id, subject_id=subject.id, chapter_id=chapter.id, class_id=school_class.id,
-            text="General bank question", answer="Answer", bloom_level=BloomLevel.REMEMBER,
-            question_type=QuestionType.SHORT_ANSWER, created_by=teacher.id,
-            collection_name=None,
-        ),
+        DatasetQuestion(dataset_id=bank.id, chapter_id=chapter.id, text=text, answer="Answer",
+                        bloom_level=BloomLevel.REMEMBER, question_type=QuestionType.SHORT_ANSWER, created_by=teacher.id)
+        for bank, text in ((named_bank, "Named-set question"), (general_bank, "General bank question"))
     ])
     await db_session.flush()
 

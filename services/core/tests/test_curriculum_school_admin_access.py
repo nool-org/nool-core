@@ -8,7 +8,7 @@ Postgres via db_session.
 import uuid
 
 from src.api.routes import curriculum
-from src.domain.models import Chapter, Role, School, Subject, Topic, User, UserStatus
+from src.domain.models import Chapter, Role, School, Subject, Topic, User, UserStatus, SchoolCurriculum
 
 
 async def _seed_school(db_session) -> School:
@@ -34,6 +34,7 @@ async def test_school_admin_can_list_subjects_chapters_and_topics(db_session):
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add(subject)
     await db_session.flush()
+    db_session.add(SchoolCurriculum(school_id=school.id, subject_id=subject.id, enabled=True))  # Super Admin's grant
     chapter = Chapter(subject_id=subject.id, name="Chapter 1")
     db_session.add(chapter)
     await db_session.flush()

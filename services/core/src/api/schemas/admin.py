@@ -178,9 +178,11 @@ class ResetPasswordOut(CamelModel):
 class AuditLogEntryOut(CamelModel):
     id: str
     actor_id: str
+    actor_name: str | None = None
     action: str
     target_type: str
     target_id: str
+    detail: str | None = None
     created_at: datetime
 
 

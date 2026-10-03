@@ -118,7 +118,7 @@ def _wire(monkeypatch, ai_session, bloom_levels, colearner_turns: list[dict] | N
         lambda authorization: AuthenticatedUser(uid="uid-1", email=None, claims={}),
     )
     monkeypatch.setattr(
-        ai_assessor, "get_by_firebase_uid", _async_returning(SimpleNamespace(school_id=None))
+        ai_assessor, "get_by_firebase_uid", _async_returning(SimpleNamespace(id="student-1", school_id=None))
     )
     fake_db = FakeDbSession(ai_session, bloom_levels)
     monkeypatch.setattr(ai_assessor, "get_session", lambda: FakeSessionContext(fake_db))

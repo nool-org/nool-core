@@ -264,6 +264,9 @@ async def test_update_class_assignments_as_admin_full_replace(db_session):
     teacher_2 = await _seed_teacher(db_session, school.id)
     subject_1, _chapter_1 = await _seed_subject_chapter(db_session)
     subject_2, _chapter_2 = await _seed_subject_chapter(db_session)
+    from src.domain.models import SchoolCurriculum
+    db_session.add_all([SchoolCurriculum(school_id=school.id, subject_id=s.id, enabled=True) for s in (subject_1, subject_2)])
+    await db_session.flush()
 
     first = await admin.update_class_assignments_as_admin(
         str(school_class.id),

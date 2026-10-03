@@ -46,7 +46,7 @@ class PracticeBankEntry(IdMixin, Base):
     __tablename__ = "practice_bank_entries"
     __table_args__ = (UniqueConstraint("student_id", "source_question_id"),)
 
-    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
     # Traceability only - never shown as a live link, since the source
     # Homework may no longer be relevant to the student by the time they
     # revisit this entry.

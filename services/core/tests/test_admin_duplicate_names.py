@@ -68,27 +68,48 @@ async def test_rename_plan_to_its_own_current_name_does_not_conflict(db_session)
     assert out.price_label == "new"
 
 
-async def test_create_subject_with_duplicate_name_conflicts_not_500(db_session):
+async def test_create_subject_with_duplicate_name_for_the_same_grade_conflicts_not_500(db_session):
     super_admin = await _seed_super_admin(db_session)
     name = f"Subject-{uuid.uuid4()}"
-    db_session.add(Subject(name=name))
+    db_session.add(Subject(name=name, grade=9))
     await db_session.flush()
 
     with pytest.raises(ConflictError):
         await admin_catalog.create_subject(
-            CreateSubjectIn(name=name, grades=[9]), actor=super_admin, session=db_session
+            CreateSubjectIn(name=name.lower(), grade=9), actor=super_admin, session=db_session
         )
 
 
-async def test_rename_subject_to_a_duplicate_name_conflicts_not_500(db_session):
+async def test_the_same_subject_name_for_another_grade_is_a_separate_subject(db_session):
+    # "Science" grade 9 and "Science" grade 10 each have their own syllabus
+    super_admin = await _seed_super_admin(db_session)
+    name = f"Science-{uuid.uuid4()}"
+    db_session.add(Subject(name=name, grade=9))
+    await db_session.flush()
+
+    created = await admin_catalog.create_subject(
+        CreateSubjectIn(name=name, grade=10), actor=super_admin, session=db_session
+    )
+    assert (created.name, created.grade, created.grades) == (name, 10, [10])
+
+
+async def test_a_subject_needs_exactly_one_grade():
+    with pytest.raises(ValueError):
+        CreateSubjectIn(name="Science", grades=[9, 10])
+    with pytest.raises(ValueError):
+        CreateSubjectIn(name="Science")
+    assert CreateSubjectIn(name="Science", grades=[9]).grade == 9
+
+
+async def test_rename_subject_to_a_duplicate_name_for_the_same_grade_conflicts_not_500(db_session):
     super_admin = await _seed_super_admin(db_session)
     taken_name = f"Subject-{uuid.uuid4()}"
-    db_session.add(Subject(name=taken_name))
-    other = Subject(name=f"Subject-{uuid.uuid4()}")
+    db_session.add(Subject(name=taken_name, grade=9))
+    other = Subject(name=f"Subject-{uuid.uuid4()}", grade=9)
     db_session.add(other)
     await db_session.flush()
 
     with pytest.raises(ConflictError):
         await admin_catalog.update_subject(
-            str(other.id), UpdateSubjectIn(name=taken_name, grades=[9]), actor=super_admin, session=db_session,
+            str(other.id), UpdateSubjectIn(name=taken_name, grade=9), actor=super_admin, session=db_session,
         )

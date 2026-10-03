@@ -18,7 +18,7 @@ from src.domain.models import (
     User,
     VoiceTest,
 )
-from src.repositories.lookups import get_ready_test_in_school
+from src.repositories.lookups import get_test_for_teacher
 
 router = APIRouter(prefix="/api/v1", tags=["test-results"])
 
@@ -54,7 +54,7 @@ async def get_class_result(
     user: User = Depends(require_role(Role.TEACHER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ClassTestResultOut:
-    test = await get_ready_test_in_school(session, test_id, user.school_id)
+    test = await get_test_for_teacher(session, test_id, user, ready=True)
 
     results = await session.execute(
         select(StudentTestResult).where(StudentTestResult.test_id == test.id)
@@ -88,7 +88,7 @@ async def list_student_results(
     user: User = Depends(require_role(Role.TEACHER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[StudentTestResultOut]:
-    test = await get_ready_test_in_school(session, test_id, user.school_id)
+    test = await get_test_for_teacher(session, test_id, user, ready=True)
     results = await session.execute(
         select(StudentTestResult).where(StudentTestResult.test_id == test.id)
     )
@@ -112,7 +112,7 @@ async def get_student_result(
     user: User = Depends(require_role(Role.TEACHER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> StudentTestResultOut:
-    test = await get_ready_test_in_school(session, test_id, user.school_id)
+    test = await get_test_for_teacher(session, test_id, user, ready=True)
     result = await session.execute(
         select(StudentTestResult).where(
             StudentTestResult.test_id == test.id, StudentTestResult.student_id == student_id

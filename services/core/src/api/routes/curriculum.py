@@ -2,14 +2,17 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared.errors import NotFoundError
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.common import ListEnvelope
+from src.api.schemas.admin_catalog import SubtopicOut
 from src.api.schemas.curriculum import ChapterOut, SubjectOut, TopicOut
 from src.domain.models import (
     Chapter,
     Role,
     SchoolCurriculum,
     Subject,
+    Subtopic,
     TeacherClassAssignment,
     Topic,
     User,
@@ -18,33 +21,37 @@ from src.domain.models import (
 router = APIRouter(prefix="/api/v1", tags=["curriculum"])
 
 
+async def _ensure_subject_open_to(session: AsyncSession, user: User, subject_id) -> None:
+    """The curriculum tree of a subject is readable by a school only once a
+    Super Admin enabled that subject for it - and by a teacher only for a
+    subject they teach there."""
+    query = select(SchoolCurriculum.id).where(
+        SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.subject_id == subject_id,
+        SchoolCurriculum.enabled.is_(True))
+    if user.role == Role.TEACHER:
+        query = query.where(select(TeacherClassAssignment.id).where(
+            TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.subject_id == subject_id).exists())
+    if subject_id is None or (await session.execute(query.limit(1))).first() is None:
+        raise NotFoundError("That subject isn't available to you.")
+
+
 @router.get("/subjects")
 async def list_subjects(
+    grade: int | None = None,
     user: User = Depends(require_role(Role.TEACHER, Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SubjectOut]:
-    """Filtered to the caller's school's enabled subjects
-    (school_curriculum) - if the school has no school_curriculum rows at
-    all yet, every subject in the global catalog is returned rather than
-    an empty list, since "not configured" shouldn't look identical to
-    "explicitly enabled nothing."
-    """
-    enabled = await session.execute(
-        select(SchoolCurriculum.subject_id).where(
+    """The subjects a Super Admin has enabled for the caller's school
+    (school_curriculum). Only a Super Admin controls a school's subjects -
+    a school with none enabled yet has none, no "everything" fallback."""
+    result = await session.execute(
+        select(Subject).join(SchoolCurriculum, SchoolCurriculum.subject_id == Subject.id).where(
             SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.enabled.is_(True)
         )
     )
-    enabled_ids = [row[0] for row in enabled.all()]
-
-    has_any_config = await session.execute(
-        select(SchoolCurriculum.id).where(SchoolCurriculum.school_id == user.school_id).limit(1)
-    )
-    if has_any_config.scalar_one_or_none() is None:
-        result = await session.execute(select(Subject))
-    else:
-        result = await session.execute(select(Subject).where(Subject.id.in_(enabled_ids)))
-
-    items = [SubjectOut(id=str(s.id), name=s.name) for s in result.scalars().all()]
+    # `grade` narrows to that grade's subjects (legacy grade-less subjects always match)
+    items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade) for s in result.scalars().all()
+             if grade is None or s.grade in (None, grade)]
     return ListEnvelope(items=items, total=len(items))
 
 
@@ -80,23 +87,15 @@ async def list_subjects_for_class(
     assigned_subjects = list(assigned.scalars().all())
     if not assigned_subjects:
         return ListEnvelope(items=[], total=0)
-
-    has_any_config = await session.execute(
-        select(SchoolCurriculum.id).where(SchoolCurriculum.school_id == user.school_id).limit(1)
-    )
-    if has_any_config.scalar_one_or_none() is None:
-        # Not configured yet - same "don't look like explicitly enabled
-        # nothing" rule as GET /subjects.
-        items = [SubjectOut(id=str(s.id), name=s.name) for s in assigned_subjects]
-        return ListEnvelope(items=items, total=len(items))
-
+    # only subjects the Super Admin has enabled for this school - an
+    # assignment row can outlive a subject being switched off
     enabled = await session.execute(
         select(SchoolCurriculum.subject_id).where(
             SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.enabled.is_(True)
         )
     )
     enabled_ids = {row[0] for row in enabled.all()}
-    items = [SubjectOut(id=str(s.id), name=s.name) for s in assigned_subjects if s.id in enabled_ids]
+    items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade) for s in assigned_subjects if s.id in enabled_ids]
     return ListEnvelope(items=items, total=len(items))
 
 
@@ -110,17 +109,18 @@ async def list_chapters(
     """`grade` is optional so existing callers keep working unfiltered -
     but every caller that already knows the class's grade (Voice Test/
     Question Paper setup, both scoped to a class before this step) should
-    pass it: Subject is deliberately grade-agnostic (e.g. one "Science" row
-    spans 9th and 10th), so without this a chapter ingested for one grade
-    (Chapter.grade) shows up identically for every other grade sharing the
-    same subject. A chapter with no grade set (NULL - every one that
-    predates this column) always matches, grade filter or not - it's
-    "applies to any grade," not "belongs to no grade."
+    pass it. Subjects are per grade now (Subject.grade), so a subject's
+    chapters are already one grade's; the filter still matters for legacy
+    grade-less subjects. A chapter with no grade set (NULL) always matches,
+    grade filter or not - it's "applies to any grade," not "belongs to no
+    grade."
     """
+    await _ensure_subject_open_to(session, user, subject_id)
     conditions = [Chapter.subject_id == subject_id]
     if grade is not None:
         conditions.append(or_(Chapter.grade == grade, Chapter.grade.is_(None)))
-    result = await session.execute(select(Chapter).where(*conditions))
+    result = await session.execute(
+        select(Chapter).where(*conditions).order_by(Chapter.order_index.nulls_last(), Chapter.name))
     items = [
         ChapterOut(id=str(c.id), subject_id=subject_id, name=c.name, grade=c.grade)
         for c in result.scalars().all()
@@ -137,6 +137,26 @@ async def list_topics(
     """Returns items: [] for a chapter with no authored topics yet - a
     real, expected empty state, not an error.
     """
-    result = await session.execute(select(Topic).where(Topic.chapter_id == chapter_id))
+    chapter = await session.get(Chapter, chapter_id)
+    await _ensure_subject_open_to(session, user, chapter.subject_id if chapter else None)
+    result = await session.execute(select(Topic).where(Topic.chapter_id == chapter_id).order_by(Topic.name))
     items = [TopicOut(id=str(t.id), chapter_id=chapter_id, name=t.name) for t in result.scalars().all()]
+    return ListEnvelope(items=items, total=len(items))
+
+
+@router.get("/topics/{topic_id}/subtopics")
+async def list_subtopics(
+    topic_id: str,
+    user: User = Depends(require_role(Role.TEACHER, Role.SCHOOL_ADMIN)),
+    session: AsyncSession = Depends(get_db_session),
+) -> ListEnvelope[SubtopicOut]:
+    """Same as GET /chapters/{id}/topics one level down - e.g. for placing a
+    question in a school's own question bank. Empty list when a topic has
+    no subtopics."""
+    subject_id = (await session.execute(
+        select(Chapter.subject_id).join(Topic, Topic.chapter_id == Chapter.id).where(Topic.id == topic_id)
+    )).scalar_one_or_none()
+    await _ensure_subject_open_to(session, user, subject_id)
+    result = await session.execute(select(Subtopic).where(Subtopic.topic_id == topic_id).order_by(Subtopic.name))
+    items = [SubtopicOut(id=str(s.id), topic_id=topic_id, name=s.name) for s in result.scalars().all()]
     return ListEnvelope(items=items, total=len(items))

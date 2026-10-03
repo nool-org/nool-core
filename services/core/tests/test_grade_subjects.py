@@ -68,16 +68,20 @@ async def _seed_subject(db_session, *, grades: list[int] | None = None) -> Subje
 # --- School Admin surface ---------------------------------------------------
 
 
-async def test_get_grade_subjects_lists_every_subject_unmarked_when_none_enabled(db_session):
+async def test_get_grade_subjects_lists_only_the_schools_enabled_subjects_of_that_grade(db_session):
+    from src.domain.models import SchoolCurriculum
+
     school = await _seed_school(db_session)
     admin_user = await _seed_school_admin(db_session, school.id)
     grade = await _seed_grade(db_session, school.id)
-    subject = await _seed_subject(db_session, grades=[5])
+    enabled, not_enabled = await _seed_subject(db_session, grades=[5]), await _seed_subject(db_session, grades=[5])
+    enabled.grade = not_enabled.grade = 5
+    db_session.add(SchoolCurriculum(school_id=school.id, subject_id=enabled.id, enabled=True))
+    await db_session.flush()
 
     result = await school_admin.get_grade_subjects(str(grade.id), user=admin_user, session=db_session)
 
-    row = next(s for s in result.subjects if s.id == str(subject.id))
-    assert row.enabled is False
+    assert [(s.id, s.grade, s.enabled) for s in result.subjects] == [(str(enabled.id), 5, True)]
 
 
 async def test_get_grade_subjects_excludes_a_subject_not_linked_to_this_grade(db_session):
@@ -130,6 +134,9 @@ async def test_update_grade_subjects_as_admin_round_trips(db_session):
     grade = await _seed_grade(db_session, school.id)
     subject_a = await _seed_subject(db_session, grades=[5])
     subject_b = await _seed_subject(db_session, grades=[5])
+    from src.domain.models import SchoolCurriculum   # a class can only get the school's subjects
+    db_session.add_all([SchoolCurriculum(school_id=school.id, subject_id=s.id, enabled=True) for s in (subject_a, subject_b)])
+    await db_session.flush()
 
     enabled = await admin.update_grade_subjects_as_admin(
         str(grade.id), UpdateGradeSubjectsIn(subject_ids=[str(subject_a.id)]), actor=super_admin, session=db_session

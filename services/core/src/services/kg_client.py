@@ -89,6 +89,7 @@ async def generate_paper_questions(
     difficulty_distribution: dict[str, int],
     question_types: list[str],
     total_questions: int,
+    reference_questions: list[dict] | None = None,
 ) -> list[dict]:
     """Used by POST /question-papers/{id}/generate (question_paper.py).
     Grounded-question generation is not fast (one LLM call per figure-heavy
@@ -112,6 +113,7 @@ async def generate_paper_questions(
             "difficulty_distribution": difficulty_distribution,
             "question_types": question_types,
             "total_questions": total_questions,
+            "reference_questions": reference_questions or [],
         },
         timeout=120.0,
     )
