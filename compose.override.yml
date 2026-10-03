@@ -36,6 +36,10 @@ services:
       - "${KG_PORT_HOST:-8003}:8000"
 
   colearner:
+    environment:
+      # Dev-only test page at /api/v1/colearner/playground, no sign-in -
+      # see services/colearner/src/api/deps.py.
+      PLAYGROUND_ENABLED: "true"
     ports:
       # Direct access, bypassing NGINX - e.g. http://localhost:8004/docs
       # for the OpenAPI/Swagger UI. Same app the NGINX /api/v1/colearner/

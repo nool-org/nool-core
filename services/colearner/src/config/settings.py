@@ -11,6 +11,10 @@ class ColearnerSettings(BaseServiceSettings):
     # service never issues tokens or checks passwords.
     firebase_project_id: str | None = None
     firebase_credentials_path: str | None = None
+    # Dev-only: serves the playground page AND lets requests without an
+    # Authorization header through (see src/api/deps.py). Only
+    # compose.override.yml turns it on - never set it in a deployed env.
+    playground_enabled: bool = False
 
     # Model API keys - fixed per pipeline, never client-supplied (see
     # src/services/chained_service.py and multimodal_service.py). Chained

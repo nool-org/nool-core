@@ -8,7 +8,7 @@ from shared.errors import register_exception_handlers
 from shared.logging import RequestContextMiddleware, configure_logging, get_logger
 from shared.tracing import configure_tracing
 
-from src.api.routes import chained, health, homework_insight, multimodal, ready
+from src.api.routes import chained, health, homework_insight, multimodal, playground, ready, realtime
 from src.config.settings import get_settings
 
 
@@ -40,6 +40,8 @@ def create_app() -> FastAPI:
     app.include_router(chained.router)
     app.include_router(multimodal.router)
     app.include_router(homework_insight.router)
+    app.include_router(realtime.router)
+    app.include_router(playground.router)
 
     return app
 

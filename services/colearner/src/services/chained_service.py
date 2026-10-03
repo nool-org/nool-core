@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from src.config.settings import get_settings
 from src.domain.schemas import SessionConfig
@@ -28,26 +28,22 @@ TTS_VOICE = "en-IN-NeerjaNeural"
 TTS_RATE = "+0%"
 
 _settings = get_settings()
-openai_client = OpenAI(api_key=_settings.openai_api_key) if _settings.openai_api_key else None
+openai_client = AsyncOpenAI(api_key=_settings.openai_api_key) if _settings.openai_api_key else None
 
-DEFAULT_CONTEXT = """
-- Electric current (I = Q/t) and Potential difference (V = W/Q).
-- Ohm's Law (V = IR): linear relation at constant temperature.
-- Resistance factors: R = rho * l / A (length, cross-sectional area, material resistivity, temperature).
-- Resistivity (rho): intrinsic material property; does not change when wire is stretched or resized.
-- Metals vs Alloys: Copper and aluminium have low resistivity (used for transmission lines). Alloys like nichrome have higher resistivity and do not oxidize at high temperatures (used as heating elements).
-- Series circuits: Current is constant everywhere; voltage divides; if one component breaks, entire circuit stops.
-- Parallel circuits: Voltage is constant across all branches; current divides; appliances can be switched independently.
-- Joule's Law of Heating: H = I^2 * R * t. Heating element has high resistance and glows; copper cord has low resistance and stays cool.
-- Filament lamps: Tungsten has high melting point (3380°C); bulb filled with inactive nitrogen/argon to prevent oxidation.
-- Electric fuse: Safety device in series with live wire; low melting point alloy melts on overloading/short circuit.
-- Electric power: P = VI = I^2 * R = V^2 / R. Higher wattage bulb at 220V has lower resistance and thicker filament.
-"""
+
+
+def _fallback_context(config: SessionConfig) -> str:
+    """No textbook excerpt for this test - stay on the real chapter rather
+    than drifting to an unrelated built-in topic."""
+    return (
+        f"No textbook excerpt was provided. Use only standard {config.grade} {config.subject} "
+        f"syllabus content for the chapter '{config.chapter_name}' - never any other chapter."
+    )
 
 
 def build_chained_system_prompt(config: SessionConfig) -> str:
     """Builds the Co-Learner system prompt with creative Bloom's taxonomy scenario questions."""
-    context_text = config.textbook_context.strip() if config.textbook_context else DEFAULT_CONTEXT.strip()
+    context_text = config.textbook_context.strip() if config.textbook_context else _fallback_context(config)
     ref_list = config.reference_questions or []
     ref_questions_str = "\n".join(f"- {q}" for q in ref_list)
     blooms_str = ", ".join(config.blooms_attributes or ["Understanding", "Applying", "Analyzing"])
@@ -98,18 +94,21 @@ WORKFLOW & TURN PROGRESSION:
 """
 
 
-async def transcribe_audio_bytes(wav_bytes: bytes) -> str:
-    """Transcribes audio bytes using OpenAI Whisper."""
+async def transcribe_audio_bytes(wav_bytes: bytes, hint: str = "") -> str:
+    """Transcribes audio bytes using OpenAI Whisper. `hint` (subject/chapter)
+    biases Whisper toward the session's vocabulary - science terms like
+    "calcium oxide" otherwise come back misheard."""
     if not wav_bytes or not openai_client:
         return ""
     try:
         extension, _mime = detect_audio_container(wav_bytes)
         audio_file = io.BytesIO(wav_bytes)
         audio_file.name = f"student_speech{extension}"
-        transcription = openai_client.audio.transcriptions.create(
+        transcription = await openai_client.audio.transcriptions.create(
             model=STT_MODEL,
             file=audio_file,
-            language="en"
+            language="en",
+            prompt=hint,
         )
         return transcription.text.strip()
     except Exception as e:
@@ -117,7 +116,7 @@ async def transcribe_audio_bytes(wav_bytes: bytes) -> str:
         return ""
 
 
-def generate_bloom_report(session: SessionState, full_transcript: str) -> Dict[str, Any]:
+async def generate_bloom_report(session: SessionState, full_transcript: str) -> Dict[str, Any]:
     """Generates structured Bloom's Taxonomy Cognitive Mapper Report adhering to notebook schema."""
     config = session.config
 
@@ -159,7 +158,7 @@ TRANSCRIPT:
 \"\"\"
 """
     try:
-        resp = openai_client.chat.completions.create(
+        resp = await openai_client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": "You are an expert Bloom's Taxonomy educational mapper. Output strictly valid JSON."},
@@ -259,7 +258,7 @@ async def process_chained_turn(
             f"[{('CO-LEARNER' if t.get('role') == 'assistant' else 'STUDENT')}]: {t.get('content', '')}"
             for t in session.turns if t.get('content')
         )
-        report_data = generate_bloom_report(session, full_transcript)
+        report_data = await generate_bloom_report(session, full_transcript)
         session.report = report_data
         cost_report_data = generate_cost_report(session, "Chained", MODEL_PROVIDER, LLM_MODEL, TTS_VOICE)
         session.cost_report = cost_report_data
@@ -285,7 +284,7 @@ async def process_chained_turn(
                 "on this one and invite them to try again.]"
             ),
         })
-        resp = openai_client.chat.completions.create(
+        resp = await openai_client.chat.completions.create(
             model=LLM_MODEL,
             messages=session.openai_messages,
             temperature=0.5,
@@ -315,7 +314,9 @@ async def process_chained_turn(
     stt_seconds = 0.0
     if user_audio_bytes:
         stt_seconds = estimate_audio_duration_seconds(user_audio_bytes)
-        student_transcript = await transcribe_audio_bytes(user_audio_bytes)
+        student_transcript = await transcribe_audio_bytes(
+            user_audio_bytes, hint=f"A student answering a {config.subject} question about {config.chapter_name}."
+        )
     elif user_text:
         student_transcript = user_text.strip()
 
@@ -326,7 +327,7 @@ async def process_chained_turn(
 
     # Query text reasoning LLM
     session.openai_messages.append({"role": "user", "content": student_transcript})
-    resp = openai_client.chat.completions.create(
+    resp = await openai_client.chat.completions.create(
         model=LLM_MODEL,
         messages=session.openai_messages,
         temperature=0.5
@@ -372,7 +373,7 @@ async def process_chained_turn(
             f"[{('CO-LEARNER' if t.get('role') == 'assistant' else 'STUDENT')}]: {t.get('content', '')}"
             for t in session.turns if t.get('content')
         )
-        report_data = generate_bloom_report(session, full_transcript)
+        report_data = await generate_bloom_report(session, full_transcript)
         session.report = report_data
 
         # Generate and save separate Cost Analysis report

@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Co-Learner Playground</title>
+<!-- Dev test page for all three pipelines (realtime / chained / multimodal).
+     Served by src/api/routes/playground.py only when PLAYGROUND_ENABLED is on;
+     calls go out without a token, which that same flag lets through. -->
+<style>
+  :root { --bg:#f7f5f0; --card:#fff; --ink:#1c1b18; --muted:#6b6860; --line:#e4e0d6; --accent:#e6b400; --ok:#2e7d32; --err:#c62828; --me:#eef6ee; --ai:#fff8dc; --rec:#c62828; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161513; --card:#201f1c; --ink:#eeeae0; --muted:#a29e94; --line:#36342f; --me:#1f2c20; --ai:#2e2a18; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui, sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  h1 { margin:8px 0 0; font-size:22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .grid { display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); }
+  label { display:grid; gap:4px; font-size:13px; color:var(--muted); }
+  input, textarea { font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px; width:100%; }
+  textarea { min-height:70px; resize:vertical; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  .row input { flex:1; min-width:160px; width:auto; }
+  button { font:inherit; font-weight:600; border:0; border-radius:8px; padding:9px 16px; cursor:pointer; background:var(--accent); color:#1c1b18; }
+  button.secondary { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button.recording { background:var(--rec); color:#fff; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .modes { display:flex; gap:8px; flex-wrap:wrap; }
+  .modes label { display:flex; gap:8px; align-items:flex-start; border:1px solid var(--line); border-radius:10px; padding:10px 12px; cursor:pointer; flex:1; min-width:220px; color:var(--ink); font-size:14px; }
+  .modes label:has(input:checked) { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .modes input { width:auto; margin-top:3px; }
+  .modes small { display:block; color:var(--muted); font-size:12px; }
+  .status { font-size:14px; color:var(--muted); }
+  .status.ok { color:var(--ok); } .status.err { color:var(--err); }
+  #transcript { display:grid; gap:8px; max-height:420px; overflow-y:auto; }
+  .line { padding:8px 12px; border-radius:10px; max-width:85%; }
+  .line.me { background:var(--me); justify-self:end; }
+  .line.ai { background:var(--ai); }
+  .line small { display:block; font-size:11px; color:var(--muted); }
+  .empty { color:var(--muted); font-size:14px; }
+  pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:13px; max-height:480px; overflow:auto; }
+  .meter { height:6px; background:var(--line); border-radius:3px; overflow:hidden; flex:1; min-width:80px; max-width:200px; }
+  .meter div { height:100%; width:0; background:var(--ok); transition:width .1s; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Co-Learner Playground</h1>
+
+  <section class="card">
+    <h2>1 · Pipeline</h2>
+    <div class="modes">
+      <label><input type="radio" name="mode" value="realtime" checked><span>Realtime<small>Live WebRTC call (OpenAI Realtime) - what the app uses</small></span></label>
+      <label><input type="radio" name="mode" value="chained"><span>Chained<small>Record a turn → speech-to-text → LLM → TTS</small></span></label>
+      <label><input type="radio" name="mode" value="multimodal"><span>Multimodal<small>Record a turn → Gemini native audio → TTS</small></span></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>2 · Session config</h2>
+    <div class="grid">
+      <label>Grade <input id="grade" value="10th Grade"></label>
+      <label>Subject <input id="subject" value="Science (Physics)"></label>
+      <label>Chapter <input id="chapter_name" value="Electricity & Circuits"></label>
+      <label>Questions <input id="num_questions" type="number" min="1" max="10" value="2"></label>
+      <label>Max time (seconds) <input id="session_max_time_seconds" type="number" min="30" value="300"></label>
+      <label>Bloom's levels (comma-separated) <input id="blooms" value="Understanding, Applying, Analyzing"></label>
+    </div>
+    <div class="grid" style="margin-top:10px">
+      <label>Textbook context <textarea id="textbook_context">Electric current is the rate of flow of charge (I = Q/t). Ohm's law: V = IR at constant temperature. Resistance R = rho * l / A. Joule's heating law: H = I^2 * R * t.</textarea></label>
+      <label>Reference questions (one per line) <textarea id="reference_questions">Why does the cord of an electric heater not glow while the heating element glows red hot?</textarea></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3 · Session</h2>
+    <div class="row" style="margin-top:0">
+      <button id="start">Start session</button>
+      <button id="stop" class="secondary" disabled>End session</button>
+      <div class="meter" title="Your mic level"><div id="level"></div></div>
+      <span id="status" class="status">Pick a pipeline and start.</span>
+    </div>
+
+    <!-- chained / multimodal turn controls -->
+    <div id="turnControls" hidden>
+      <div class="row">
+        <button id="record">● Record answer</button>
+        <button id="hint" class="secondary">Ask for a hint</button>
+      </div>
+      <div class="row">
+        <input id="textAnswer" placeholder="…or type an answer instead">
+        <button id="sendText" class="secondary">Send text</button>
+      </div>
+    </div>
+
+    <div id="transcript" style="margin-top:12px"><p class="empty">The transcript appears here.</p></div>
+    <audio id="player" autoplay></audio>
+  </section>
+
+  <section class="card">
+    <h2>Report</h2>
+    <pre id="report" class="empty">The Bloom report (and cost report, for chained/multimodal) appears here when the session ends.</pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const mode = () => document.querySelector('input[name=mode]:checked').value;
+let s = null; // the running session, whichever pipeline
+
+function status(text, kind) { $('status').textContent = text; $('status').className = 'status' + (kind ? ' ' + kind : ''); }
+
+async function post(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error?.message || data?.detail || `HTTP ${res.status}`);
+  return data;
+}
+
+function readConfig() {
+  const list = (v, sep) => v.split(sep).map((x) => x.trim()).filter(Boolean);
+  return {
+    grade: $('grade').value, subject: $('subject').value, chapter_name: $('chapter_name').value,
+    num_questions: Number($('num_questions').value),
+    session_max_time_seconds: Number($('session_max_time_seconds').value),
+    blooms_attributes: list($('blooms').value, ','),
+    textbook_context: $('textbook_context').value.trim() || null,
+    reference_questions: list($('reference_questions').value, '\n'),
+  };
+}
+
+function addLine(who, text, note) {
+  if (!text) return;
+  const box = $('transcript');
+  box.querySelector('.empty')?.remove();
+  const div = document.createElement('div');
+  div.className = 'line ' + who;
+  const label = document.createElement('small');
+  label.textContent = (who === 'me' ? 'Student' : 'Milo') + (note ? ' · ' + note : '');
+  div.append(label, text);
+  box.append(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function showReport(obj) { $('report').textContent = JSON.stringify(obj, null, 2); $('report').className = ''; }
+
+function meter(stream) {
+  const ctx = new AudioContext();
+  const an = ctx.createAnalyser(); an.fftSize = 512;
+  ctx.createMediaStreamSource(stream).connect(an);
+  const buf = new Uint8Array(an.fftSize);
+  const tick = () => {
+    if (!s || s.mic !== stream) { ctx.close(); $('level').style.width = '0'; return; }
+    an.getByteTimeDomainData(buf);
+    let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+    $('level').style.width = Math.min(100, peak * 1.6) + '%';
+    requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function resetUi() {
+  $('transcript').innerHTML = '<p class="empty">The transcript appears here.</p>';
+  $('report').textContent = 'The Bloom report (and cost report, for chained/multimodal) appears here when the session ends.';
+  $('report').className = 'empty';
+}
+
+function setRunning(running) {
+  $('start').disabled = running;
+  $('stop').disabled = !running;
+  document.querySelectorAll('input[name=mode]').forEach((r) => (r.disabled = running));
+}
+
+$('start').onclick = async () => {
+  resetUi();
+  setRunning(true);
+  try {
+    status('Asking for the microphone…');
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s = { mode: mode(), mic, timers: [] };
+    meter(mic);
+    await (s.mode === 'realtime' ? startRealtime() : startTurnBased());
+  } catch (e) {
+    status('Could not start: ' + e.message, 'err');
+    teardown();
+  }
+};
+$('stop').onclick = () => (s?.mode === 'realtime' ? finishRealtime() : sendTurn({ time_limit_reached: true }, 'ending'));
+
+function teardown() {
+  if (!s) return null;
+  const old = s; s = null;
+  old.timers.forEach(clearTimeout);
+  if (old.recorder?.state === 'recording') old.recorder.stop();
+  old.pc?.close();
+  old.mic?.getTracks().forEach((t) => t.stop());
+  $('player').pause(); $('player').srcObject = null; $('player').removeAttribute('src');
+  $('turnControls').hidden = true;
+  $('record').className = ''; $('record').textContent = '● Record answer';
+  setRunning(false);
+  return old;
+}
+
+/* ---------- realtime: WebRTC call, same flow as the app ---------- */
+
+async function startRealtime() {
+  s.ownerRef = crypto.randomUUID();
+  s.pending = {}; s.endRequested = false; s.closingSpoken = false; s.speaking = false;
+  const pc = new RTCPeerConnection();
+  s.pc = pc;
+  s.mic.getTracks().forEach((t) => pc.addTrack(t, s.mic));
+  pc.ontrack = (e) => { $('player').srcObject = e.streams[0]; };
+  pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') { status('Connection dropped.', 'err'); finishRealtime(); } };
+  const ch = pc.createDataChannel('oai-events');
+  ch.onmessage = (e) => onRealtimeEvent(e.data);
+  ch.onopen = () => status('Connected - Milo is about to greet you…', 'ok');
+
+  status('Connecting…');
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const config = readConfig();
+  const answer = await post('/api/v1/colearner/realtime/calls', { sdp: offer.sdp, config, owner_ref: s.ownerRef });
+  s.callId = answer.call_id;
+  await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+  // The server hangs up after max time + its grace period; this is only a backstop.
+  s.timers.push(setTimeout(finishRealtime, (config.session_max_time_seconds + 45) * 1000));
+}
+
+function onRealtimeEvent(raw) {
+  let ev; try { ev = JSON.parse(raw); } catch { return; }
+  if (!s) return;
+  switch (ev.type) {
+    case 'output_audio_buffer.started': s.speaking = true; status('Milo is speaking…', 'ok'); break;
+    case 'output_audio_buffer.stopped':
+    case 'output_audio_buffer.cleared':
+      s.speaking = false;
+      if (s.closingSpoken) finishRealtime();
+      else status(s.endRequested ? 'Wrapping up…' : 'Listening…', 'ok');
+      break;
+    case 'input_audio_buffer.speech_started': status('Hearing you…', 'ok'); break;
+    case 'input_audio_buffer.speech_stopped': status('Thinking…', 'ok'); break;
+    case 'conversation.item.input_audio_transcription.completed': addLine('me', (ev.transcript || '').trim()); break;
+    case 'response.output_audio_transcript.done': (s.pending[ev.response_id || ''] ||= []).push((ev.transcript || '').trim()); break;
+    case 'response.done': {
+      const id = ev.response?.id || '';
+      if (ev.response?.status !== 'cancelled') addLine('ai', (s.pending[id] || []).join(' '));
+      delete s.pending[id];
+      const calledEnd = ev.response?.output?.some((o) => o.type === 'function_call' && o.name === 'end_session');
+      // Same hang-up rule as the app: end_session is followed by one goodbye turn.
+      if (calledEnd) { s.endRequested = true; s.timers.push(setTimeout(finishRealtime, 20000)); }
+      else if (s.endRequested) { s.closingSpoken = true; if (!s.speaking) finishRealtime(); }
+      break;
+    }
+    case 'error': addLine('ai', '[error] ' + (ev.error?.message || raw)); break;
+  }
+}
+
+async function finishRealtime() {
+  const old = teardown();
+  if (!old?.callId) return;
+  status('Call ended - scoring…');
+  try {
+    showReport(await post(`/api/v1/colearner/realtime/calls/${old.callId}/finish`, { owner_ref: old.ownerRef }));
+    status('Done.', 'ok');
+  } catch (e) {
+    status('Scoring failed: ' + e.message, 'err');
+  }
+}
+
+/* ---------- chained / multimodal: one request per turn ---------- */
+
+async function startTurnBased() {
+  status('Getting the greeting…');
+  await sendTurn({ config: readConfig() }, null);
+  if (s) $('turnControls').hidden = false;
+}
+
+async function sendTurn(body, studentNote) {
+  if (!s || s.busy) return;
+  s.busy = true;
+  setTurnButtons(false);
+  status(studentNote === 'ending' ? 'Ending - scoring…' : 'Thinking…');
+  try {
+    const res = await post(`/api/v1/colearner/${s.mode}`, { session_id: s.sessionId, ...body });
+    if (!s) return;
+    s.sessionId = res.session_id;
+    if (res.student_transcript) addLine('me', res.student_transcript, studentNote && studentNote !== 'ending' ? studentNote : '');
+    const cost = res.turn_metrics?.turn_cost_usd;
+    addLine('ai', res.co_learner_text, [res.is_hint_reply && 'hint', cost != null && `$${Number(cost).toFixed(4)}`].filter(Boolean).join(' · '));
+    if (res.co_learner_audio_base64) {
+      $('player').src = `data:${res.audio_mime_type || 'audio/mpeg'};base64,${res.co_learner_audio_base64}`;
+      $('player').play().catch(() => {});
+    }
+    if (res.is_completed) {
+      showReport({ report: res.report, cost_report: res.cost_report });
+      teardown();
+      status('Session complete.', 'ok');
+      return;
+    }
+    status(`Turn ${res.turn_index} - your answer.`, 'ok');
+  } catch (e) {
+    status('Turn failed: ' + e.message, 'err');
+  } finally {
+    if (s) { s.busy = false; setTurnButtons(true); }
+  }
+}
+
+function setTurnButtons(on) { ['record', 'hint', 'sendText'].forEach((id) => ($(id).disabled = !on)); }
+
+$('record').onclick = () => {
+  if (!s || s.busy) return;
+  if (s.recorder?.state === 'recording') { s.recorder.stop(); return; }
+  $('player').pause();
+  const chunks = [];
+  const rec = new MediaRecorder(s.mic);
+  s.recorder = rec;
+  rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  rec.onstop = async () => {
+    $('record').className = ''; $('record').textContent = '● Record answer';
+    if (!s) return;
+    const blob = new Blob(chunks, { type: rec.mimeType });
+    const b64 = await new Promise((ok) => { const r = new FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(blob); });
+    sendTurn({ user_audio_base64: b64 }, 'voice'); // data: URI header is stripped server-side
+  };
+  rec.start();
+  $('record').className = 'recording'; $('record').textContent = '■ Stop & send';
+  status('Recording… press again to send.', 'ok');
+};
+$('hint').onclick = () => sendTurn({ is_hint_request: true, user_text: 'Can I have a hint?' }, 'hint');
+$('sendText').onclick = () => {
+  const text = $('textAnswer').value.trim();
+  if (!text) return;
+  $('textAnswer').value = '';
+  sendTurn({ user_text: text }, 'typed');
+};
+$('textAnswer').onkeydown = (e) => { if (e.key === 'Enter') $('sendText').click(); };
+</script>
+</body>
+</html>

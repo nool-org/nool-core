@@ -26,12 +26,7 @@ class SessionConfig(BaseModel):
         description="Comprehensive textbook concepts, principles, formulas, and syllabus context passed in JSON"
     )
     reference_questions: List[str] = Field(
-        default_factory=lambda: [
-            "Why does the cord of an electric heater not glow while the heating element glows red hot?",
-            "If a metal wire of length L and resistance R is stretched to double its length, how do its resistance and resistivity change?",
-            "Why is a series circuit arrangement not used for connecting electrical appliances in a house?",
-            "Between a 100-watt bulb and a 40-watt bulb connected to the same 220-volt supply, which bulb has higher resistance and thicker filament?"
-        ],
+        default_factory=list,
         description="Reference topic inspirations and core concepts for the co-learner to formulate creative scenario questions"
     )
     session_max_time_seconds: int = Field(

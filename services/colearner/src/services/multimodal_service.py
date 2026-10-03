@@ -29,24 +29,20 @@ TTS_RATE = "+0%"
 _settings = get_settings()
 gemini_client = genai.Client(api_key=_settings.gemini_api_key) if _settings.gemini_api_key else None
 
-DEFAULT_CONTEXT = """
-- Electric current (I = Q/t) and Potential difference (V = W/Q).
-- Ohm's Law (V = IR): linear relation at constant temperature.
-- Resistance factors: R = rho * l / A (length, cross-sectional area, material resistivity, temperature).
-- Resistivity (rho): intrinsic material property; does not change when wire is stretched or resized.
-- Metals vs Alloys: Copper and aluminium have low resistivity (used for transmission lines). Alloys like nichrome have higher resistivity and do not oxidize at high temperatures (used as heating elements).
-- Series circuits: Current is constant everywhere; voltage divides; if one component breaks, entire circuit stops.
-- Parallel circuits: Voltage is constant across all branches; current divides; appliances can be switched independently.
-- Joule's Law of Heating: H = I^2 * R * t. Heating element has high resistance and glows; copper cord has low resistance and stays cool.
-- Filament lamps: Tungsten has high melting point (3380°C); bulb filled with inactive nitrogen/argon to prevent oxidation.
-- Electric fuse: Safety device in series with live wire; low melting point alloy melts on overloading/short circuit.
-- Electric power: P = VI = I^2 * R = V^2 / R. Higher wattage bulb at 220V has lower resistance and thicker filament.
-"""
+
+
+def _fallback_context(config: SessionConfig) -> str:
+    """No textbook excerpt for this test - stay on the real chapter rather
+    than drifting to an unrelated built-in topic."""
+    return (
+        f"No textbook excerpt was provided. Use only standard {config.grade} {config.subject} "
+        f"syllabus content for the chapter '{config.chapter_name}' - never any other chapter."
+    )
 
 
 def build_multimodal_system_prompt(config: SessionConfig) -> str:
     """Builds direct audio multimodal system prompt with creative Bloom's taxonomy scenario questions."""
-    context_text = config.textbook_context.strip() if config.textbook_context else DEFAULT_CONTEXT.strip()
+    context_text = config.textbook_context.strip() if config.textbook_context else _fallback_context(config)
     ref_list = config.reference_questions or []
     ref_questions_str = "\n".join(f"- {q}" for q in ref_list)
     blooms_str = ", ".join(config.blooms_attributes or ["Understanding", "Applying", "Analyzing"])
