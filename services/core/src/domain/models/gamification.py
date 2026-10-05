@@ -1,7 +1,7 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Date, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -43,3 +43,17 @@ class StudentDailyGoalCompletion(Base):
     student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     goal_key: Mapped[str] = mapped_column(String)
     completed_date: Mapped[date] = mapped_column(Date)
+
+
+class StudentBadge(Base):
+    """A Bloom badge once earned (src/services/gamification.py's
+    sync_badges). Stored, unlike achievements, so a regraded result never
+    takes a badge back."""
+
+    __tablename__ = "student_badges"
+
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
+    )
+    badge_id: Mapped[str] = mapped_column(String, primary_key=True)
+    earned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
