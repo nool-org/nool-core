@@ -8,6 +8,8 @@ class KgSettings(BaseServiceSettings):
     # talks to - see services/core/src/services/kg_client.py for the HTTP
     # seam everything else in nool-core goes through instead.
     nool_kg_base_url: str = "https://nool-data.draco-labs.in"
+    # Sent as X-API-Key when set (nool-kg API-key auth).
+    nool_kg_api_key: str | None = None
 
     # Question generation grounded in the KG - see src/services/generator.py.
     openai_api_key: str | None = None

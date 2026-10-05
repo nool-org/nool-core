@@ -10,11 +10,22 @@ context plus a request shape into grounded questions.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 MODEL = "gpt-5.1"
 MAX_COMPLETION_TOKENS = 16000
+# max_retries gives the SDK's own exponential backoff on 429/5xx/timeouts.
+OPENAI_TIMEOUT_SECONDS = 90.0
+OPENAI_MAX_RETRIES = 2
+
+
+@lru_cache
+def _get_client(api_key: str) -> AsyncOpenAI:
+    """One shared AsyncOpenAI client (connection pool) per key instead of a
+    new sync client per request blocking the event loop."""
+    return AsyncOpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_SECONDS, max_retries=OPENAI_MAX_RETRIES)
 
 _BLOOM_LEVELS = ("REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE", "EVALUATE", "CREATE")
 _DIFFICULTY_LEVELS = ("EASY", "MEDIUM", "HARD")
@@ -49,7 +60,7 @@ GENERATED_QUESTIONS_SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """You are a CBSE Class 10 Science question-paper writer. You are given a set
+SYSTEM_PROMPT = """You are a {board} Class {grade} {subject} question-paper writer. You are given a set
 of topics/subtopics retrieved from the actual NCERT textbook - each with its
 own textbook text, activities, worked examples, and existing textbook
 questions, grounded with a topic_ref you must cite in source_refs.
@@ -153,7 +164,7 @@ def _build_assessor_user_message(
     return "\n".join(parts)
 
 
-def generate_assessor_content(
+async def generate_assessor_content(
     *, api_key: str, concept_context: list[dict], bloom_levels: list[str], num_questions: int
 ) -> dict:
     """Grounded reference questions + a spoken-friendly context summary for
@@ -166,8 +177,7 @@ def generate_assessor_content(
     if not concept_context:
         return {"reference_questions": [], "textbook_context": ""}
 
-    client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
+    response = await _get_client(api_key).chat.completions.create(
         model=MODEL,
         max_completion_tokens=MAX_COMPLETION_TOKENS,
         messages=[
@@ -195,9 +205,12 @@ def generate_assessor_content(
     return json.loads(message.content)
 
 
-def generate_questions(
+async def generate_questions(
     *,
     api_key: str,
+    board: str,
+    grade: int,
+    subject: str,
     concept_context: list[dict],
     bloom_distribution: dict[str, int],
     difficulty_distribution: dict[str, int],
@@ -208,12 +221,11 @@ def generate_questions(
     if not concept_context and not reference_questions:
         return []
 
-    client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
+    response = await _get_client(api_key).chat.completions.create(
         model=MODEL,
         max_completion_tokens=MAX_COMPLETION_TOKENS,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": SYSTEM_PROMPT.format(board=board, grade=grade, subject=subject)},
             {
                 "role": "user",
                 "content": _build_user_message(

@@ -29,7 +29,7 @@ async def generate(body: GenerateAssessorContentIn) -> GenerateAssessorContentOu
         board=body.board,
         grade=body.grade,
     )
-    result = generate_assessor_content(
+    result = await generate_assessor_content(
         api_key=settings.openai_api_key,
         concept_context=context,
         bloom_levels=body.bloom_levels,
