@@ -31,8 +31,8 @@ nool-core/
 ├── services/
 │   ├── auth/               # Firebase token verification service
 │   ├── core/               # core business API
-│   ├── colearner/          # voice co-learner (realtime/chained/multimodal)
-│   ├── generation/         # Homework gap-fill question generation
+│   ├── colearner/          # voice co-learner (OpenAI Realtime + gpt-5-mini grader)
+│   ├── generation/         # voice test question prep, Homework gap-fill
 │   └── kg/                 # curriculum + grounded generation over nool-kg
 ├── database/               # Alembic migration tooling
 ├── shared/                 # generic cross-service infrastructure
@@ -48,7 +48,7 @@ docker compose up --build
 curl http://localhost:8080/health
 ```
 
-Set `OPENAI_API_KEY` / `GEMINI_API_KEY` in `.env` for the AI features. If
+Set `OPENAI_API_KEY` in `.env` for the AI features. If
 the hosted textbook graph is down, run nool-kg locally on port 8010 - see
 "The textbook graph (nool-kg) and the local fallback" in
 `docs/DEVELOPMENT.md`, which also covers running tests (with fake model
@@ -66,5 +66,5 @@ distributed tracing (Jaeger) and the authentication audit trail.
 | Auth    | Firebase ID token verification | [`services/auth/README.md`](services/auth/README.md) |
 | Core    | Core business API              | [`services/core/README.md`](services/core/README.md) |
 | Colearner | AI Assessor voice sessions, Homework insight | [`services/colearner/README.md`](services/colearner/README.md) |
-| Generation | Homework gap-fill (gpt-5.1 + gpt-5-mini verify) | [`services/generation/README.md`](services/generation/README.md) |
-| KG      | Curriculum + question/voice-test grounding over nool-kg (gpt-5.1) | [`services/kg/README.md`](services/kg/README.md) |
+| Generation | Voice test question prep, Homework gap-fill (gpt-5.1 + gpt-5-mini verify) | [`services/generation/README.md`](services/generation/README.md) |
+| KG      | Curriculum, question papers, voice-test textbook context over nool-kg (gpt-5.1) | [`services/kg/README.md`](services/kg/README.md) |

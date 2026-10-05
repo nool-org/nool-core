@@ -12,8 +12,8 @@ cp .env.example .env
 # edit .env - at minimum set POSTGRES_PASSWORD to something non-default
 ```
 
-The AI features also need `OPENAI_API_KEY` (colearner, generation, kg) and
-`GEMINI_API_KEY` (colearner's multimodal pipeline only), plus the Firebase
+The AI features also need `OPENAI_API_KEY` (colearner, generation, kg; the
+only model key - there is no Gemini key any more), plus the Firebase
 credentials - see `.env.example`. Without the keys the stack still starts,
 but `/ready` on those services reports 503 and voice tests / question paper
 generation fail.
@@ -81,7 +81,8 @@ alongside it for local dev and additionally publishes:
 - Azurite (local Azure Blob stand-in for question images) on `localhost:10000`.
 
 `compose.override.yml` also sets `PLAYGROUND_ENABLED=true` on colearner, so
-the browser test page for all voice pipelines is at
+the browser test page for the voice pipelines (Realtime, and the Cascaded
+prototype) is at
 `http://localhost:8004/api/v1/colearner/playground` (or via NGINX at
 `http://localhost:8080/api/v1/colearner/playground`). It skips sign-in and
 spends real model API credit; it must never be enabled in production.
@@ -104,20 +105,27 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
 
 then set `NOOL_KG_BASE_URL=http://host.docker.internal:8010` in `.env` and
 recreate kg (`docker compose up -d kg`). If question paper generation or
-voice test reference content starts failing with kg 500s, first check that
+a voice test's textbook context starts failing with kg 500s, first check that
 port 8010 is up. Remove the line again once the hosted graph is back.
 
 ### A voice test locally
 
 1. Sync a chapter from KG in the Super Admin catalog (so it has real
-   content to ground against), create a class, teacher and student.
-2. As the teacher, create and publish a Voice Test for that chapter.
+   content to ground against), create a class, teacher and student, and
+   make sure the school can see a QA dataset with questions for that
+   chapter (the voice test's questions are picked from it).
+2. As the teacher, create and schedule a Voice Test for that chapter.
+   Give the background prep ~10-60 s (Core logs `voice_test_prep_*`
+   warnings if something falls back), then check or edit the questions
+   on the app's question review screen (`GET /api/v1/tests/{id}/questions`).
 3. As the student in nool-apps (web or device), open the assigned test:
    the app negotiates WebRTC through Core -> colearner -> OpenAI Realtime
-   and the conversation is live; finishing records the Bloom result.
+   and Milo asks those questions; finishing grades the answers and
+   records the result, per-topic scores and the auto Homework.
 
 To try the voice pipelines without the app or test data, use the
-playground page above. The full flow is described in
+playground page above (it does not use prepared questions - Milo
+improvises from the textbook context you paste). The full flow is described in
 `docs/ARCHITECTURE.md` ("A voice test, end to end").
 
 ### Destructive: resetting the database
@@ -148,9 +156,11 @@ cd services/<auth|core|colearner|generation> && pip install -r requirements-dev.
 cd services/kg && pip install -r requirements.txt pytest && pytest
 ```
 
-No test requires a real PostgreSQL, Firebase or model API - dependencies
-are mocked at the boundary (see each service's `tests/`), and the LLM/STT/
-TTS clients are replaced with fakes. Run tests **without** model API keys
+No test requires a real Firebase or model API - dependencies are mocked at
+the boundary (see each service's `tests/`), and the LLM/STT/TTS clients are
+replaced with fakes. Core's DB tests run against the dev Postgres when they
+can reach it (inside the Compose network, with real `POSTGRES_*`
+credentials), creating their own data, and skip otherwise. Run tests **without** model API keys
 in the environment so an unfaked call fails instead of spending credit.
 
 To run a suite with exactly the production dependencies, run it inside that
@@ -161,6 +171,10 @@ over `/app`, pass only the non-secret env it needs (Postgres, Firebase
 project, `ENVIRONMENT`) and run `python -m pytest`. This works for any
 checkout (e.g. a git worktree) without touching the running containers.
 
+The grader accuracy gate (`services/colearner/evals`, real API, about
+$0.09 a run) is separate from these tests - run it after changing the
+grader prompt, schema or model; see `services/colearner/evals/README.md`.
+
 ## Deploying (production)
 
 Production uses `compose.prod.yml` (see `compose.prod.yml` for the exact
@@ -168,7 +182,7 @@ services, images and settings) instead of `compose.override.yml`. Intended
 usage:
 
 1. Provision managed PostgreSQL and put its credentials, the Firebase
-   service account, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `NOOL_KG_BASE_URL`
+   service account, `OPENAI_API_KEY`, `NOOL_KG_BASE_URL`
    and the asset storage settings into the server's environment / `.env`
    (never into the repo).
 2. Build and start: `docker compose -f compose.yml -f compose.prod.yml up -d --build`.

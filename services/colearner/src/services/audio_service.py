@@ -68,11 +68,11 @@ def decode_base64_audio(b64_string: str) -> bytes:
 # detection function over the leading bytes. Real recorded audio arrives
 # in whatever container the caller's platform produces - nool-apps'
 # student mic capture (expo-audio's HIGH_QUALITY preset) sends M4A/MP4,
-# not WAV/WebM, so both the Whisper filename hint (chained_service.py)
-# and the Gemini mime_type (multimodal_service.py) need to recognize it
-# correctly rather than defaulting to "webm" for everything non-RIFF -
-# Gemini in particular decodes strictly by declared mime_type, so a wrong
-# guess there silently produces garbage/empty transcription, not an error.
+# not WAV/WebM, so a filename/mime hint for an STT call must recognize it
+# correctly rather than defaulting to "webm" for everything non-RIFF - a
+# wrong guess can silently produce garbage/empty transcription, not an
+# error. No production pipeline calls this today (realtime streams audio
+# over WebRTC; cascaded converts to WAV first); kept with its tests.
 def detect_audio_container(audio_bytes: bytes) -> tuple[str, str]:
     """Returns (file_extension_with_dot, mime_type) detected from the
     leading bytes. Falls back to WebM (the one non-detectable format this

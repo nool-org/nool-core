@@ -48,11 +48,11 @@ notifications remain out of scope until a real feature needs them.
 
 AI-backed content is real and lives in three internal services that Core calls (models are fixed in code; see docs/ARCHITECTURE.md for the full table and the voice test flow):
 
-colearner — the AI Assessor voice test: WebRTC realtime voice (gpt-realtime-2.1-mini, transcript gpt-4o-mini-transcribe, Bloom report gpt-5-mini, scores computed in code); per-turn chained (whisper-1, gpt-4o-mini, Edge-TTS) and multimodal (gemini-3.5-flash-lite, Edge-TTS) pipelines; a cascaded prototype (gpt-4o-mini-transcribe, gpt-4.1-mini, gpt-4o-mini-tts); Homework insight (gpt-4o-mini); a dev-only playground at /api/v1/colearner/playground behind PLAYGROUND_ENABLED.
+colearner — the AI Assessor voice test, realtime only: WebRTC voice (gpt-realtime-2.1-mini, transcript gpt-4o-mini-transcribe) asking the test's prepared questions via tools (ask_question, give_hint, give_explanation, end_session); rubric grading with gpt-5-mini (scores computed in code; accuracy gate in services/colearner/evals); a cascaded prototype (gpt-4o-mini-transcribe, gpt-4.1-mini, gpt-4o-mini-tts); Homework insight (gpt-4o-mini); a dev-only playground at /api/v1/colearner/playground behind PLAYGROUND_ENABLED. The chained and multimodal (Gemini) pipelines are gone - do not reintroduce them.
 
-generation — Homework gap-fill questions (gpt-5.1 writes, gpt-5-mini verifies).
+generation — voice test question prep (rewords one dataset question per Bloom level and writes its rubric) and Homework gap-fill (gpt-5.1 writes, gpt-5-mini verifies).
 
-kg — curriculum tree, question paper questions and voice test grounding over the nool-kg textbook graph (gpt-5.1).
+kg — curriculum tree, question paper questions and a voice test's textbook context (grounding only, no questions) over the nool-kg textbook graph (gpt-5.1).
 
 Core's `DeterministicContentGenerator` (services/core/src/services/content_generator.py) is only the last-resort Homework fallback. Colearner keeps session state in process memory, so it runs as a single replica.
 

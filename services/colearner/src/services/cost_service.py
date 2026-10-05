@@ -29,23 +29,6 @@ MODEL_PRICING = {
         "output_per_million": 0.60,
         "audio_input_per_million": 10.00,
         "audio_output_per_million": 20.00
-    },
-    # Gemini Models
-    "gemini-3.5-flash-lite": {
-        "input_per_million": 0.075,
-        "output_per_million": 0.30,
-    },
-    "gemini-2.5-flash": {
-        "input_per_million": 0.075,
-        "output_per_million": 0.30,
-    },
-    "gemini-1.5-flash": {
-        "input_per_million": 0.075,
-        "output_per_million": 0.30,
-    },
-    "gemini-1.5-pro": {
-        "input_per_million": 1.25,
-        "output_per_million": 5.00,
     }
 }
 
@@ -232,10 +215,10 @@ def generate_cost_report(
 ) -> Dict[str, Any]:
     """Generates a structured Cost Analysis Report and saves it to reports/.
 
-    model_provider/model_name/tts_voice are passed explicitly by the caller
-    (chained_service.py / multimodal_service.py's fixed constants) rather
-    than read off session.config - model selection is no longer part of
-    SessionConfig (see src/domain/schemas.py).
+    Left over from the removed per-turn chained pipeline (Whisper STT +
+    Edge-TTS); nothing calls it today - realtime uses realtime_cost_report.
+    model_provider/model_name/tts_voice are passed explicitly by the caller,
+    since model selection is not part of SessionConfig.
     """
     elapsed_seconds = round((datetime.now() - session.created_at).total_seconds(), 1)
     total_tokens = session.total_input_tokens + session.total_output_tokens
@@ -273,7 +256,7 @@ def generate_cost_report(
         m_data["cost_usd"] = round(m_data["cost_usd"], 6)
         m_data["cost_inr"] = round(m_data["cost_usd"] * USD_TO_INR_RATE, 4)
 
-    # Add Whisper STT if audio was ingested in Chained pipeline
+    # Add Whisper STT if audio was ingested
     if session.total_audio_seconds > 0:
         stt_cost = round(session.total_audio_seconds * WHISPER_PER_SECOND_USD, 6)
         models_breakdown["whisper-1"] = {

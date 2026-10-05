@@ -1,10 +1,9 @@
 """Turns colearner's per-session Bloom's report into a real per-level score
 - the replacement for test_completion.py's honest-but-placeholder
 completion-rate math (mastery_percent = 100*answered/total), now that a
-real grading LLM call exists (see services/colearner/src/services/
-chained_service.py's generate_bloom_report / multimodal_service.py's
-generate_multimodal_bloom_report - each qa_transcripts entry now carries a
-score_percent, added alongside this module).
+real grading LLM call exists (colearner's rubric grader,
+services/colearner/src/services/evaluation/grader.py, gpt-5-mini - each
+qa_transcripts entry carries a score_percent).
 
 Deliberately tolerant of a missing/malformed report (an older cached
 report shape, a report-generation failure that fell back to colearner's
@@ -23,8 +22,8 @@ from src.domain.models import BloomLevel
 
 # colearner's report writes Bloom levels as the same gerund words its own
 # prompt enumerates ("Understanding", "Applying", "Analyzing",
-# "Remembering", "Evaluating", "Creating" - see chained_service.py's
-# generate_bloom_report), not Core's BloomLevel enum values. Maps both
+# "Remembering", "Evaluating", "Creating" - see colearner's
+# evaluation/grader.py blooms_attribute enum), not Core's BloomLevel enum values. Maps both
 # forms (case-insensitively) so either a gerund or a bare enum value
 # ("UNDERSTAND") normalizes correctly.
 _BLOOM_LABEL_TO_LEVEL: dict[str, BloomLevel] = {

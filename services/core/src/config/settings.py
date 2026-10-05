@@ -35,9 +35,9 @@ class CoreSettings(BaseServiceSettings):
 
     # Base URL of the colearner service (services/colearner) - see
     # src/services/colearner_client.py. Blank-safe: only the AI Assessor's
-    # WS stream (ai_assessor.py's stream_session) needs it; every other
-    # route is unaffected if unset (the WS closes with an error event
-    # instead of connecting to a real voice pipeline).
+    # live call (POST /ai-assessor/sessions/{id}/realtime, .../finish,
+    # 503 if unset) and the Homework insight (placeholder text if unset)
+    # need it; every other route is unaffected.
     colearner_service_url: str | None = None
 
     # Base URL of the generation service (services/generation) - see
