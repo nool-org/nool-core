@@ -9,7 +9,9 @@ from src.api.routes.student_dashboard import _learning_streak
 from src.api.schemas.gamification import (
     AchievementOut,
     AwardSessionXpIn,
+    BadgeOut,
     DailyGoalOut,
+    QuestOut,
     StudentGamificationOut,
 )
 from src.domain.models import (
@@ -20,6 +22,7 @@ from src.domain.models import (
     StudentTestResult,
     User,
 )
+from src.services.gamification import BADGES, class_quests, sync_badges
 
 router = APIRouter(prefix="/api/v1", tags=["gamification"])
 
@@ -167,14 +170,10 @@ async def _achievements_out(session: AsyncSession, user: User) -> list[Achieveme
     ]
 
 
-@router.get("/me/gamification")
-async def get_my_gamification(
-    user: User = Depends(require_role(Role.STUDENT)),
-    session: AsyncSession = Depends(get_db_session),
-) -> StudentGamificationOut:
-    state = await _get_or_create_state(session, user.id)
-    # Reaching this endpoint at all means the app was opened today.
-    await _mark_goal_complete(session, user.id, "goal-open-app")
+async def _gamification_out(session: AsyncSession, user: User, state: StudentGamification) -> StudentGamificationOut:
+    """Commits pending writes (XP, goals, newly earned badges), then builds
+    the response."""
+    earned = await sync_badges(session, user.id)
     await session.commit()
 
     completed_keys = await _completed_goal_keys_today(session, user.id)
@@ -186,7 +185,24 @@ async def get_my_gamification(
         xp_for_next_level=state.xp_for_next_level,
         daily_goals=_daily_goals_out(completed_keys),
         achievements=achievements,
+        badges=[
+            BadgeOut(id=badge_id, name=name, bloom_level=level, earned=badge_id in earned,
+                     earned_at=earned.get(badge_id))
+            for badge_id, name, level in BADGES
+        ],
+        quests=[QuestOut(**quest) for quest in await class_quests(session, user.id)],
     )
+
+
+@router.get("/me/gamification")
+async def get_my_gamification(
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> StudentGamificationOut:
+    state = await _get_or_create_state(session, user.id)
+    # Reaching this endpoint at all means the app was opened today.
+    await _mark_goal_complete(session, user.id, "goal-open-app")
+    return await _gamification_out(session, user, state)
 
 
 @router.post("/me/gamification/award", summary="Award XP for a completed activity")
@@ -199,15 +215,4 @@ async def award_session_xp(
     # _record_completion); this client-reported award is capped so it can't
     # be used to mint XP.
     state = await apply_xp(session, user.id, min(body.xp_earned, SESSION_XP), body.completed_goal_id)
-    await session.commit()
-
-    completed_keys = await _completed_goal_keys_today(session, user.id)
-    achievements = await _achievements_out(session, user)
-
-    return StudentGamificationOut(
-        level=state.level,
-        xp=state.xp,
-        xp_for_next_level=state.xp_for_next_level,
-        daily_goals=_daily_goals_out(completed_keys),
-        achievements=achievements,
-    )
+    return await _gamification_out(session, user, state)
