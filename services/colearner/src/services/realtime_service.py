@@ -19,6 +19,7 @@ ponytail: calls live in-process memory, same v1 limitation as session_store
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -45,6 +46,13 @@ _GRACE_SECONDS = 30
 # Finished/abandoned calls are kept this long (so a retried finish still
 # gets its result), then dropped.
 _KEEP_SECONDS = 3 * 3600
+# Cost caps - live voice is billed by how long Milo talks and how long the call runs.
+# ~17 audio tokens per spoken second + the text transcript: 220 ~ 10 s of speech,
+# a backstop for "1-2 short sentences" (a reply may be cut, never runs on).
+MAX_REPLY_TOKENS = 220
+MAX_CLOSING_TOKENS = 500  # the 2-3 sentence summary + fixed sign-off line
+MAX_REPLIES = 18  # co-learner replies per call, then the wrap-up is forced
+MAX_CALL_SECONDS = 8 * 60  # config's session_max_time_seconds is unbounded
 
 END_SESSION_TOOL = {
     "type": "function",
@@ -60,7 +68,8 @@ _REALTIME_ADDENDUM = """
 
 LIVE VOICE SESSION RULES (this is a real-time spoken call):
 - Speak first: open with a short, warm greeting that names the chapter and ends with "Are you ready to begin?".
-- Keep every turn to 1-2 short spoken sentences, then stop and let the student talk.
+- Keep every turn to 1-2 short spoken sentences (under 25 words in total), then stop and let the student talk.
+- Never explain, recap or lecture, and never repeat what the student said back to them - one quick acknowledgement at most.
 - Every turn after the student speaks is ONE reply: acknowledge and ask the next question together. Never send a separate filler turn like "let me set the stage" or "let me think of a question" - just ask it.
 - If the student interrupts you, stop and listen - respond to what they said.
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
@@ -93,6 +102,12 @@ class RealtimeCall:
     # end_session forced instead (see _record) - it can't be trusted to stop.
     forcing_end: bool = False
     forced_end_sent: bool = False
+    # Spoken co-learner replies so far (response.done with a message), capped at MAX_REPLIES.
+    replies: int = 0
+    # Reply cap hit: hang up once the closing goodbye has finished playing.
+    hangup_after_closing: bool = False
+    closing_sent: bool = False
+    closing_done: bool = False
     # Billed usage as OpenAI reports it (response.done / transcription events).
     usage: dict[str, float] = field(default_factory=dict)
     ended_at: datetime | None = None
@@ -133,7 +148,12 @@ def build_session(config: SessionConfig) -> dict:
         },
         "tools": [END_SESSION_TOOL],
         "tool_choice": "auto",
+        "max_output_tokens": MAX_REPLY_TOKENS,
     }
+
+
+def call_time_limit(config: SessionConfig) -> int:
+    return min(config.session_max_time_seconds, MAX_CALL_SECONDS)
 
 
 async def create_call(*, sdp_offer: str, config: SessionConfig, owner_ref: str) -> tuple[str, str]:
@@ -180,7 +200,10 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
             # student until they hear it.
             await ws.send(json.dumps({"type": "response.create"}))
             try:
-                await asyncio.wait_for(_record(call, ws), timeout=call.state.config.session_max_time_seconds)
+                await asyncio.wait_for(_record(call, ws), timeout=call_time_limit(call.state.config))
+                if call.closing_done:  # reply cap hit: hang up once the goodbye has played
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(_record(call, ws), timeout=_GRACE_SECONDS)
             except asyncio.TimeoutError:
                 # Time's up: let the co-learner wrap up in its own voice,
                 # then hang up after a short grace period either way.
@@ -200,6 +223,13 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
         call.ended_at = datetime.now()
         call.ended.set()
         await _hangup(call.call_id, key)
+        cost = _cost(call)
+        logger.info(
+            "realtime_call_cost call_id=%s duration_s=%s replies=%d total_usd=%s",
+            call.call_id, cost["duration_seconds"], call.replies, cost["total_usd"],
+            extra={"call_id": call.call_id, "duration_seconds": cost["duration_seconds"],
+                   "replies": call.replies, "total_usd": cost["total_usd"]},
+        )
 
 
 async def _record(call: RealtimeCall, ws) -> None:
@@ -217,8 +247,13 @@ async def _record(call: RealtimeCall, ws) -> None:
                     call.spoken_turns += 1
         elif kind == "response.created":
             final_answer_in = call.spoken_turns >= call.state.config.num_questions + 1
-            if final_answer_in and not call.forcing_end and not call.state.is_completed:
+            # reply cap: the student answers Milo's last reply, then the wrap-up is forced the same way
+            capped = call.replies >= MAX_REPLIES
+            if (final_answer_in or capped) and not call.forcing_end and not call.state.is_completed:
                 call.forcing_end = True
+                if capped and not final_answer_in:
+                    logger.info("realtime_call_reply_cap call_id=%s replies=%d", call.call_id, call.replies)
+                    call.hangup_after_closing = True
                 await ws.send(json.dumps({"type": "response.cancel"}))
                 await ws.send(json.dumps({"type": "output_audio_buffer.clear"}))
         elif kind == "conversation.item.input_audio_transcription.completed":
@@ -231,6 +266,11 @@ async def _record(call: RealtimeCall, ws) -> None:
         elif kind == "response.done":
             add_realtime_usage(call.usage, (event.get("response") or {}).get("usage"))
             outputs = (event.get("response") or {}).get("output") or []
+            if any(o.get("type") == "message" for o in outputs):
+                call.replies += 1
+                if call.closing_sent and call.hangup_after_closing:
+                    call.closing_done = True
+                    return  # goodbye generated - _sideband hangs up once it has played
             end = next((o for o in outputs if o.get("type") == "function_call" and o.get("name") == "end_session"), None)
             if end and not call.state.is_completed:
                 call.state.is_completed = True
@@ -241,9 +281,11 @@ async def _record(call: RealtimeCall, ws) -> None:
                     "type": "conversation.item.create",
                     "item": {"type": "function_call_output", "call_id": end.get("call_id"), "output": "{\"ok\": true}"},
                 }))
+                call.closing_sent = True
                 await ws.send(json.dumps({
                     "type": "response.create",
-                    "response": {"instructions": CLOSING_INSTRUCTIONS, "tool_choice": "none"},
+                    "response": {"instructions": CLOSING_INSTRUCTIONS, "tool_choice": "none",
+                                 "max_output_tokens": MAX_CLOSING_TOKENS},
                 }))
             elif call.forcing_end and not call.forced_end_sent and not call.state.is_completed:
                 # the model's reply to the final answer was cancelled above -
@@ -256,6 +298,8 @@ async def _record(call: RealtimeCall, ws) -> None:
                         "tool_choice": {"type": "function", "name": "end_session"},
                     },
                 }))
+        elif kind == "output_audio_buffer.stopped" and call.closing_done:
+            return  # goodbye has finished playing
         elif kind == "error":
             logger.warning("realtime_event_error call_id=%s error=%s", call.call_id, event.get("error"))
 
@@ -296,10 +340,14 @@ async def finish_call(call_id: str, owner_ref: str) -> dict:
             "answered": max(student_answers - 1, 0),
             "model_completed": call.state.is_completed,
             # report's own LLM call is already in total_cost_usd (generate_bloom_report records it)
-            "cost": realtime_cost_report(
-                call.usage, REALTIME_MODEL, TRANSCRIBE_MODEL,
-                report_cost_usd=call.state.total_cost_usd,
-                duration_seconds=((call.ended_at or datetime.now()) - call.state.created_at).total_seconds(),
-            ),
+            "cost": _cost(call),
         }
     return call.report
+
+
+def _cost(call: RealtimeCall) -> dict:
+    return realtime_cost_report(
+        call.usage, REALTIME_MODEL, TRANSCRIBE_MODEL,
+        report_cost_usd=call.state.total_cost_usd,
+        duration_seconds=((call.ended_at or datetime.now()) - call.state.created_at).total_seconds(),
+    )
