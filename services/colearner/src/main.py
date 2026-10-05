@@ -9,7 +9,7 @@ from shared.logging import RequestContextMiddleware, configure_logging, get_logg
 from shared.tracing import configure_tracing
 from shared.observability import configure_observability
 
-from src.api.routes import cascaded, health, homework_insight, insights, playground, ready, realtime
+from src.api.routes import cascaded, health, homework_insight, insights, playground, ready, realtime, regrade
 from src.config.settings import get_settings
 
 
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(homework_insight.router)
     app.include_router(insights.router)
     app.include_router(realtime.router)
+    app.include_router(regrade.router)
     app.include_router(cascaded.router)
     app.include_router(playground.router)
 

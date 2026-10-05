@@ -57,3 +57,12 @@ async def finish_realtime_call(*, call_id: str, owner_ref: str, token: str) -> d
         f"/api/v1/colearner/realtime/calls/{call_id}/finish",
         {"owner_ref": owner_ref}, token=token, timeout=90.0,
     )
+
+
+async def regrade_transcript(*, config: dict, transcript: list, answers: list, token: str) -> dict:
+    """The C2 report for a stored session (colearner's routes/regrade.py) - may
+    carry `grading_error`. An LLM call, hence the longer timeout."""
+    return await _realtime_post(
+        "/api/v1/colearner/regrade",
+        {"config": config, "transcript": transcript, "answers": answers}, token=token, timeout=90.0,
+    )

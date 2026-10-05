@@ -43,6 +43,7 @@ from src.api.routes import (
     test_result,
     voice_test,
 )
+from src.api.routes import test_reviews
 from src.config.settings import get_settings
 from src.repositories.database import dispose_engine, init_engine
 
@@ -86,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(curriculum.router)
     app.include_router(dataset.router)
     app.include_router(voice_test.router)
+    app.include_router(test_reviews.router)
     app.include_router(test_result.router)
     app.include_router(homework.router)
     app.include_router(question_paper.router)
