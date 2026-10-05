@@ -112,6 +112,7 @@ async def select_questions(
     exclude_uids: set[str] | frozenset[str] = frozenset(),
     seed: int | str | None = None,
     text_only: bool = False,
+    focus_concepts: set[str] | frozenset[str] = frozenset(),
 ) -> Selection:
     """Fill `slots` from the chapter's questions in `dataset_ids`.
 
@@ -123,7 +124,8 @@ async def select_questions(
     confident curriculum link, most often asked in past papers, then a
     seeded shuffle so two homeworks on the same gap aren't identical.
     `text_only` skips questions that need a figure (for clients that can't
-    show images yet).
+    show images yet). `focus_concepts` (the student's weak concepts) ranks a
+    question covering any of them above everything else.
     """
     selection = Selection()
     if not dataset_ids or not slots:
@@ -158,6 +160,7 @@ async def select_questions(
             return 1
         return 2
 
+    focus = {c.lower() for c in focus_concepts}
     used: set[str] = set()
     used_concepts: set[str] = set()
     for slot in slots:
@@ -173,10 +176,12 @@ async def select_questions(
             if distance > 1 or (distance == 1 and scope == 2):
                 continue
             enriched = (q.source or {}).get("enriched", {})
+            concepts = {c.lower() for c in q.concepts or []}
             rank = (
+                0 if focus & concepts else 1,
                 scope,
                 distance,
-                len(used_concepts & {c.lower() for c in q.concepts or []}),
+                len(used_concepts & concepts),
                 _CONFIDENCE_RANK.get(enriched.get("topic_confidence"), 1),
                 -len(q.years_asked or []),
                 tiebreak[key],

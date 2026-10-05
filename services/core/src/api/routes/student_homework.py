@@ -1,8 +1,11 @@
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import undefer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import NotFoundError
@@ -10,7 +13,8 @@ from shared.logging import get_logger
 
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.common import ListEnvelope
-from src.api.schemas.homework import HomeworkQuestionOut
+from src.api.routes.gamification import apply_xp
+from src.api.schemas.homework import HomeworkAnswerIn, HomeworkAnswerOut, HomeworkQuestionOut
 from src.api.schemas.student_homework import (
     CurrentHomeworkResponse,
     HomeworkLearningContextOut,
@@ -33,11 +37,15 @@ from src.domain.models import (
     User,
     VoiceTest,
 )
+from src.domain.models.homework import HomeworkAnswer
 from src.services.colearner_insight_client import ColearnerInsightUnavailableError, generate_homework_insight
 from src.services.practice_bank import archive_homework_questions
 
 router = APIRouter(prefix="/api/v1", tags=["homework-student"])
 logger = get_logger(__name__)
+
+ANSWER_XP = 10
+BOSS_ANSWER_XP = 2 * ANSWER_XP
 
 
 async def _progress_in(session: AsyncSession, homework_id: str, student_id) -> StudentHomeworkProgress:
@@ -218,6 +226,7 @@ async def get_my_homework_questions(
     await _progress_in(session, homework_id, user.id)
     result = await session.execute(
         select(HomeworkQuestion)
+        .options(undefer(HomeworkQuestion.is_boss))
         .where(HomeworkQuestion.homework_id == homework_id)
         .order_by(HomeworkQuestion.order)
     )
@@ -230,6 +239,7 @@ async def get_my_homework_questions(
             dataset_id=str(q.dataset_id),
             text=q.text,
             answer=q.answer,
+            is_boss=q.is_boss,
         )
         for q in result.scalars().all()
     ]
@@ -281,3 +291,46 @@ async def confirm_completion(
 
     await session.commit()
     return HomeworkQaConfirmationOut(confirmed_at=progress.confirmed_at)
+
+
+@router.post("/me/homework/{homework_id}/questions/{question_id}/answer")
+async def answer_question(
+    homework_id: str,
+    question_id: uuid.UUID,
+    body: HomeworkAnswerIn,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> HomeworkAnswerOut:
+    """Saves the student's answer and self-rating for one question. XP
+    (double for the boss question) is awarded only the first time - a repeat
+    just updates the saved answer and returns xpAwarded 0."""
+    progress = await _progress_in(session, homework_id, user.id)
+    question = (await session.execute(
+        select(HomeworkQuestion).options(undefer(HomeworkQuestion.is_boss))
+        .where(HomeworkQuestion.id == question_id, HomeworkQuestion.homework_id == progress.homework_id)
+    )).scalar_one_or_none()
+    if question is None:
+        raise NotFoundError("This question isn't part of this Homework.")
+
+    xp = BOSS_ANSWER_XP if question.is_boss else ANSWER_XP
+    # ON CONFLICT: two racing submits can't both count as the first
+    created = (await session.execute(
+        insert(HomeworkAnswer)
+        .values(id=uuid.uuid4(), homework_question_id=question.id, student_id=user.id,
+                answer_text=body.answer_text, self_rating=body.self_rating, xp_awarded=xp)
+        .on_conflict_do_nothing(index_elements=["homework_question_id", "student_id"])
+        .returning(HomeworkAnswer.id)
+    )).scalar_one_or_none()
+    if created is None:
+        xp = 0
+        existing = (await session.execute(select(HomeworkAnswer).where(
+            HomeworkAnswer.homework_question_id == question.id, HomeworkAnswer.student_id == user.id))).scalar_one()
+        existing.self_rating = body.self_rating
+        if body.answer_text is not None:
+            existing.answer_text = body.answer_text
+    else:
+        await apply_xp(session, user.id, xp)
+    if progress.status == StudentHomeworkStatus.ASSIGNED:
+        progress.status = StudentHomeworkStatus.IN_PROGRESS
+    await session.commit()
+    return HomeworkAnswerOut(saved=True, xp_awarded=xp)

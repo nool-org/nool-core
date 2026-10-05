@@ -17,9 +17,12 @@ class after reviewing results).
 
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import (
+    AiAssessorSession,
+    AiAssessorSessionRecord,
     AssignmentTargetMode,
     BloomLevel,
     Chapter,
@@ -29,13 +32,17 @@ from src.domain.models import (
     HomeworkStatus,
     HomeworkTargetStudent,
     StudentHomeworkProgress,
+    StudentTestResult,
+    StudentTestResultTopicScore,
     User,
     VoiceTest,
+    VoiceTestQuestion,
 )
-from src.services.homework_builder import build_homework_questions, grounding_dataset_id
+from src.services.homework_builder import Focus, build_homework_questions, grounding_dataset_id
 
 AUTO_HOMEWORK_QUESTION_COUNT = 5
 AUTO_HOMEWORK_COMPLETION_WINDOW_HOURS = 48
+WEAK_PERCENT = 50  # below this an answer/topic is "weak" (same cut as the insights' "weak" status)
 
 
 async def auto_generate_homework(
@@ -84,7 +91,7 @@ async def auto_generate_homework(
         session, user=student, test=test, total=AUTO_HOMEWORK_QUESTION_COUNT,
         bloom_weights=_even_bloom_distribution(bloom_levels, AUTO_HOMEWORK_QUESTION_COUNT),
         difficulty=HomeworkDifficulty.MIXED, fallback_dataset_id=dataset_id, seed=str(hw.id),
-        student_id=student_id,
+        student_id=student_id, **await weak_spots(session, test_id=test.id, student_id=student_id),
     )
     for order, d in enumerate(drafts, start=1):
         session.add(
@@ -96,8 +103,55 @@ async def auto_generate_homework(
                 source_question_id=d.source_question_id,
                 text=d.text,
                 answer=d.answer,
+                **({"is_boss": True} if d.is_boss else {}),  # unset = server default false
             )
         )
+
+
+async def weak_spots(session: AsyncSession, *, test_id, student_id) -> dict:
+    """{focus, boss} for build_homework_questions, from this student's own
+    graded voice test: answers scored under WEAK_PERCENT or showing a
+    misconception point at their test question's topic/subtopic/concepts
+    (weakest first); the weakest topic score picks the topic. The boss is
+    the lowest-scoring answer's question. Empty when nothing was graded."""
+    questions = {q.order: q for q in (await session.execute(
+        select(VoiceTestQuestion).where(VoiceTestQuestion.voice_test_id == test_id))).scalars()}
+    report = (await session.execute(
+        select(AiAssessorSessionRecord.report)
+        .join(AiAssessorSession, AiAssessorSession.id == AiAssessorSessionRecord.session_id)
+        .where(AiAssessorSession.test_id == test_id, AiAssessorSession.student_id == student_id,
+               AiAssessorSessionRecord.needs_review.is_(False))
+        .order_by(AiAssessorSessionRecord.created_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    scored = []  # (score, no misconception, question)
+    for entry in (report or {}).get("qa_transcripts") or []:
+        question = questions.get(entry.get("question_number")) if isinstance(entry, dict) else None
+        if question is not None and isinstance(entry.get("score_percent"), (int, float)):
+            scored.append((entry["score_percent"], not entry.get("misconception"), question))
+    scored.sort(key=lambda row: row[:2])
+    weak = [q for score, clean, q in scored if score < WEAK_PERCENT or not clean]
+
+    weakest_topic = (await session.execute(
+        select(StudentTestResultTopicScore.topic_id)
+        .join(StudentTestResult, StudentTestResult.id == StudentTestResultTopicScore.student_test_result_id)
+        .where(StudentTestResult.test_id == test_id, StudentTestResult.student_id == student_id,
+               StudentTestResultTopicScore.percent < WEAK_PERCENT)
+        .order_by(StudentTestResultTopicScore.percent).limit(1)
+    )).scalar_one_or_none()
+    topic_id = weakest_topic or (weak[0].topic_id if weak else None)
+
+    spots = {}
+    if topic_id or weak:
+        spots["focus"] = Focus(
+            topic_id=topic_id,
+            subtopic_id=next((q.subtopic_id for q in weak if q.topic_id == topic_id), None),
+            concepts=tuple(dict.fromkeys(c for q in weak for c in q.concepts or [])),
+        )
+    if scored:
+        q = scored[0][2]
+        spots["boss"] = Focus(topic_id=q.topic_id, subtopic_id=q.subtopic_id, concepts=tuple(q.concepts or []),
+                              bloom_level=q.bloom_level)
+    return spots
 
 
 def _even_bloom_distribution(levels: list[BloomLevel], count: int) -> dict[BloomLevel, int]:
