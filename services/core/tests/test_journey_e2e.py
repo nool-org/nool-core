@@ -72,6 +72,7 @@ def _patch_externals(monkeypatch, calls: dict):
 
     async def fake_paper_questions(*, chapters, total_questions, bloom_distribution, **_kw):
         calls.setdefault("kg_paper", []).append(chapters)
+        calls.setdefault("kg_paper_refs", []).append(_kw.get("reference_questions") or [])
         levels = list(bloom_distribution) or ["REMEMBER"]
         return [{"bloom_level": levels[i % len(levels)], "text": f"KG paper question {i}",
                  "chapter_number": chapters[0]["number"]} for i in range(total_questions)]
@@ -168,6 +169,7 @@ async def _world(db, monkeypatch) -> SimpleNamespace:
                     difficulty=PaperDifficultyLevel.EASY if i < 2 else PaperDifficultyLevel.MEDIUM, marks=2,
                     text=f"{level.value} catalog question {i} on electric current?", answer=f"Answer {level.value} {i}"),
                 actor=w.sa, session=db)
+    w.catalog = await admin_catalog.get_dataset(w.catalog.id, _=w.sa, session=db)  # re-read: count is live
     await admin.update_curriculum_as_admin(w.school.id, UpdateSchoolCurriculumIn(subject_ids=[w.subject.id]),
                                            actor=w.sa, session=db)
     await admin.update_datasets_as_admin(w.school.id, UpdateSchoolDatasetsIn(dataset_ids=[w.catalog.id]),
@@ -441,13 +443,15 @@ async def test_step6_question_paper_create_generate_finalize(db_session, monkeyp
 
 async def test_step6_question_paper_uses_the_shared_dataset(db_session, monkeypatch):
     """A paper created 'with the dataset share' (100% catalog) should draw on
-    that dataset's questions - not ignore it and only ask the KG."""
+    that dataset's questions - not ignore it and only ask the KG. They go to
+    the KG as reference_questions, which decides what to reuse verbatim (see
+    question_paper._dataset_reference_questions)."""
     db = db_session
     w = await _world(db, monkeypatch)
-    paper = await _paper(db, w)
-    qs = (await question_paper.list_paper_questions(paper.id, user=w.teacher, _feature=w.teacher, session=db)).items
+    await _paper(db, w)
+    (refs,) = w.calls["kg_paper_refs"]
     catalog_texts = {f"{lv.value} catalog question {i} on electric current?" for lv in BLOOMS for i in range(3)}
-    assert any(q.text in catalog_texts for q in qs), [q.text for q in qs]
+    assert refs and {r["text"] for r in refs} <= catalog_texts, refs
 
 
 async def test_step7_school_admin_and_super_admin_oversight(db_session, monkeypatch):
