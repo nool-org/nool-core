@@ -55,6 +55,7 @@
       <label><input type="radio" name="mode" value="realtime" checked><span>Realtime<small>Live WebRTC call (OpenAI Realtime) - what the app uses</small></span></label>
       <label><input type="radio" name="mode" value="chained"><span>Chained<small>Record a turn → speech-to-text → LLM → TTS</small></span></label>
       <label><input type="radio" name="mode" value="multimodal"><span>Multimodal<small>Record a turn → Gemini native audio → TTS</small></span></label>
+      <label><input type="radio" name="mode" value="cascaded"><span>Cascaded (prototype)<small>Record a turn → gpt-4o-mini-transcribe → gpt-4.1-mini → gpt-4o-mini-tts</small></span></label>
     </div>
   </section>
 
@@ -145,6 +146,7 @@ function addLine(who, text, note) {
 }
 
 function showReport(obj) { $('report').textContent = JSON.stringify(obj, null, 2); $('report').className = ''; }
+const costText = (usd, inr) => (usd == null ? '' : ` Test cost: $${Number(usd).toFixed(4)}${inr != null ? ` (₹${Number(inr).toFixed(2)})` : ''}.`);
 
 function meter(stream) {
   const ctx = new AudioContext();
@@ -262,8 +264,9 @@ async function finishRealtime() {
   if (!old?.callId) return;
   status('Call ended - scoring…');
   try {
-    showReport(await post(`/api/v1/colearner/realtime/calls/${old.callId}/finish`, { owner_ref: old.ownerRef }));
-    status('Done.', 'ok');
+    const result = await post(`/api/v1/colearner/realtime/calls/${old.callId}/finish`, { owner_ref: old.ownerRef });
+    showReport(result);
+    status('Done.' + costText(result.cost?.total_usd, result.cost?.total_inr), 'ok');
   } catch (e) {
     status('Scoring failed: ' + e.message, 'err');
   }
@@ -296,7 +299,9 @@ async function sendTurn(body, studentNote) {
     if (res.is_completed) {
       showReport({ report: res.report, cost_report: res.cost_report });
       teardown();
-      status('Session complete.', 'ok');
+      const c = res.cost_report || {};
+      status('Session complete.' + costText(c.financial_summary?.total_session_cost_usd ?? c.total_usd,
+                                            c.financial_summary?.total_session_cost_inr ?? c.total_inr), 'ok');
       return;
     }
     status(`Turn ${res.turn_index} - your answer.`, 'ok');

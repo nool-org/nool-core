@@ -49,6 +49,75 @@ WHISPER_PER_SECOND_USD = 0.006 / 60.0  # $0.006 per minute = $0.0001 / sec
 EDGE_TTS_PER_CHAR_USD = 0.0            # Edge-TTS is free / zero-cost
 USD_TO_INR_RATE = 86.5                 # Indicative currency conversion
 
+# Realtime pipeline, per 1M tokens - developers.openai.com/api/docs/pricing,
+# checked 2026-10-05. Audio and text are billed at different rates, and
+# cached input (the conversation so far, re-read every turn) is far cheaper.
+REALTIME_PRICING = {
+    "gpt-realtime-2.1-mini": {"text_in": 0.60, "text_in_cached": 0.06, "text_out": 2.40,
+                              "audio_in": 10.00, "audio_in_cached": 0.30, "audio_out": 20.00},
+    "gpt-realtime-2.1": {"text_in": 4.00, "text_in_cached": 0.40, "text_out": 24.00,
+                         "audio_in": 32.00, "audio_in_cached": 0.40, "audio_out": 64.00},
+}
+# ponytail: the page lists no audio-token rate for this model, only text
+# rates + $0.003/min - token-billed transcription is priced at the text
+# rates, so it may read low (it's a fraction of a cent per test either way).
+TRANSCRIBE_PRICING = {"gpt-4o-mini-transcribe": {"text_in": 1.25, "text_out": 5.00, "per_minute": 0.003}}
+
+
+def add_realtime_usage(totals: Dict[str, float], usage: Optional[Dict[str, Any]]) -> None:
+    """Adds one `response.done` usage block (OpenAI Realtime) into totals."""
+    if not usage:
+        return
+    inp = usage.get("input_token_details") or {}
+    cached = inp.get("cached_tokens_details") or {}
+    out = usage.get("output_token_details") or {}
+    # text_tokens/audio_tokens include the cached part - split it out
+    totals["text_in_cached"] = totals.get("text_in_cached", 0) + (cached.get("text_tokens") or 0)
+    totals["audio_in_cached"] = totals.get("audio_in_cached", 0) + (cached.get("audio_tokens") or 0)
+    totals["text_in"] = totals.get("text_in", 0) + (inp.get("text_tokens") or 0) - (cached.get("text_tokens") or 0)
+    totals["audio_in"] = totals.get("audio_in", 0) + (inp.get("audio_tokens") or 0) - (cached.get("audio_tokens") or 0)
+    totals["text_out"] = totals.get("text_out", 0) + (out.get("text_tokens") or 0)
+    totals["audio_out"] = totals.get("audio_out", 0) + (out.get("audio_tokens") or 0)
+
+
+def add_transcription_usage(totals: Dict[str, float], usage: Optional[Dict[str, Any]]) -> None:
+    """Adds one input-transcription usage block (tokens- or duration-billed)."""
+    if not usage:
+        return
+    if usage.get("type") == "duration":
+        totals["transcribe_seconds"] = totals.get("transcribe_seconds", 0) + (usage.get("seconds") or 0)
+    else:
+        totals["transcribe_in"] = totals.get("transcribe_in", 0) + (usage.get("input_tokens") or 0)
+        totals["transcribe_out"] = totals.get("transcribe_out", 0) + (usage.get("output_tokens") or 0)
+
+
+def realtime_cost_report(
+    totals: Dict[str, float], realtime_model: str, transcribe_model: str, report_cost_usd: float, duration_seconds: float
+) -> Dict[str, Any]:
+    """Cost of one realtime test: the live call + its transcription + the Bloom report call."""
+    rp = REALTIME_PRICING[realtime_model]
+    tp = TRANSCRIBE_PRICING[transcribe_model]
+    per_m = lambda key, price: totals.get(key, 0) / 1_000_000 * price  # noqa: E731
+    call_usd = sum(per_m(k, rp[k]) for k in rp)
+    transcribe_usd = (
+        per_m("transcribe_in", tp["text_in"]) + per_m("transcribe_out", tp["text_out"])
+        + totals.get("transcribe_seconds", 0) / 60 * tp["per_minute"]
+    )
+    total = call_usd + transcribe_usd + report_cost_usd
+    return {
+        "total_usd": round(total, 6),
+        "total_inr": round(total * USD_TO_INR_RATE, 4),
+        "duration_seconds": round(duration_seconds, 1),
+        "breakdown_usd": {
+            "live_call": round(call_usd, 6),
+            "transcription": round(transcribe_usd, 6),
+            "bloom_report": round(report_cost_usd, 6),
+        },
+        "tokens": {k: int(v) if k != "transcribe_seconds" else round(v, 1) for k, v in totals.items()},
+        "models": {"live_call": realtime_model, "transcription": transcribe_model},
+        "prices_checked": "2026-10-05",
+    }
+
 
 def get_tokenizer(model_name: str = "gpt-4o-mini"):
     """Returns tiktoken encoding for token estimation."""

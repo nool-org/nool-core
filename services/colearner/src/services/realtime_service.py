@@ -30,6 +30,7 @@ from websockets.asyncio.client import connect as ws_connect
 from src.config.settings import get_settings
 from src.domain.schemas import SessionConfig
 from src.services.chained_service import build_chained_system_prompt, generate_bloom_report
+from src.services.cost_service import add_realtime_usage, add_transcription_usage, realtime_cost_report
 from src.services.session_store import SessionState, session_store
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,9 @@ class RealtimeCall:
     # end_session forced instead (see _record) - it can't be trusted to stop.
     forcing_end: bool = False
     forced_end_sent: bool = False
+    # Billed usage as OpenAI reports it (response.done / transcription events).
+    usage: dict[str, float] = field(default_factory=dict)
+    ended_at: datetime | None = None
 
 
 _calls: dict[str, RealtimeCall] = {}
@@ -193,6 +197,7 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
     except Exception:  # never let the recorder crash the service
         logger.exception("realtime_sideband_failed call_id=%s", call.call_id)
     finally:
+        call.ended_at = datetime.now()
         call.ended.set()
         await _hangup(call.call_id, key)
 
@@ -219,10 +224,12 @@ async def _record(call: RealtimeCall, ws) -> None:
         elif kind == "conversation.item.input_audio_transcription.completed":
             entry = call.items.setdefault(event["item_id"], {"role": "user", "text": ""})
             entry["text"] = (event.get("transcript") or "").strip()
+            add_transcription_usage(call.usage, event.get("usage"))
         elif kind == "response.output_audio_transcript.done":
             entry = call.items.setdefault(event["item_id"], {"role": "assistant", "text": ""})
             entry["text"] = (event.get("transcript") or "").strip()
         elif kind == "response.done":
+            add_realtime_usage(call.usage, (event.get("response") or {}).get("usage"))
             outputs = (event.get("response") or {}).get("output") or []
             end = next((o for o in outputs if o.get("type") == "function_call" and o.get("name") == "end_session"), None)
             if end and not call.state.is_completed:
@@ -288,5 +295,11 @@ async def finish_call(call_id: str, owner_ref: str) -> dict:
             # first student turn is the "ready?" reply, not a graded answer
             "answered": max(student_answers - 1, 0),
             "model_completed": call.state.is_completed,
+            # report's own LLM call is already in total_cost_usd (generate_bloom_report records it)
+            "cost": realtime_cost_report(
+                call.usage, REALTIME_MODEL, TRANSCRIBE_MODEL,
+                report_cost_usd=call.state.total_cost_usd,
+                duration_seconds=((call.ended_at or datetime.now()) - call.state.created_at).total_seconds(),
+            ),
         }
     return call.report
