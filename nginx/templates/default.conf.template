@@ -1,0 +1,145 @@
+# Production gateway - rendered by the nginx image's envsubst step
+# (/etc/nginx/templates/*.template -> /etc/nginx/conf.d/) when mounted by
+# compose.prod.yml. Dev never sees this file: compose.yml mounts
+# nginx/conf.d/default.conf directly. Only ${UPPERCASE} vars that are set
+# in the container env are substituted; nginx's own $vars pass through.
+# Routes/timeouts mirror nginx/conf.d/default.conf - keep them in step.
+
+map $http_x_request_id $req_id {
+    default   $http_x_request_id;
+    ""        $request_id;
+}
+
+# Origin allow-list - /etc/nginx/cors_origins.map is generated at container
+# start from NGINX_CORS_ORIGINS (see docker-entrypoint.d/15-cors-origins.sh).
+# Unlisted origins get no Access-Control-Allow-Origin header at all (an
+# empty add_header value is not sent). Native app requests carry no Origin
+# and are unaffected.
+map $http_origin $cors_origin {
+    default "";
+    include /etc/nginx/cors_origins.map;
+}
+
+# Per client IP. A whole school can sit behind one NAT address, so the
+# general limit is generous; /auth/ (password login) is the strict one.
+limit_req_zone $binary_remote_addr zone=api:10m rate=${NGINX_API_RATE};
+limit_req_zone $binary_remote_addr zone=auth:10m rate=${NGINX_AUTH_RATE};
+limit_req_status 429;
+
+upstream auth_service {
+    server auth:8000;
+}
+
+upstream core_service {
+    server core:8000;
+}
+
+upstream colearner_service {
+    server colearner:8000;
+}
+
+# :80 - ACME http-01 challenges + plain /health (container healthcheck);
+# everything else goes to https.
+server {
+    listen 80;
+    server_name _;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location = /health {
+        access_log off;
+        default_type application/json;
+        return 200 '{"status":"ok"}';
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_tokens off;
+    server_name ${NGINX_SERVER_NAME};
+
+    ssl_certificate     ${NGINX_SSL_CERT};
+    ssl_certificate_key ${NGINX_SSL_KEY};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # All proxy_set_header at server level: a location that sets any of its
+    # own would silently drop every inherited one. Upgrade/Connection are
+    # harmless for plain requests ($connection_upgrade is "close" then).
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Request-ID $req_id;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 30s;
+    proxy_connect_timeout 5s;
+
+    # Same rule as proxy_set_header: no location below may add_header, or
+    # these stop applying there.
+    add_header Access-Control-Allow-Origin $cors_origin always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-Request-ID" always;
+    add_header Access-Control-Max-Age 600 always;
+    add_header Vary Origin always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Content-Security-Policy "default-src 'none'; frame-ancestors 'none'" always;
+
+    location /auth/ {
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        limit_req zone=auth burst=${NGINX_AUTH_BURST} nodelay;
+        rewrite ^/auth/(.*)$ /$1 break;
+        proxy_pass http://auth_service;
+    }
+
+    location /api/v1/colearner/ {
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        limit_req zone=api burst=${NGINX_API_BURST} nodelay;
+        proxy_pass http://colearner_service;
+        proxy_read_timeout 3600s;
+    }
+
+    location /api/ {
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        limit_req zone=api burst=${NGINX_API_BURST} nodelay;
+        proxy_pass http://core_service;
+        proxy_read_timeout 3600s;
+    }
+
+    location = /health {
+        access_log off;
+        default_type application/json;
+        return 200 '{"status":"ok"}';
+    }
+
+    location / {
+        default_type application/json;
+        return 404 '{"error":{"code":"NOT_FOUND","message":"Not found.","request_id":""}}';
+    }
+
+    error_page 502 503 504 /50x.json;
+    location = /50x.json {
+        internal;
+        default_type application/json;
+        return 502 '{"error":{"code":"BAD_GATEWAY","message":"Upstream service unavailable.","request_id":""}}';
+    }
+}
