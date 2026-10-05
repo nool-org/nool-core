@@ -9,11 +9,17 @@ with the session config ("unified interface"), and hand back the SDP answer.
 
 We then attach a *sideband* WebSocket to the same call and record the
 transcript ourselves - the Bloom report is built from what the server heard,
-never from anything the client claims. The report uses the same mapper as
-the chained pipeline (chained_service.generate_bloom_report).
+never from anything the client claims. The report comes from the strict
+grader (src/services/evaluation).
+
+With prepared questions (config.questions, contract C3) Milo asks exactly
+those, in order, and the model calls ask_question / give_hint /
+give_explanation / end_session tools - so the sideband knows which question
+each student turn belongs to, and finish grades against each question's rubric.
+Without them Milo improvises from the textbook context (the original flow).
 
 ponytail: calls live in-process memory, same v1 limitation as session_store
-- one colearner replica; move to shared state if this ever scales out.
+- one colearner replica, lost on restart; move to shared state if this ever scales out.
 """
 
 from __future__ import annotations
@@ -30,7 +36,8 @@ from websockets.asyncio.client import connect as ws_connect
 
 from src.config.settings import get_settings
 from src.domain.schemas import SessionConfig
-from src.services.chained_service import build_chained_system_prompt, generate_bloom_report
+from src.services.chained_service import build_chained_system_prompt
+from src.services.evaluation import grade_transcript
 from src.services.cost_service import add_realtime_usage, add_transcription_usage, realtime_cost_report
 from src.services.session_store import SessionState, session_store
 
@@ -53,6 +60,11 @@ MAX_REPLY_TOKENS = 220
 MAX_CLOSING_TOKENS = 500  # the 2-3 sentence summary + fixed sign-off line
 MAX_REPLIES = 18  # co-learner replies per call, then the wrap-up is forced
 MAX_CALL_SECONDS = 8 * 60  # config's session_max_time_seconds is unbounded
+# Replies we start ourselves after a tool call: reading a prepared question
+# (plus one context sentence) or a 2-3 sentence explanation runs longer.
+MAX_QUESTION_TOKENS = 400
+MAX_EXPLANATION_TOKENS = MAX_CLOSING_TOKENS
+MAX_HINTS = 2  # per question
 
 END_SESSION_TOOL = {
     "type": "function",
@@ -62,6 +74,33 @@ END_SESSION_TOOL = {
         "question has been explored (or when told the time is up)."
     ),
     "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+_QUESTION_NUMBER = {
+    "type": "object",
+    "properties": {"question_number": {"type": "integer", "description": "1-based number of the question."}},
+    "required": ["question_number"],
+}
+ASK_QUESTION_TOOL = {
+    "type": "function",
+    "name": "ask_question",
+    "description": "Call this, without speaking, right before you ask a question. It returns the exact text to say.",
+    "parameters": _QUESTION_NUMBER,
+}
+GIVE_HINT_TOOL = {
+    "type": "function",
+    "name": "give_hint",
+    "description": "Call this, without speaking, when the student asks for a hint. It returns the hint to say.",
+    "parameters": _QUESTION_NUMBER,
+}
+GIVE_EXPLANATION_TOOL = {
+    "type": "function",
+    "name": "give_explanation",
+    "description": (
+        "Call this, without speaking, when the student asks you to explain a question they have ALREADY answered. "
+        "It returns the key points to explain from."
+    ),
+    "parameters": _QUESTION_NUMBER,
 }
 
 _REALTIME_ADDENDUM = """
@@ -111,6 +150,14 @@ class RealtimeCall:
     # Billed usage as OpenAI reports it (response.done / transcription events).
     usage: dict[str, float] = field(default_factory=dict)
     ended_at: datetime | None = None
+    # Prepared-questions mode only: the question being asked (0 = none yet),
+    # item_id -> question number / student-turn kind, and per-question progress
+    # {first_item, hints_used, explanation_requested} keyed by question number.
+    current: int = 0
+    item_question: dict[str, int] = field(default_factory=dict)
+    item_kind: dict[str, str] = field(default_factory=dict)
+    last_user_item: str | None = None
+    progress: dict[int, dict] = field(default_factory=dict)
 
 
 _calls: dict[str, RealtimeCall] = {}
@@ -127,11 +174,43 @@ def _api_key() -> str:
     return key
 
 
+def build_question_instructions(config: SessionConfig) -> str:
+    questions = "\n".join(
+        f"Q{n} [{q.bloom_level}]: \"{q.spoken_text}\"\n"
+        f"  Key points (only for an explanation after the student has answered): {'; '.join(q.expected_points) or '-'}"
+        for n, q in enumerate(config.questions, 1)
+    )
+    return f"""You are Milo, a friendly classmate running a short spoken {config.subject} quiz on "{config.chapter_name}" with a {config.grade} student in India.
+Speak simple Indian English, like a friendly classmate in a South Indian school: short, clear sentences and everyday words.
+
+THE QUESTIONS - ask exactly these {len(config.questions)}, in this order. Never invent, skip, reorder, merge or change the meaning of a question:
+{questions}
+
+HOW THE SESSION GOES (this is a real-time spoken call):
+- Speak first: a short, warm greeting that names the chapter, then ask "Are you ready?" and wait for the student.
+- Before each question, call ask_question with its number, without speaking. Then say the text it returns. You may add ONE short friendly sentence of context before it, but keep the question's meaning.
+- Then stop and listen. Never say or hint whether an answer is right or wrong, never correct it, never praise it as correct, and never repeat it back. Give one short neutral acknowledgement (like "Okay, got it.") and go to the next question.
+- Hints: only when the student asks for one. Call give_hint with the question number, without speaking, then say the hint it returns - never the answer. If it says no hints are left, gently encourage the student to try in their own words. Stay on the same question.
+- Explanation: only if the student asks AFTER they have answered. Call give_explanation with the question number, without speaking, then explain in 2-3 short sentences using only the key points it returns. Then go to the next question.
+- Keep every other turn to 1-2 short sentences (under 25 words).
+- If the student interrupts you, stop and listen - respond to what they said.
+- If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
+- Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.
+- If you receive "[TIME_UP]", call end_session.
+"""
+
+
 def build_session(config: SessionConfig) -> dict:
+    if config.questions:
+        instructions = build_question_instructions(config)
+        tools = [ASK_QUESTION_TOOL, GIVE_HINT_TOOL, GIVE_EXPLANATION_TOOL, END_SESSION_TOOL]
+    else:
+        instructions = build_chained_system_prompt(config) + _REALTIME_ADDENDUM
+        tools = [END_SESSION_TOOL]
     return {
         "type": "realtime",
         "model": REALTIME_MODEL,
-        "instructions": build_chained_system_prompt(config) + _REALTIME_ADDENDUM,
+        "instructions": instructions,
         "audio": {
             "input": {
                 "transcription": {
@@ -146,7 +225,7 @@ def build_session(config: SessionConfig) -> dict:
             },
             "output": {"voice": VOICE},
         },
-        "tools": [END_SESSION_TOOL],
+        "tools": tools,
         "tool_choice": "auto",
         "max_output_tokens": MAX_REPLY_TOKENS,
     }
@@ -245,8 +324,14 @@ async def _record(call: RealtimeCall, ws) -> None:
                 spoken = any(c.get("type") == "input_audio" for c in item.get("content") or [])
                 if is_new and item["role"] == "user" and spoken:
                     call.spoken_turns += 1
+                if is_new and call.current:
+                    call.item_question[item["id"]] = call.current
+                    if item["role"] == "user" and spoken:
+                        _tag_user_turn(call, item["id"])
         elif kind == "response.created":
-            final_answer_in = call.spoken_turns >= call.state.config.num_questions + 1
+            # with prepared questions the final answer is detected at response.done (_questions_done)
+            final_answer_in = (not call.state.config.questions
+                               and call.spoken_turns >= call.state.config.num_questions + 1)
             # reply cap: the student answers Milo's last reply, then the wrap-up is forced the same way
             capped = call.replies >= MAX_REPLIES
             if (final_answer_in or capped) and not call.forcing_end and not call.state.is_completed:
@@ -272,6 +357,8 @@ async def _record(call: RealtimeCall, ws) -> None:
                     call.closing_done = True
                     return  # goodbye generated - _sideband hangs up once it has played
             end = next((o for o in outputs if o.get("type") == "function_call" and o.get("name") == "end_session"), None)
+            if call.state.config.questions and not end and not call.state.is_completed:
+                await _questions_done(call, ws, outputs)
             if end and not call.state.is_completed:
                 call.state.is_completed = True
                 # The model tends to call end_session straight after a bare
@@ -304,6 +391,98 @@ async def _record(call: RealtimeCall, ws) -> None:
             logger.warning("realtime_event_error call_id=%s error=%s", call.call_id, event.get("error"))
 
 
+def _progress(call: RealtimeCall, n: int) -> dict:
+    return call.progress.setdefault(n, {"first_item": None, "hints_used": 0, "explanation_requested": False})
+
+
+def _tag_user_turn(call: RealtimeCall, item_id: str) -> None:
+    """The first spoken turn on a question is its answer; later ones are follow-ups
+    (re-tagged as a hint/explanation request when the model's tool call says so)."""
+    call.last_user_item = item_id
+    progress = _progress(call, call.current)
+    if progress["first_item"] is None:
+        progress["first_item"] = item_id
+        call.item_kind[item_id] = "answer"
+    else:
+        call.item_kind[item_id] = "follow_up"
+
+
+def _request_turn(call: RealtimeCall, n: int, kind: str) -> None:
+    """The student's latest turn on question n was a request, not an answer."""
+    item_id = call.last_user_item
+    if item_id is None or call.item_question.get(item_id) != n:
+        return
+    call.item_kind[item_id] = kind
+    progress = _progress(call, n)
+    if progress["first_item"] == item_id:
+        progress["first_item"] = None
+
+
+def _tool_output(call: RealtimeCall, name: str, n: int | None) -> tuple[dict, int]:
+    """Runs one question tool; returns (output for the model, max tokens for the reply it triggers)."""
+    questions = call.state.config.questions
+    if n is None or not 1 <= n <= len(questions):
+        if name == "ask_question" and call.current >= len(questions):
+            return {"error": "There are no more questions. Call end_session now."}, MAX_REPLY_TOKENS
+        return {"error": f"question_number must be between 1 and {len(questions)}."}, MAX_REPLY_TOKENS
+    q = questions[n - 1]
+    progress = _progress(call, n)
+    if name == "ask_question":
+        call.current = n
+        return {"question_number": n, "say": q.spoken_text}, MAX_QUESTION_TOKENS
+    if name == "give_hint":
+        _request_turn(call, n, "hint_request")
+        if progress["hints_used"] >= min(MAX_HINTS, len(q.hints)):
+            return {"no_hints_left": True,
+                    "say_instead": "Gently encourage the student to try answering in their own words."}, MAX_REPLY_TOKENS
+        progress["hints_used"] += 1
+        return {"hint": q.hints[progress["hints_used"] - 1]}, MAX_REPLY_TOKENS
+    # give_explanation
+    _request_turn(call, n, "explanation_request")
+    if progress["first_item"] is None:
+        return {"not_yet": True,
+                "say_instead": "The student hasn't answered yet - encourage them to try first."}, MAX_REPLY_TOKENS
+    progress["explanation_requested"] = True
+    return {"key_points": q.expected_points}, MAX_EXPLANATION_TOKENS
+
+
+async def _questions_done(call: RealtimeCall, ws, outputs: list[dict]) -> None:
+    """response.done with prepared questions: answer the question tools, or force
+    the end once the last question has its answer and Milo just talked on."""
+    calls = [o for o in outputs if o.get("type") == "function_call"
+             and o.get("name") in ("ask_question", "give_hint", "give_explanation")]
+    spoke = any(o.get("type") == "message" for o in outputs)
+    max_tokens = MAX_REPLY_TOKENS
+    for fc in calls:
+        try:
+            n = int(json.loads(fc.get("arguments") or "{}").get("question_number"))
+        except (ValueError, TypeError, AttributeError):
+            n = None
+        output, max_tokens = _tool_output(call, fc["name"], n)
+        if fc["name"] == "ask_question" and "say" in output:
+            for o in outputs:  # a question spoken in the same response belongs to it
+                if o.get("type") == "message" and o.get("id"):
+                    call.item_question[o["id"]] = n
+        await ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {"type": "function_call_output", "call_id": fc.get("call_id"), "output": json.dumps(output)},
+        }))
+    if calls and not spoke:
+        # tool-only response: now let Milo say what the tool returned
+        await ws.send(json.dumps({"type": "response.create", "response": {"max_output_tokens": max_tokens}}))
+    elif (spoke and not calls and not call.forcing_end and call.current == len(call.state.config.questions)
+          and _progress(call, call.current)["first_item"] is not None):
+        # Milo acknowledged the final answer but didn't end - make it (the goodbye follows)
+        call.forcing_end = call.forced_end_sent = True
+        await ws.send(json.dumps({
+            "type": "response.create",
+            "response": {
+                "instructions": "The student has answered the final question. Call end_session now, without speaking.",
+                "tool_choice": {"type": "function", "name": "end_session"},
+            },
+        }))
+
+
 async def _hangup(call_id: str, key: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -313,7 +492,49 @@ async def _hangup(call_id: str, key: str) -> None:
 
 
 def transcript_turns(call: RealtimeCall) -> list[dict]:
-    return [{"role": i["role"], "content": i["text"]} for i in call.items.values() if i["text"]]
+    """[{role, content, text, question_number, kind?}] - content is the original key, text the C3 one."""
+    turns = []
+    for item_id, i in call.items.items():
+        if not i["text"]:
+            continue
+        turn = {"role": i["role"], "content": i["text"], "text": i["text"],
+                "question_number": call.item_question.get(item_id)}
+        if item_id in call.item_kind:
+            turn["kind"] = call.item_kind[item_id]
+        turns.append(turn)
+    return turns
+
+
+def _transcript_text(turns: list[dict]) -> str:
+    return "\n".join(
+        (f"[Q{t['question_number']}] " if t["question_number"] else "")
+        + f"[{'CO-LEARNER' if t['role'] == 'assistant' else 'STUDENT'}]"
+        + (f" ({t['kind'].replace('_', ' ')})" if t.get("kind") not in (None, "answer") else "")
+        + f": {t['content']}"
+        for t in turns
+    )
+
+
+def question_answers(call: RealtimeCall) -> list[dict]:
+    answers = []
+    for n, q in enumerate(call.state.config.questions or [], 1):
+        p = _progress(call, n)
+        item = call.items.get(p["first_item"]) if p["first_item"] else None
+        answers.append({
+            "question_id": q.id, "question_number": n,
+            "first_answer": (item["text"] or None) if item else None,
+            "hints_used": p["hints_used"], "explanation_requested": p["explanation_requested"],
+        })
+    return answers
+
+
+def question_rubric(call: RealtimeCall) -> list[dict] | None:
+    return [
+        {"question_number": n, "bloom_level": q.bloom_level, "question": q.spoken_text,
+         "key_points": q.expected_points, "misconceptions": q.misconceptions,
+         "hints_used": _progress(call, n)["hints_used"]}
+        for n, q in enumerate(call.state.config.questions, 1)
+    ] if call.state.config.questions else None
 
 
 async def finish_call(call_id: str, owner_ref: str) -> dict:
@@ -329,17 +550,21 @@ async def finish_call(call_id: str, owner_ref: str) -> dict:
         turns = transcript_turns(call)
         call.state.turns = turns
         student_answers = sum(1 for t in turns if t["role"] == "user")
-        full_transcript = "\n".join(
-            f"[{'CO-LEARNER' if t['role'] == 'assistant' else 'STUDENT'}]: {t['content']}" for t in turns
-        )
-        report = await generate_bloom_report(call.state, full_transcript) if student_answers else None
+        answers = question_answers(call)
+        if call.state.config.questions:
+            answered = sum(1 for a in answers if a["first_answer"])
+        else:
+            answered = max(student_answers - 1, 0)  # first student turn is the "ready?" reply
+        report = (await grade_transcript(call.state, _transcript_text(turns), rubric=question_rubric(call))
+                  if student_answers else None)
         call.report = {
             "report": report,
-            "turns": turns,
-            # first student turn is the "ready?" reply, not a graded answer
-            "answered": max(student_answers - 1, 0),
+            "answers": answers,
+            "transcript": turns,
+            "turns": turns,  # alias kept for older callers
+            "answered": answered,
             "model_completed": call.state.is_completed,
-            # report's own LLM call is already in total_cost_usd (generate_bloom_report records it)
+            # report's own LLM call is already in total_cost_usd (grade_transcript records it)
             "cost": _cost(call),
         }
     return call.report
