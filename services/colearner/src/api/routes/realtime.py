@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from shared.auth import AuthenticatedUser
 
@@ -10,12 +10,16 @@ from src.services import realtime_service
 router = APIRouter(prefix="/api/v1", tags=["colearner-realtime"])
 
 
+MAX_SDP_CHARS = 20_000  # a browser/RN WebRTC offer is ~3-8k
+MAX_OWNER_REF_CHARS = 128
+
+
 class CreateCallIn(BaseModel):
-    sdp: str
+    sdp: str = Field(..., max_length=MAX_SDP_CHARS)
     config: SessionConfig
     # Caller's own id for this session (Core's AiAssessorSession id) - finish
     # must present the same one, so a call id alone can't fetch a report.
-    owner_ref: str
+    owner_ref: str = Field(..., min_length=1, max_length=MAX_OWNER_REF_CHARS)
 
 
 class CreateCallOut(BaseModel):
@@ -24,7 +28,7 @@ class CreateCallOut(BaseModel):
 
 
 class FinishCallIn(BaseModel):
-    owner_ref: str
+    owner_ref: str = Field(..., min_length=1, max_length=MAX_OWNER_REF_CHARS)
 
 
 @router.post("/colearner/realtime/calls", response_model=CreateCallOut, summary="Start a live voice call")

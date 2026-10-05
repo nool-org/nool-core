@@ -1,6 +1,6 @@
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 # Input size caps - every field below is client-supplied and ends up in an
 # LLM prompt or a decode buffer, so nothing is unbounded.
@@ -9,6 +9,18 @@ MAX_USER_TEXT_CHARS = 4_000
 MAX_TEXTBOOK_CONTEXT_CHARS = 20_000
 ShortText = Annotated[str, StringConstraints(max_length=200)]
 ReferenceQuestion = Annotated[str, StringConstraints(max_length=500)]
+RubricText = Annotated[str, StringConstraints(max_length=500)]
+
+
+class LiveQuestion(BaseModel):
+    """One prepared voice-test question (contract C3) - the realtime co-learner asks exactly these."""
+    id: Union[int, Annotated[str, StringConstraints(max_length=64)]]
+    order: int = Field(..., ge=1, le=10)
+    bloom_level: ShortText
+    spoken_text: str = Field(..., min_length=1, max_length=1_000)
+    expected_points: List[RubricText] = Field(default_factory=list, max_length=6)
+    misconceptions: List[RubricText] = Field(default_factory=list, max_length=6)
+    hints: List[RubricText] = Field(default_factory=list, max_length=4)
 
 
 class SessionConfig(BaseModel):
@@ -44,6 +56,19 @@ class SessionConfig(BaseModel):
         default=300,
         description="Maximum session time limit in seconds (default 300s / 5 minutes)"
     )
+    questions: Optional[List[LiveQuestion]] = Field(
+        default=None,
+        max_length=10,
+        description="Prepared questions (realtime only). When given, the co-learner asks exactly these, in order, "
+                    "and num_questions follows their count."
+    )
+
+    @model_validator(mode="after")
+    def _questions_set_count(self):
+        if self.questions:
+            self.questions.sort(key=lambda q: q.order)
+            self.num_questions = len(self.questions)
+        return self
 
     model_config = ConfigDict(
         json_schema_extra={
