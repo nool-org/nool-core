@@ -34,6 +34,13 @@ async def gap_fill(payload: dict) -> dict:
     return await _post("/v1/homework/gap-fill", payload, GAP_FILL_TIMEOUT_SECONDS)
 
 
+async def generate_mcq(payload: dict) -> dict:
+    """Gap-fill with mcq slots ({bloom_level, difficulty, question_type: "mcq",
+    concept, misconceptions}) - generated and verified like homework questions,
+    each with exactly 4 options and the answer one of them."""
+    return await _post("/v1/homework/gap-fill", payload, GAP_FILL_TIMEOUT_SECONDS)
+
+
 async def prep_voice_test(payload: dict) -> dict:
     """POST /v1/voice-test/prep - {grade, subject, chapter, board, levels,
     candidates} -> {questions: [...]}, one reworded question per level."""

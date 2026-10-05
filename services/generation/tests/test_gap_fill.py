@@ -123,3 +123,25 @@ async def test_a_malformed_mcq_is_rejected_without_asking_the_verifier():
     result = await fill_gaps(llm, REQUEST, generation_model="gen", verify_model="ver")
     assert [q.text for q in result.questions] == ["q0", "q1"]
     assert "exactly 4 distinct" in llm.calls[3][2]   # fed back to the regenerate call
+
+
+@pytest.mark.asyncio
+async def test_an_mcq_slot_gets_its_concept_and_misconceptions_and_rejects_a_non_mcq():
+    request = GapFillRequest(
+        subject="Science", grade=10, chapter="Electricity", sections=REQUEST.sections,
+        slots=[{"bloom_level": "UNDERSTAND", "difficulty": "MEDIUM", "question_type": "mcq", "concept": "current",
+                "misconceptions": ["current is used up in a bulb"]}])
+    mcq = Question(slot_index=0, question_type="mcq", text="Which is true?", options=["a", "b", "c", "d"], answer="a",
+                   solution="s", grounded_in="x")
+    llm = FakeLLM([_Drafts(questions=[question(0)]), _Drafts(questions=[mcq])], [_Verdicts(verdicts=ok(0))])
+    result = await fill_gaps(llm, request, generation_model="gen", verify_model="ver")
+    assert [q.question_type for q in result.questions] == ["mcq"]
+    assert '"concept": "current"' in llm.calls[0][2] and "current is used up in a bulb" in llm.calls[0][2]
+    assert "needs an mcq" in llm.calls[1][2]  # the numerical draft was rejected in code, fed back
+
+
+@pytest.mark.asyncio
+async def test_homework_slots_are_sent_without_the_mcq_fields():
+    llm = FakeLLM([_Drafts(questions=[question(0)]), _Drafts(questions=[question(1)])], [_Verdicts(verdicts=ok(0, 1))])
+    await fill_gaps(llm, REQUEST, generation_model="gen", verify_model="ver")
+    assert all('"misconceptions"' not in c[2] and '"concept"' not in c[2] for c in llm.calls[:2])

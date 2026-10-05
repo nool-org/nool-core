@@ -37,6 +37,10 @@ Difficulty = Literal["EASY", "MEDIUM", "HARD"]
 class Slot(BaseModel):
     bloom_level: BloomLevel
     difficulty: Difficulty
+    # set by core's MCQ test: an mcq on this concept, wrong options built from these misconceptions
+    question_type: Literal["mcq"] | None = None
+    concept: str | None = None
+    misconceptions: list[str] = Field(default_factory=list)
 
 
 class Section(BaseModel):
@@ -101,6 +105,8 @@ no facts, formulas or data that aren't in them or standard for this class.
 - The examples show the style and level of the question bank - match them, never copy or paraphrase them,
   and don't repeat anything in `avoid`.
 - Give a model answer a teacher can mark against, and a short worked solution.
+- A slot with question_type "mcq" must be an mcq on its `concept` with exactly 4 options; build the wrong
+  options from its `misconceptions` (each a plausible belief a student really holds), never silly ones.
 - If a slot has `feedback`, your previous question for it was rejected for that reason - fix it."""
 
 VERIFY_SYSTEM = """You are a strict CBSE Class {grade} {subject} teacher checking generated homework questions.
@@ -114,7 +120,9 @@ For each question, ok=true only if ALL hold:
 If not ok, say precisely what is wrong in `problem`."""
 
 
-def _malformed(q: Question) -> str | None:
+def _malformed(q: Question, slot: Slot) -> str | None:
+    if slot.question_type == "mcq" and q.question_type != "mcq":
+        return "this slot needs an mcq with exactly 4 options"
     if not q.text.strip() or not q.answer.strip():
         return "the question or its answer is empty"
     if q.question_type == "mcq":
@@ -168,9 +176,9 @@ class GapFillWorkflow(Workflow):
             payload = {
                 "chapter": request.chapter,
                 "sections": [s.model_dump() for s in request.sections],
-                "slots": [{"slot_index": i, **request.slots[i].model_dump(),
+                "slots": [{"slot_index": i, **request.slots[i].model_dump(exclude_defaults=True),
                            **({"feedback": ev.feedback[i]} if i in ev.feedback else {})}],
-                "other_slots_in_this_homework": [request.slots[j].model_dump() for j in range(len(request.slots)) if j != i],
+                "other_slots_in_this_homework": [request.slots[j].model_dump(exclude_defaults=True) for j in range(len(request.slots)) if j != i],
                 "examples": [e.model_dump(exclude_none=True) for e in request.examples],
                 "avoid": avoid,
             }
@@ -193,7 +201,7 @@ class GapFillWorkflow(Workflow):
         feedback: dict[int, str] = {}
         drafts = []
         for q in ev.drafts:  # shape checks first - no LLM needed to reject these
-            problem = _malformed(q)
+            problem = _malformed(q, request.slots[q.slot_index])
             if problem:
                 feedback[q.slot_index] = problem
             else:
@@ -203,7 +211,7 @@ class GapFillWorkflow(Workflow):
                 "sections": [s.model_dump() for s in request.sections],
                 "examples": [e.text for e in request.examples],
                 "avoid": request.avoid + [q.text for q in accepted.values()],
-                "questions": [{**q.model_dump(), "requested": request.slots[q.slot_index].model_dump()} for q in drafts],
+                "questions": [{**q.model_dump(), "requested": request.slots[q.slot_index].model_dump(exclude_defaults=True)} for q in drafts],
             }
             try:
                 verdicts = await self.llm(
