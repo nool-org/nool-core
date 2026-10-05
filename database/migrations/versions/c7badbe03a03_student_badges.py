@@ -1,7 +1,7 @@
 """student_badges: earned Bloom badges
 
 Revision ID: c7badbe03a03
-Revises: b3d9e1f04a7c
+Revises: c7e2a9d4f1b3
 Create Date: 2026-10-05 12:00:00.000000
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'c7badbe03a03'
-down_revision: Union[str, None] = 'b3d9e1f04a7c'
+down_revision: Union[str, None] = 'c7e2a9d4f1b3'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

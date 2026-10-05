@@ -71,7 +71,8 @@ async def open_session(
         )).first()
         if targeted is None:
             raise NotFoundError("This test isn't assigned to you.")
-        if await db.scalar(select(VoiceTest.prep_status).where(VoiceTest.id == body.test_id))                 == VoiceTestPrepStatus.PENDING:
+        prep_status = await db.scalar(select(VoiceTest.prep_status).where(VoiceTest.id == body.test_id))
+        if prep_status == VoiceTestPrepStatus.PENDING:
             raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.")
     ai_session = AiAssessorSession(
         student_id=app_user.id,

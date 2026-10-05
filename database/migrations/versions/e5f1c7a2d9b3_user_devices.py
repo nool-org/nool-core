@@ -1,7 +1,7 @@
 """user devices (Expo push tokens)
 
 Revision ID: e5f1c7a2d9b3
-Revises: b3d9e1f04a7c
+Revises: c5e7a2b9d413
 Create Date: 2026-10-05 12:00:00.000000
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'e5f1c7a2d9b3'
-down_revision: Union[str, None] = 'b3d9e1f04a7c'
+down_revision: Union[str, None] = 'c5e7a2b9d413'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

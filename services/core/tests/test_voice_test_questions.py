@@ -189,7 +189,8 @@ async def test_migration_creates_what_the_models_map(db_session):
 
     module = _migration_module()
     current = (await db_session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
-    if current != REVISION:
+    applied = (await db_session.execute(text("SELECT to_regclass('voice_test_questions')"))).scalar_one() is not None
+    if not applied:
         assert module.down_revision == current, "migration must sit on the dev DB's current head"
 
         def upgrade(conn):

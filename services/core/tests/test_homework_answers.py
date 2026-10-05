@@ -112,7 +112,7 @@ async def test_migration_upgrade_and_downgrade(db_session):
     from alembic.operations import Operations
 
     module = _migration_module()
-    assert module.down_revision == "b3d9e1f04a7c"
+    assert module.down_revision == "c7badbe03a03"  # chained after W3-03 at merge
 
     def run(step):
         def work(conn):
@@ -125,8 +125,7 @@ async def test_migration_upgrade_and_downgrade(db_session):
         return ({c["name"] for c in insp.get_columns("homework_questions")},
                 {c["name"] for c in insp.get_columns("homework_answers")} if insp.has_table("homework_answers") else None)
 
-    current = (await db_session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
-    if current != REVISION:
+    if (await db_session.run_sync(columns))[1] is None:  # not applied to this DB yet
         await _ddl(db_session, run(module.upgrade))  # rolled back with the test's transaction
     hq, answers = await db_session.run_sync(columns)
     assert "is_boss" in hq

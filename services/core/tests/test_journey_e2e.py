@@ -39,6 +39,7 @@ from src.domain.models import (
     TestStatus, User, UserStatus, VoiceTest,
 )
 from src.domain.models.question_paper import PaperDifficultyLevel
+from src.domain.models.voice_test import VoiceTestPrepStatus
 from src.services import generation_client, homework_content_resolver, kg_client
 from src.services.homework_autogen import auto_generate_homework
 from src.services.test_completion import record_test_completion
@@ -203,6 +204,9 @@ async def _scheduled_test(db, w):
                      bloom_levels=[BloomLevel.REMEMBER, BloomLevel.UNDERSTAND], duration_minutes=10,
                      completion_window_hours=48, target=AssignmentTarget(mode=AssignmentTargetMode.WHOLE_CLASS)),
         background_tasks=BackgroundTasks(), user=w.teacher, _feature=w.teacher, session=db)
+    # The question-prep background task never runs in this direct-call test;
+    # settle it the way prep does when no dataset question fits, so sessions may start.
+    (await db.get(VoiceTest, uuid.UUID(str(created.id)))).prep_status = VoiceTestPrepStatus.FAILED
     w.test = await voice_test.schedule_test(created.id, user=w.teacher, _feature=w.teacher, session=db)
     return w.test
 

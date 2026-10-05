@@ -1,7 +1,7 @@
 """mcq tests and their questions
 
 Revision ID: c5e7a2b9d413
-Revises: b3d9e1f04a7c
+Revises: e2b7c9a4d1f3
 Create Date: 2026-10-05 12:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'c5e7a2b9d413'
-down_revision: Union[str, None] = 'b3d9e1f04a7c'
+down_revision: Union[str, None] = 'e2b7c9a4d1f3'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

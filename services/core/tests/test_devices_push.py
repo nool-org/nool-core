@@ -87,7 +87,7 @@ async def test_migration_upgrade_and_downgrade(db_session):
     from alembic.operations import Operations
 
     module = _migration_module()
-    assert module.down_revision == "b3d9e1f04a7c"
+    assert module.down_revision == "c5e7a2b9d413"  # chained after W3-05 at merge
 
     def run(fn):
         def work(conn):

@@ -18,6 +18,7 @@ from src.api.schemas.voice_test import (
     VoiceTestQuestionListOut,
     VoiceTestQuestionOut,
 )
+from src.domain.models.voice_test import VoiceTestPrepStatus
 from src.domain.models import (
     AiAssessorSession,
     AiAssessorSessionRecord,
@@ -177,6 +178,8 @@ async def create_test(
         completion_window_hours=body.completion_window_hours,
         target_mode=body.target.mode,
         status=TestStatus.DRAFT,
+        # question prep runs in the background right after this; sessions wait until it settles
+        prep_status=VoiceTestPrepStatus.PENDING,
     )
     session.add(test)
     await session.flush()

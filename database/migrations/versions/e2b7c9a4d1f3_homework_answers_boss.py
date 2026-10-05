@@ -1,7 +1,7 @@
 """homework answers and boss question flag
 
 Revision ID: e2b7c9a4d1f3
-Revises: b3d9e1f04a7c
+Revises: c7badbe03a03
 Create Date: 2026-10-05 12:00:00.000000
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'e2b7c9a4d1f3'
-down_revision: Union[str, None] = 'b3d9e1f04a7c'
+down_revision: Union[str, None] = 'c7badbe03a03'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
