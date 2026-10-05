@@ -1,58 +1,5 @@
 import base64
 import io
-import re
-
-import edge_tts
-
-
-def sanitize_text_for_speech(text: str) -> str:
-    """Converts mathematical equations, LaTeX, and symbols into natural spoken English phonetics."""
-    # Strip prompt tags
-    text = re.sub(r'\[CO-LEARNER\]:', '', text)
-    text = re.sub(r'\[SESSION_COMPLETED\]', '', text)
-
-    # Common Physics formulas phonetics
-    text = re.sub(r'\$?[Rr]\s*=\s*(?:\\rho|ρ)\s*\*?\s*[Ll]\s*/\s*[Aa]\$?', 'resistance equals resistivity times length divided by area', text)
-    text = re.sub(r'\$?[Vv]\s*=\s*[Ii]\s*\*?\s*[Rr]\$?', 'V equals I times R', text)
-    text = re.sub(r'\$?[Hh]\s*=\s*[Ii]\^?2\s*\*?\s*[Rr]\s*\*?\s*[Tt]\$?', 'heat equals I squared times R times t', text)
-    text = re.sub(r'\$?[Ii]\s*=\s*[Qq]\s*/\s*[Tt]\$?', 'current equals charge divided by time', text)
-    text = re.sub(r'\$?[Pp]\s*=\s*[Vv]\^?2\s*/\s*[Rr]\$?', 'power equals V squared divided by R', text)
-
-    # Symbols & math replacements
-    replacements = [
-        (r'\\rho|ρ', 'resistivity'),
-        (r'\\Omega|Ω', ' ohms'),
-        (r'\\mu|μ', 'micro'),
-        (r'\\Delta|Δ', 'delta'),
-        (r'\^2', ' squared'),
-        (r'\^3', ' cubed'),
-        (r'\$', ''),
-        (r'\\times|\\cdot|\*', ' times '),
-        (r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1 over \2'),
-        (r'\\', ''),
-    ]
-    for pattern, repl in replacements:
-        text = re.sub(pattern, repl, text)
-
-    return re.sub(r'\s+', ' ', text).strip()
-
-
-async def synthesize_speech_base64(text: str, voice: str, rate: str) -> str:
-    """Synthesizes text using Edge-TTS with formula phonetics and returns base64 MP3."""
-    clean_text = sanitize_text_for_speech(text)
-    if not clean_text:
-        return ""
-    try:
-        communicate = edge_tts.Communicate(clean_text, voice, rate=rate)
-        audio_stream = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_stream.write(chunk["data"])
-        audio_stream.seek(0)
-        return base64.b64encode(audio_stream.getvalue()).decode("utf-8")
-    except Exception as ex:
-        print(f"Edge-TTS Synthesis Error: {ex}")
-        return ""
 
 
 def decode_base64_audio(b64_string: str) -> bytes:

@@ -23,6 +23,7 @@ from sqlalchemy.orm import undefer
 from sqlalchemy.schema import CreateTable
 
 from shared.errors import NotFoundError
+from src.api.routes import homework as teacher_homework
 from src.api.routes import student_homework
 from src.api.schemas.homework import HomeworkAnswerIn
 from src.domain.models import (
@@ -50,6 +51,7 @@ from src.domain.models import (
     StudentTestResult,
     StudentTestResultTopicScore,
     Subject,
+    TeacherClassAssignment,
     Topic,
     User,
     UserStatus,
@@ -350,4 +352,15 @@ async def test_questions_endpoint_flags_the_boss(schema):
     s = await _seed(db)
     hw, _, _ = await _homework_with_questions(db, s)
     items = (await student_homework.get_my_homework_questions(str(hw.id), user=s["student"], session=db)).items
+    assert [q.model_dump(by_alias=True)["isBoss"] for q in items] == [False, True]
+
+
+async def test_teacher_questions_list_flags_the_boss(schema):
+    db = schema
+    s = await _seed(db)
+    hw, _, _ = await _homework_with_questions(db, s)
+    db.add(TeacherClassAssignment(teacher_id=s["teacher"].id, class_id=s["class"].id, subject_id=s["test"].subject_id))
+    await db.flush()
+    items = (await teacher_homework.list_homework_questions(str(hw.id), user=s["teacher"], _feature=s["teacher"],
+                                                             session=db)).items
     assert [q.model_dump(by_alias=True)["isBoss"] for q in items] == [False, True]

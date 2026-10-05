@@ -113,7 +113,8 @@ server {
         }
         limit_req zone=api burst=${NGINX_API_BURST} nodelay;
         proxy_pass http://colearner_service;
-        proxy_read_timeout 3600s;
+        # Realtime finish runs the grader LLM (core waits up to 90s)
+        proxy_read_timeout 120s;
     }
 
     location /api/ {
