@@ -1,0 +1,30 @@
+name: Grader eval
+
+# Grader accuracy gate (services/colearner/evals/README.md). Manual only: it makes paid model calls.
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Times each transcript is graded
+        default: "2"
+
+jobs:
+  grader-eval:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/colearner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/colearner/requirements*.txt
+      - run: pip install -r requirements.txt
+      - name: Run grader gate
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTHONPATH: ${{ github.workspace }}/services/colearner:${{ github.workspace }}
+          REPEATS: ${{ inputs.repeats }}
+        run: python evals/grader_eval.py --repeats "$REPEATS"
