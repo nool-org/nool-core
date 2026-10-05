@@ -19,6 +19,7 @@ from src.api.routes import (
     bloom_result,
     curriculum,
     dataset,
+    devices,
     gamification,
     health,
     homework,
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
 
     # Foundation
     app.include_router(profile.router)
+    app.include_router(devices.router)
     # Teacher
     app.include_router(roster.router)
     app.include_router(curriculum.router)
