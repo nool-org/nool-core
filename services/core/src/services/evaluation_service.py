@@ -9,12 +9,15 @@ score_percent, added alongside this module).
 Deliberately tolerant of a missing/malformed report (an older cached
 report shape, a report-generation failure that fell back to colearner's
 own empty-qa_transcripts placeholder) - evaluate_colearner_session returns
-None in that case, and the caller (ai_assessor.py's stream_session) falls
+None in that case, and the caller (ai_assessor.py's finish_session) falls
 back to record_test_completion's original completion-rate math, exactly as
-it did before this module existed.
+it did before this module existed. A report carrying `grading_error` is
+never scored at all (see ai_assessor.py's _record_completion).
 """
 
 from __future__ import annotations
+
+import uuid
 
 from src.domain.models import BloomLevel
 
@@ -86,3 +89,25 @@ def evaluate_colearner_session(
         bloom_scores[level] = round(sum(levels_scores) / len(levels_scores)) if levels_scores else mastery_percent
 
     return mastery_percent, bloom_scores
+
+
+def topic_scores(
+    report: dict | None, topic_by_question_number: dict[int, uuid.UUID | None]
+) -> dict[uuid.UUID, tuple[int, int]]:
+    """{topic_id: (percent, answered)} - each scored qa_transcripts entry
+    counts toward the topic of the test question it answers
+    (question_number == VoiceTestQuestion.order); `answered` counts the
+    entries with a non-blank student_response."""
+    by_topic: dict[uuid.UUID, list[tuple[int, bool]]] = {}
+    for entry in (report or {}).get("qa_transcripts") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("score_percent"), (int, float)):
+            continue
+        topic_id = topic_by_question_number.get(entry.get("question_number"))
+        if topic_id is None:
+            continue
+        answered = bool(str(entry.get("student_response") or "").strip())
+        by_topic.setdefault(topic_id, []).append((max(0, min(100, round(entry["score_percent"]))), answered))
+    return {
+        topic_id: (round(sum(score for score, _ in rows) / len(rows)), sum(1 for _, answered in rows if answered))
+        for topic_id, rows in by_topic.items()
+    }

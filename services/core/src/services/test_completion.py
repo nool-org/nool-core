@@ -55,6 +55,7 @@ from src.domain.models import (
     StudentPoints,
     StudentTestResult,
     StudentTestResultBloomScore,
+    StudentTestResultTopicScore,
     TestStatus,
     VoiceTest,
 )
@@ -73,13 +74,16 @@ async def record_test_completion(
     bloom_levels: list[BloomLevel],
     mastery_percent: int | None = None,
     bloom_scores: dict[BloomLevel, int] | None = None,
+    topic_scores: dict[uuid.UUID, tuple[int, int]] | None = None,
 ) -> int | None:
     """`mastery_percent`/`bloom_scores` - real per-level scores from
     evaluation_service.evaluate_colearner_session(...), passed by
-    ai_assessor.py's stream_session when colearner's report scored the
+    ai_assessor.py's finish_session when colearner's report scored the
     session. When omitted (any other/older caller, or a report that didn't
     score), falls back to the original completion-rate placeholder below -
-    unchanged, non-breaking.
+    unchanged, non-breaking. `topic_scores` - {topic_id: (percent, answered)}
+    from evaluation_service.topic_scores; replaces the result's per-topic
+    rows when given (None leaves them untouched).
     """
     if mastery_percent is None:
         mastery_percent = round(100 * answered / total_questions) if total_questions else 0
@@ -110,6 +114,18 @@ async def record_test_completion(
                 student_test_result_id=result_row.id, bloom_level=level, percent=level_percent
             )
         )
+
+    if topic_scores is not None:
+        await session.execute(
+            delete(StudentTestResultTopicScore).where(
+                StudentTestResultTopicScore.student_test_result_id == result_row.id
+            )
+        )
+        for topic_id, (topic_percent, topic_answered) in topic_scores.items():
+            session.add(StudentTestResultTopicScore(
+                student_test_result_id=result_row.id, topic_id=topic_id, percent=topic_percent,
+                answered=topic_answered,
+            ))
 
     homework_due = False
     test = await session.get(VoiceTest, test_id)

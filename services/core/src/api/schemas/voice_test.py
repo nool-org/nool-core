@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from src.domain.models import BloomLevel, TestStatus
+from pydantic import Field
+
+from src.domain.models import BloomLevel, TestStatus, VoiceTestQuestionStatus
 
 from .bloom import BloomTarget  # noqa: F401 - re-exported for convenience
 from .common import CamelModel
@@ -32,3 +34,50 @@ class CreateTestIn(CamelModel):
     duration_minutes: int
     completion_window_hours: int
     target: AssignmentTarget
+
+
+class VoiceTestQuestionOut(CamelModel):
+    """Contract C1 - one of the questions every student of the test is asked."""
+
+    id: str
+    voice_test_id: str
+    order: int
+    dataset_question_id: str | None
+    bloom_level: BloomLevel
+    topic_id: str | None
+    subtopic_id: str | None
+    concepts: list[str]
+    original_text: str
+    reworded_text: str
+    spoken_text: str
+    expected_points: list[str]
+    misconceptions: list[str]
+    hints: list[str]
+    status: VoiceTestQuestionStatus
+
+
+class VoiceTestQuestionListOut(CamelModel):
+    items: list[VoiceTestQuestionOut]
+
+
+class UpdateVoiceTestQuestionIn(CamelModel):
+    reworded_text: str | None = Field(default=None, min_length=1)
+    spoken_text: str | None = Field(default=None, min_length=1)
+    status: VoiceTestQuestionStatus | None = None
+
+
+class SessionReviewOut(CamelModel):
+    """A finished session whose grading failed - no score was recorded, the
+    teacher reads the transcript instead."""
+
+    session_id: str
+    student_id: str
+    student_name: str
+    finished_at: datetime
+    grading_error: str
+    transcript: list[dict]
+    answers: list[dict]
+
+
+class SessionReviewListOut(CamelModel):
+    items: list[SessionReviewOut]

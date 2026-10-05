@@ -87,3 +87,42 @@ class VoiceTestTargetStudent(Base):
     )
     test_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("voice_tests.id"))
     student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+
+
+class VoiceTestQuestionStatus(str, Enum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+
+
+class VoiceTestQuestion(IdMixin, TimestampMixin, Base):
+    """One of the questions every student of a Test is asked, in `order` -
+    picked once per Test from the school's datasets and reworded for speech
+    by services/voice_test_prep.py. The teacher may edit/approve/swap them
+    (voice_test.py's /questions routes). dataset_question_id is NULL only if
+    the source question was later deleted."""
+
+    __tablename__ = "voice_test_questions"
+    __table_args__ = (UniqueConstraint("voice_test_id", "order"),)
+
+    voice_test_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("voice_tests.id"))
+    order: Mapped[int] = mapped_column(Integer)
+    dataset_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dataset_questions.id", ondelete="SET NULL"), nullable=True
+    )
+    bloom_level: Mapped[BloomLevel] = mapped_column(SAEnum(BloomLevel, name="bloom_level"))
+    topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"), nullable=True)
+    subtopic_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("subtopics.id"), nullable=True
+    )
+    concepts: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    original_text: Mapped[str] = mapped_column(Text)
+    reworded_text: Mapped[str] = mapped_column(Text)
+    # reworded_text with formulas/symbols written out in words, for TTS.
+    spoken_text: Mapped[str] = mapped_column(Text)
+    # The grading rubric - empty when generation was unavailable.
+    expected_points: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    misconceptions: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    hints: Mapped[list[str]] = mapped_column(JSONB, default=list)  # gentle, then stronger
+    status: Mapped[VoiceTestQuestionStatus] = mapped_column(
+        SAEnum(VoiceTestQuestionStatus, name="voice_test_question_status"), default=VoiceTestQuestionStatus.DRAFT
+    )

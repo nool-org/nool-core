@@ -119,15 +119,6 @@ class School(IdMixin, TimestampMixin, Base):
     # PUT /school/logo; Super Admin can set/override any school's via
     # PUT /admin/schools/{id}/logo. Displayed across every app.
     logo_data_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # NULL = platform default ("chained" - see ai_assessor.py's
-    # stream_session). Which of colearner's two fixed pipelines
-    # ("chained" or "multimodal" - see services/colearner/README.md) this
-    # school's AI Assessor sessions use. Plain string, not a DB enum: the
-    # set of valid pipelines lives in a separate service/repo (colearner),
-    # so this stays loosely validated here (UpdateVoicePipelineIn's
-    # Literal) rather than tightly coupled via a Postgres enum type.
-    # Super Admin only - PUT /admin/schools/{id}/voice-pipeline.
-    voice_pipeline: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class Subscription(IdMixin, Base):
