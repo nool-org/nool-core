@@ -18,11 +18,8 @@ class SessionState:
         self.is_completed: bool = False
         self.turns: List[Dict[str, str]] = []
 
-        # Provider-specific conversation state (see chained_service.py /
-        # multimodal_service.py - each pipeline only ever populates one of
-        # these, since the model is now fixed per pipeline).
+        # Chat history for the cascaded prototype (see cascaded_service.py).
         self.openai_messages: List[Dict[str, Any]] = []
-        self.gemini_chat: Any = None
         self.report: Optional[Dict[str, Any]] = None
 
         # Token and cost metrics

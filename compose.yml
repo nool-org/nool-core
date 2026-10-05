@@ -203,11 +203,10 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       FIREBASE_CREDENTIALS_PATH: /app/secrets/firebase-service-account.json
-      # Fixed per-pipeline model keys - see services/colearner/README.md.
+      # Models are fixed in code - see services/colearner/README.md.
       # OPENAI_API_KEY is the same var kg already reads (see above); both
       # containers get their own copy of the same host value.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     volumes:
       - ${FIREBASE_CREDENTIALS_HOST_PATH:-./secrets/firebase-service-account.json}:/app/secrets/firebase-service-account.json:ro

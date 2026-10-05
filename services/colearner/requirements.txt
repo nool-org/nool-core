@@ -9,7 +9,6 @@ opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.44.0
 opentelemetry-instrumentation-fastapi==0.65b0
 openai==2.48.0
-google-genai==1.47.0
 edge-tts==7.2.8
 tiktoken==0.14.0
 av==15.1.0

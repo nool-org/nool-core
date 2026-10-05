@@ -114,7 +114,6 @@ services:
       FALKORDB_HOST: ${FALKORDB_HOST:-falkordb}
       FALKORDB_PORT: ${FALKORDB_PORT:-6379}
       FALKORDB_PASSWORD: ${FALKORDB_PASSWORD:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     networks:
       - nool_network
 
