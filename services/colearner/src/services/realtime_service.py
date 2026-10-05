@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -191,7 +192,7 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 - Before each question, call ask_question with its number, without speaking. Then say the text it returns. You may add ONE short friendly sentence of context before it, but keep the question's meaning.
 - Then stop and listen. Never say or hint whether an answer is right or wrong, never correct it, never praise it as correct, and never repeat it back. Give one short neutral acknowledgement (like "Okay, got it.") and go to the next question.
 - Hints: only when the student asks for one. Call give_hint with the question number, without speaking, then say the hint it returns - never the answer. If it says no hints are left, gently encourage the student to try in their own words. Stay on the same question.
-- Explanation: only if the student asks AFTER they have answered. Call give_explanation with the question number, without speaking, then explain in 2-3 short sentences using only the key points it returns. Then go to the next question.
+- Explanation: only if the student asks AFTER they have answered. Call give_explanation with the question number, without speaking, then explain in 2-3 short sentences using only the key points it returns. Then go on to the next unanswered question (if you had already asked it, call ask_question for it again).
 - Keep every other turn to 1-2 short sentences (under 25 words).
 - If the student interrupts you, stop and listen - respond to what they said.
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
@@ -344,6 +345,8 @@ async def _record(call: RealtimeCall, ws) -> None:
         elif kind == "conversation.item.input_audio_transcription.completed":
             entry = call.items.setdefault(event["item_id"], {"role": "user", "text": ""})
             entry["text"] = (event.get("transcript") or "").strip()
+            if not entry["text"] and call.item_kind.get(event["item_id"]) == "answer":
+                _not_an_answer(call, event["item_id"])
             add_transcription_usage(call.usage, event.get("usage"))
         elif kind == "response.output_audio_transcript.done":
             entry = call.items.setdefault(event["item_id"], {"role": "assistant", "text": ""})
@@ -408,12 +411,22 @@ def _tag_user_turn(call: RealtimeCall, item_id: str) -> None:
 
 
 def _request_turn(call: RealtimeCall, n: int, kind: str) -> None:
-    """The student's latest turn on question n was a request, not an answer."""
+    """The student's latest turn was a request about question n, not an answer -
+    even if Milo had already moved on and it was tagged with a later question."""
     item_id = call.last_user_item
-    if item_id is None or call.item_question.get(item_id) != n:
+    tagged = call.item_question.get(item_id)
+    if item_id is None or tagged not in (n, call.current):  # an older question's turn - not this request
         return
+    if _progress(call, tagged)["first_item"] == item_id:
+        _progress(call, tagged)["first_item"] = None  # that question's answer is still to come
+    call.item_question[item_id] = n
     call.item_kind[item_id] = kind
-    progress = _progress(call, n)
+
+
+def _not_an_answer(call: RealtimeCall, item_id: str) -> None:
+    """Heard nothing (noise) - the question's answer is still to come."""
+    call.item_kind[item_id] = "noise"
+    progress = _progress(call, call.item_question[item_id])
     if progress["first_item"] == item_id:
         progress["first_item"] = None
 
@@ -446,31 +459,42 @@ def _tool_output(call: RealtimeCall, name: str, n: int | None) -> tuple[dict, in
     return {"key_points": q.expected_points}, MAX_EXPLANATION_TOKENS
 
 
+def _said(spoken: str, text: str) -> bool:
+    """Milo already read `text` out (most of its words are in what he said)."""
+    words = re.findall(r"\w+", text.lower())
+    heard = set(re.findall(r"\w+", spoken.lower()))
+    return bool(words) and sum(w in heard for w in words) >= 0.8 * len(words)
+
+
 async def _questions_done(call: RealtimeCall, ws, outputs: list[dict]) -> None:
     """response.done with prepared questions: answer the question tools, or force
     the end once the last question has its answer and Milo just talked on."""
     calls = [o for o in outputs if o.get("type") == "function_call"
              and o.get("name") in ("ask_question", "give_hint", "give_explanation")]
-    spoke = any(o.get("type") == "message" for o in outputs)
-    max_tokens = MAX_REPLY_TOKENS
+    messages = [o["id"] for o in outputs if o.get("type") == "message" and o.get("id")]
+    spoken = " ".join(call.items.get(m, {}).get("text", "") for m in messages)
+    max_tokens, reply_needed = MAX_REPLY_TOKENS, False
     for fc in calls:
         try:
             n = int(json.loads(fc.get("arguments") or "{}").get("question_number"))
         except (ValueError, TypeError, AttributeError):
             n = None
-        output, max_tokens = _tool_output(call, fc["name"], n)
-        if fc["name"] == "ask_question" and "say" in output:
-            for o in outputs:  # a question spoken in the same response belongs to it
-                if o.get("type") == "message" and o.get("id"):
-                    call.item_question[o["id"]] = n
+        output, tokens = _tool_output(call, fc["name"], n)
+        if fc["name"] == "ask_question" and "say" in output and _said(spoken, output["say"]):
+            for m in messages:  # the question was spoken in this same response - it belongs to it
+                call.item_question[m] = n
+        else:
+            # the tool's text hasn't been said yet (a filler like "Okay, got it."
+            # may have been) - Milo needs a reply to say it
+            reply_needed = True
+            max_tokens = max(max_tokens, tokens)
         await ws.send(json.dumps({
             "type": "conversation.item.create",
             "item": {"type": "function_call_output", "call_id": fc.get("call_id"), "output": json.dumps(output)},
         }))
-    if calls and not spoke:
-        # tool-only response: now let Milo say what the tool returned
+    if reply_needed:
         await ws.send(json.dumps({"type": "response.create", "response": {"max_output_tokens": max_tokens}}))
-    elif (spoke and not calls and not call.forcing_end and call.current == len(call.state.config.questions)
+    elif (messages and not calls and not call.forcing_end and call.current == len(call.state.config.questions)
           and _progress(call, call.current)["first_item"] is not None):
         # Milo acknowledged the final answer but didn't end - make it (the goodbye follows)
         call.forcing_end = call.forced_end_sent = True

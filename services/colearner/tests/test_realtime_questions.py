@@ -194,3 +194,69 @@ def test_request_limits():
         CreateCallIn(sdp="v=0", config=SessionConfig(), owner_ref="x" * 129)
     with pytest.raises(ValidationError):
         FinishCallIn(owner_ref="")
+
+
+def _assistant_and_tool(item_id, text, name, n, call_id):
+    """One response that both speaks and calls a question tool."""
+    return [{"type": "conversation.item.added", "item": {"id": item_id, "type": "message", "role": "assistant"}},
+            {"type": "response.output_audio_transcript.done", "item_id": item_id, "transcript": text},
+            _done({"type": "message", "id": item_id},
+                  {"type": "function_call", "name": name, "call_id": call_id,
+                   "arguments": json.dumps({"question_number": n})})]
+
+
+def _plain_creates(ws):
+    return [m for m in ws.sent if m["type"] == "response.create" and "instructions" not in m.get("response", {})
+            and "max_output_tokens" in m.get("response", {})]
+
+
+def test_filler_plus_tool_in_one_response_still_gets_spoken(monkeypatch, short_call):
+    events = [
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+        *_user("u1", "Current flows"),
+        *_assistant_and_tool("a1b", "Okay, got it.", "ask_question", 2, "c2"),  # question not said yet
+        *_assistant("a2", "Question 2 text?"),
+        *_user("u2", "Hint please"),
+        *_assistant_and_tool("a2h", "Sure.", "give_hint", 2, "h1"),
+        *_assistant("a2h1", "hint 2.1"),
+        *_user("u2b", "Resistance"),
+        *_assistant_and_tool("a2b", "Okay. Here is the next one: Question 3 text?", "ask_question", 3, "c3"),
+    ]
+    ws = FakeWS(events)
+    call, _ = _run_sideband(monkeypatch, ws, _config())
+    # c1 (tool only), c2 (filler only), h1 (filler only) need a reply; c3 was read out in the same response
+    assert [m["response"]["max_output_tokens"] for m in _plain_creates(ws)] == [
+        rs.MAX_QUESTION_TOKENS, rs.MAX_QUESTION_TOKENS, rs.MAX_REPLY_TOKENS]
+    assert call.item_question["a1b"] == 1 and call.item_question["a2"] == 2 and call.item_question["a2b"] == 3
+    assert call.progress[2]["first_item"] == "u2b" and call.item_kind["u2"] == "hint_request"
+
+
+def test_explanation_of_previous_question_after_moving_on(monkeypatch, short_call):
+    events = [
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+        *_user("u1", "Current flows"),
+        _tool("ask_question", 2, "c2"), *_assistant("a2", "Okay. Question 2 text?"),
+        *_user("u2x", "Can you explain question 1?"),  # tagged Q2 when heard
+        _tool("give_explanation", 1, "x1"), *_assistant("a1x", "point 1a, point 1b"),
+        *_user("u2noise", ""),  # noise - never an answer
+        _tool("ask_question", 2, "c3"), *_assistant("a2r", "Question 2 text?"),
+        *_user("u2", "Resistance"),
+    ]
+    ws = FakeWS(events)
+    call, _ = _run_sideband(monkeypatch, ws, _config())
+    assert _outputs(ws)["x1"] == {"key_points": ["point 1a", "point 1b"]}
+    assert call.item_question["u2x"] == 1 and call.item_kind["u2x"] == "explanation_request"
+    assert call.progress[1] == {"first_item": "u1", "hints_used": 0, "explanation_requested": True}
+    assert call.progress[2]["first_item"] == "u2" and call.item_kind["u2noise"] == "noise"
+
+
+def test_unprompted_hint_does_not_relabel_previous_answer():
+    call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.session_store.create_session(_config(3)))
+    call.current = 1
+    call.item_question["u1"] = 1
+    rs._tag_user_turn(call, "u1")
+    rs._tool_output(call, "ask_question", 2)
+    rs._tool_output(call, "give_hint", 2)  # no new student turn since Q1's answer
+    assert call.progress[1]["first_item"] == "u1" and call.item_kind["u1"] == "answer"
