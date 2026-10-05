@@ -63,6 +63,15 @@ def test_aggregates_and_hint_penalty_are_computed_in_code():
     assert session.turn_metrics[-1]["turn_cost_usd"] == round(0.025 + 2.00, 6)
 
 
+def test_out_of_range_model_scores_are_clamped():
+    payload = {"overall_feedback": "", "answers": [
+        _answer(1, "Remembering", 140, True), _answer(2, "Remembering", -5, False)]}
+    _, report = _grade(_FakeClient(payload))
+    qa = report["qa_transcripts"]
+    assert [a["raw_score_percent"] for a in qa] == [100, 0]
+    assert [a["score_percent"] for a in qa] == [100, 0]
+
+
 def test_report_keeps_the_shape_core_consumes():
     _, report = _grade(_FakeClient({"overall_feedback": "fine", "answers": [_answer(1, "Analyzing", 40, False)]}))
     assert {"grade", "subject", "chapter", "total_questions_asked", "overall_feedback",

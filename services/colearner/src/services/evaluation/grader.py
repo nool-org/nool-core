@@ -116,8 +116,12 @@ def _user_prompt(transcript: str, grade: str, subject: str, chapter: str, rubric
     )
 
 
+def _clamp_score(score: Any) -> int:
+    return max(0, min(100, int(score or 0)))
+
+
 def penalized_score(score: Any, hints: Any) -> int:
-    score = max(0, min(100, int(score or 0)))
+    score = _clamp_score(score)
     return max(0, score - min(HINT_PENALTY * max(0, int(hints or 0)), HINT_PENALTY_MAX))
 
 
@@ -127,7 +131,7 @@ def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str,
     for a in graded.get("answers") or []:
         qa.append({
             **a,
-            "raw_score_percent": a["score_percent"],
+            "raw_score_percent": _clamp_score(a["score_percent"]),
             "score_percent": penalized_score(a["score_percent"], a.get("hints_used")),
             "confidence": max(0.0, min(1.0, float(a.get("confidence") or 0))),
         })
@@ -173,7 +177,8 @@ async def grade_transcript(
     """Grades a full session transcript. Records the call's real cost on `session`.
 
     rubric: optional [{question_number, key_points: [...], misconceptions: [...]}].
-    Never fakes success: on failure returns qa_transcripts [] plus `grading_error`.
+    Never fakes success: on failure returns qa_transcripts [], `grading_error`, and
+    session_summary.overall_mastery_percent = None (consumers must handle null).
     """
     config = session.config
     report_args = (config.grade, config.subject, config.chapter_name, config.num_questions)
