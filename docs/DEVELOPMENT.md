@@ -12,6 +12,12 @@ cp .env.example .env
 # edit .env - at minimum set POSTGRES_PASSWORD to something non-default
 ```
 
+The AI features also need `OPENAI_API_KEY` (colearner, generation, kg) and
+`GEMINI_API_KEY` (colearner's multimodal pipeline only), plus the Firebase
+credentials - see `.env.example`. Without the keys the stack still starts,
+but `/ready` on those services reports 503 and voice tests / question paper
+generation fail.
+
 ## Running the stack
 
 ```bash
@@ -69,8 +75,50 @@ alongside it for local dev and additionally publishes:
   `http://localhost:8080/auth/docs` and `http://localhost:8080/api/docs` -
   both routes hit the same FastAPI app, so pick whichever is convenient.
 
+- KG on `localhost:8003`, Colearner on `localhost:8004`, Generation on
+  `localhost:8005` (`KG_PORT_HOST`/`COLEARNER_PORT_HOST`/`GENERATION_PORT_HOST`),
+  each with its own `/docs`.
+- Azurite (local Azure Blob stand-in for question images) on `localhost:10000`.
+
+`compose.override.yml` also sets `PLAYGROUND_ENABLED=true` on colearner, so
+the browser test page for all voice pipelines is at
+`http://localhost:8004/api/v1/colearner/playground` (or via NGINX at
+`http://localhost:8080/api/v1/colearner/playground`). It skips sign-in and
+spends real model API credit; it must never be enabled in production.
+
 Delete or ignore `compose.override.yml` for a production-shaped deploy -
 services stay internal-only without it.
+
+### The textbook graph (nool-kg) and the local fallback
+
+The `kg` service reads curriculum content from nool-kg's REST API at
+`NOOL_KG_BASE_URL` (default: the hosted `https://nool-data.draco-labs.in`).
+If the hosted graph is down, run nool-kg locally against a local FalkorDB
+and point kg at it:
+
+```powershell
+# from the nool-kg checkout, with its FalkorDB container on host port 6380
+$env:FALKORDB_HOST="localhost"; $env:FALKORDB_PORT="6380"
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8010
+```
+
+then set `NOOL_KG_BASE_URL=http://host.docker.internal:8010` in `.env` and
+recreate kg (`docker compose up -d kg`). If question paper generation or
+voice test reference content starts failing with kg 500s, first check that
+port 8010 is up. Remove the line again once the hosted graph is back.
+
+### A voice test locally
+
+1. Sync a chapter from KG in the Super Admin catalog (so it has real
+   content to ground against), create a class, teacher and student.
+2. As the teacher, create and publish a Voice Test for that chapter.
+3. As the student in nool-apps (web or device), open the assigned test:
+   the app negotiates WebRTC through Core -> colearner -> OpenAI Realtime
+   and the conversation is live; finishing records the Bloom result.
+
+To try the voice pipelines without the app or test data, use the
+playground page above. The full flow is described in
+`docs/ARCHITECTURE.md` ("A voice test, end to end").
 
 ### Destructive: resetting the database
 
@@ -96,12 +144,45 @@ See `database/README.md` and `scripts/migrate.sh`.
 ## Tests
 
 ```bash
-cd services/auth && pip install -r requirements-dev.txt && pytest
-cd services/core && pip install -r requirements-dev.txt && pytest
+cd services/<auth|core|colearner|generation> && pip install -r requirements-dev.txt && pytest
+cd services/kg && pip install -r requirements.txt pytest && pytest
 ```
 
-No test requires a real PostgreSQL or Firebase instance - dependencies are
-mocked at the boundary (see each service's `tests/`).
+No test requires a real PostgreSQL, Firebase or model API - dependencies
+are mocked at the boundary (see each service's `tests/`), and the LLM/STT/
+TTS clients are replaced with fakes. Run tests **without** model API keys
+in the environment so an unfaked call fails instead of spending credit.
+
+To run a suite with exactly the production dependencies, run it inside that
+service's already-built image instead of a local virtualenv: `docker run
+--rm` the `nool-core-<service>` image on the Compose network, bind-mount the
+checkout's `shared/`, `services/<service>/src` and `services/<service>/tests`
+over `/app`, pass only the non-secret env it needs (Postgres, Firebase
+project, `ENVIRONMENT`) and run `python -m pytest`. This works for any
+checkout (e.g. a git worktree) without touching the running containers.
+
+## Deploying (production)
+
+Production uses `compose.prod.yml` (see `compose.prod.yml` for the exact
+services, images and settings) instead of `compose.override.yml`. Intended
+usage:
+
+1. Provision managed PostgreSQL and put its credentials, the Firebase
+   service account, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `NOOL_KG_BASE_URL`
+   and the asset storage settings into the server's environment / `.env`
+   (never into the repo).
+2. Build and start: `docker compose -f compose.yml -f compose.prod.yml up -d --build`.
+3. Run migrations: `./scripts/migrate.sh` (see `database/README.md`).
+4. Check readiness: `/health`, `/auth/ready` and `/api/ready` through
+   NGINX, and `docker compose ps` for the internal services (colearner,
+   generation, kg are not exposed; their `/ready` reports 503 until their
+   keys/config are present).
+5. Keep colearner at **one replica** (in-memory session state) and keep
+   `PLAYGROUND_ENABLED` unset.
+
+Roll back by redeploying the previous image tag / git revision with the
+same command; if the rollback crosses a migration, downgrade it first
+(`./scripts/migrate.sh downgrade -1`, see `database/README.md`).
 
 ## Linting / type-checking
 

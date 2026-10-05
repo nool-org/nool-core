@@ -1,20 +1,20 @@
 # nool Platform — Technical Specification
 
 **Status**: reflects the platform as built and verified live, as of 2026-08-25.
-**Scope**: `nool-core` (Auth service, Core service, PostgreSQL, NGINX), `nool-apps` (React Native/Expo mobile app for Teachers and Students), `nool-school-admin` and `nool-super-admin` (Next.js admin consoles).
+**Scope**: `nool-core` (Auth, Core, Colearner, Generation and KG services, PostgreSQL, NGINX), `nool-apps` (React Native/Expo mobile app for Teachers and Students), `nool-school-admin` and `nool-super-admin` (Next.js admin consoles).
 
 ---
 
 ## 1. Mission & Architecture
 
-nool is a school voice-testing and curriculum platform. Firebase Authentication is the identity provider; PostgreSQL is the system of record for everything else (schools, users, curriculum, tests, subscriptions).
+nool is a school voice-testing and curriculum platform: an AI voice co-learner for Indian school students. Firebase Authentication is the identity provider; PostgreSQL is the system of record for everything else (schools, users, curriculum, tests, subscriptions).
 
 ```
                               NGINX (:8080)
-                    /auth/*  │        │  /api/*
-                     (auth service)  (core service)
-                              │        │
-                              └────┬───┘
+                    /auth/*  │        │  /api/*      │ /api/v1/colearner/*
+                     (auth service)  (core service) ─┼─> (colearner service)
+                              │        │  ├─> generation service
+                              └────┬───┘  └─> kg service ─> nool-kg graph
                                    ▼
                               PostgreSQL
 ```
@@ -31,7 +31,12 @@ Four client apps talk to this stack:
 
 **Service boundary**: Auth and Core are logically independent — Auth never imports Core business modules and vice versa. Auth owns all Firebase interaction (token verification, password-check proxying, user provisioning); Core owns the product schema and business logic, and calls the Firebase Admin SDK directly only for account provisioning (creating/resetting users), sharing the same service-account credentials Auth uses.
 
-**AI-backed content generation** (question generation, the AI Assessor's realtime voice conversation) sits behind one pluggable interface — `services/core/src/services/content_generator.py`'s `ContentGenerator` Protocol (`generate_questions`, `generate_replacement_candidates`, `build_assessor_script`) — with exactly one implementation, `DeterministicContentGenerator`. **No real LLM/STT/TTS vendor is integrated anywhere in this repo.** Wiring one in is future work that touches only this interface's implementation.
+**AI-backed content** is real and runs in three internal services (models fixed in code; full table and the end-to-end voice flow in `docs/ARCHITECTURE.md`):
+- **colearner** — the AI Assessor voice test over WebRTC with OpenAI Realtime (`gpt-realtime-2.1-mini`, transcript by `gpt-4o-mini-transcribe`, Bloom report by `gpt-4o-mini`); older per-turn pipelines chained (`whisper-1` → `gpt-4o-mini` → Edge-TTS) and multimodal (`gemini-3.5-flash-lite` → Edge-TTS); a cascaded prototype (`gpt-4o-mini-transcribe` → `gpt-4.1-mini` → `gpt-4o-mini-tts`); Homework insight (`gpt-4o-mini`); a dev-only playground at `/api/v1/colearner/playground` behind `PLAYGROUND_ENABLED`.
+- **generation** — Homework gap-fill (`gpt-5.1` writes, `gpt-5-mini` verifies).
+- **kg** — curriculum tree, question paper questions, voice test reference content, grounded in the nool-kg textbook graph (`gpt-5.1`).
+
+`services/core/src/services/content_generator.py`'s `DeterministicContentGenerator` survives only as Homework's last fallback (chapter not synced from KG, or every real source failed).
 
 **Notifications** are explicitly out of scope platform-wide until a real feature needs them (no email, no push, anywhere).
 
@@ -158,8 +163,10 @@ All business endpoints require a Firebase ID token (`Authorization: Bearer <toke
 - `/me/journey`, `/me/practice-bank`, `/me/progress`, `/me/leaderboard`
 
 **AI Assessor**
-- `POST /ai-assessor/sessions` (opens a session, returns a `wsUrl`)
-- `WS /ai-assessor/sessions/{id}/stream` — realtime voice conversation stream
+- `POST /ai-assessor/sessions` (opens a session)
+- `POST /ai-assessor/sessions/{id}/realtime` — WebRTC SDP offer in, answer + `callId` out; audio then flows app ↔ OpenAI Realtime, colearner records the transcript server-side
+- `POST /ai-assessor/sessions/{id}/finish` — ends the call, scores the server-side transcript, records the result
+- `WS /ai-assessor/sessions/{id}/stream` — older per-turn voice stream bridged to colearner's chained/multimodal pipeline (`school.voice_pipeline`); nool-apps no longer uses it
 
 **Health**: `GET /health`, `GET /ready` (both services)
 
@@ -190,7 +197,7 @@ Route groups: `(auth)` (login, unknown-profile), `(app)/teacher`, `(app)/student
 | Test results (class & per-student) | `GET /tests/{id}/results/...` | Real |
 | Question Paper authoring (incl. Bloom/difficulty mix editor) | `GET/POST /question-papers` | Real — always sends an explicit distribution, so the new school-level default is never actually exercised from this screen |
 | Homework assign/live/review | `GET/POST /homework` | Real |
-| Assistant chat | `GET/POST /assistant/messages` | Real transport; generation is the deterministic placeholder |
+| Assistant chat | `GET/POST /assistant/messages` | Real transport; replies are keyword-matched canned text, not an LLM |
 | **Settings** (Notifications/Appearance/Language/About) | none | **Placeholder** — every row routes to a shared "coming soon" stub |
 
 ### Student
@@ -199,7 +206,7 @@ Route groups: `(auth)` (login, unknown-profile), `(app)/teacher`, `(app)/student
 |---|---|---|
 | Dashboard | `GET /me/dashboard` | Real |
 | Assigned Tests | `GET /me/assigned-tests` | Real |
-| AI Assessor voice session | `POST /ai-assessor/sessions` + real `WebSocket` stream | Real |
+| AI Assessor voice session | `POST /ai-assessor/sessions` → `.../realtime` (WebRTC SDP offer/answer) → `.../finish` | Real — live full-duplex voice (OpenAI Realtime via colearner) |
 | Homework | `GET /me/homework/current` | Real |
 | Journey (chapter map) | `GET /me/journey` | Real |
 | Practice Bank | `GET /me/practice-bank` | Real |
@@ -257,7 +264,8 @@ Honestly tracked, not glossed over:
 - **Student drill-down activity is class-level, not per-student** — no student-level filter exists anywhere in the oversight API yet; the UI says so rather than faking precision.
 - **Super Admin's audit log is unpaginated**, unlike the newer paginated pattern used everywhere else.
 - **Teacher-app Settings screen is an unimplemented placeholder** (Notifications/Appearance/Language/About) — there is currently no persistent, saved teacher-level preference anywhere to build an admin override on top of, beyond the one that now exists (default Bloom/difficulty distribution).
-- **AI-backed content generation is a deterministic placeholder by design** — no real LLM/STT/TTS vendor integrated; swapping one in is scoped, future, single-interface work.
+- **Colearner state is in process memory** (sessions and live realtime calls) — lost on restart and not shared, so colearner runs as a single replica; Core's curriculum-sync WebSocket fan-out has the same single-instance limit.
+- **Voice tests and question papers need the model APIs**: without `OPENAI_API_KEY`, or with kg / nool-kg unreachable, they fail (only Homework has a deterministic last-resort fallback).
 - **Notifications are out of scope by design**, platform-wide.
 
 ---
@@ -272,8 +280,11 @@ Honestly tracked, not glossed over:
 | School Admin console | http://localhost:3100 |
 | Super Admin console | http://localhost:3101 |
 | Jaeger tracing | http://localhost:16686 |
-| PostgreSQL | localhost:5432 |
+| KG service (direct) | http://localhost:8003 |
+| Colearner service (direct; playground at `/api/v1/colearner/playground`) | http://localhost:8004 |
+| Generation service (direct) | http://localhost:8005 |
+| PostgreSQL | localhost:5433 |
 
-`docker compose up --build` from the repo root brings up nginx/auth/core/postgres/jaeger. The two admin apps are separate repos/Compose projects (`nool-school-admin`, `nool-super-admin`), each with their own `compose.yml`.
+`docker compose up --build` from the repo root brings up nginx/auth/core/kg/generation/colearner/postgres/jaeger (+ azurite locally). See `docs/DEVELOPMENT.md` for the local nool-kg fallback and running tests. The two admin apps are separate repos/Compose projects (`nool-school-admin`, `nool-super-admin`), each with their own `compose.yml`.
 
 **Known test account**: `schooladmin@test.com` / `Test1234!` (School Admin, confirmed working this session).
