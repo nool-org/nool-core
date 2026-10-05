@@ -13,7 +13,6 @@ def test_ready_is_not_ready_without_firebase_project(client, monkeypatch):
 def test_ready_is_not_ready_without_any_model_key(client, monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "demo-project")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     response = client.get("/ready")
 
@@ -25,8 +24,7 @@ def test_ready_is_not_ready_without_any_model_key(client, monkeypatch):
 
 def test_ready_is_ready_when_firebase_and_a_model_key_configured(client, monkeypatch):
     monkeypatch.setenv("FIREBASE_PROJECT_ID", "demo-project")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     response = client.get("/ready")
 

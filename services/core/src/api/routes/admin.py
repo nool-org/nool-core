@@ -39,7 +39,6 @@ from src.api.schemas.admin import (
 )
 from src.api.schemas.bloom import BloomDistributionOut, UpdateBloomDistributionIn
 from src.api.schemas.school_logo import SchoolLogoOut, UpdateSchoolLogoIn
-from src.api.schemas.voice_pipeline import UpdateVoicePipelineIn, VoicePipelineOut
 from src.api.schemas.common import ListEnvelope
 from src.api.schemas.features import FeaturesOut, UpdateFeaturesIn
 from src.api.schemas.import_job import ImportJobOut
@@ -418,33 +417,6 @@ async def update_school_logo(
     await session.commit()
     await session.refresh(school)
     return SchoolLogoOut(logo_data_uri=school.logo_data_uri)
-
-
-@router.get("/schools/{school_id}/voice-pipeline")
-async def get_school_voice_pipeline(
-    school_id: str,
-    _: User = Depends(require_role(Role.SUPER_ADMIN)),
-    session: AsyncSession = Depends(get_db_session),
-) -> VoicePipelineOut:
-    school = await _get_school(session, school_id)
-    return VoicePipelineOut(voice_pipeline=school.voice_pipeline)
-
-
-@router.put("/schools/{school_id}/voice-pipeline", summary="Set/clear which colearner pipeline a school uses")
-async def update_school_voice_pipeline(
-    school_id: str,
-    body: UpdateVoicePipelineIn,
-    actor: User = Depends(require_role(Role.SUPER_ADMIN)),
-    session: AsyncSession = Depends(get_db_session),
-) -> VoicePipelineOut:
-    school = await _get_school(session, school_id)
-    school.voice_pipeline = body.voice_pipeline
-    await audit_repository.record(
-        session, actor_id=actor.id, action="school.voice_pipeline_updated", target_type="school", target_id=school_id,
-    )
-    await session.commit()
-    await session.refresh(school)
-    return VoicePipelineOut(voice_pipeline=school.voice_pipeline)
 
 
 def _features_label(features: list[str] | None) -> str:

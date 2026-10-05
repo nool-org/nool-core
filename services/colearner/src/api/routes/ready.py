@@ -11,13 +11,13 @@ router = APIRouter()
 @router.get("/ready")
 async def ready() -> JSONResponse:
     """Readiness depends on Firebase being configured (for token
-    verification) and at least one pipeline's model API key being set.
-    Does not call out to Firebase/OpenAI/Gemini - only confirms the
+    verification) and OPENAI_API_KEY being set.
+    Does not call out to Firebase/OpenAI - only confirms the
     service has what it needs when a request arrives.
     """
     settings = get_settings()
     firebase_configured = bool(settings.firebase_project_id)
-    model_keys_configured = bool(settings.openai_api_key or settings.gemini_api_key)
+    model_keys_configured = bool(settings.openai_api_key)
     checks = [
         ReadinessCheck(
             name="firebase_config",
@@ -27,7 +27,7 @@ async def ready() -> JSONResponse:
         ReadinessCheck(
             name="model_keys",
             ok=model_keys_configured,
-            detail=None if model_keys_configured else "Neither OPENAI_API_KEY nor GEMINI_API_KEY is set",
+            detail=None if model_keys_configured else "OPENAI_API_KEY is not set",
         ),
     ]
     ready_state = firebase_configured and model_keys_configured
