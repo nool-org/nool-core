@@ -38,6 +38,7 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestQuestion,
 )
+from src.services import push
 from src.services.homework_builder import Focus, build_homework_questions, grounding_dataset_id
 
 AUTO_HOMEWORK_QUESTION_COUNT = 5
@@ -52,8 +53,8 @@ async def auto_generate_homework(
     student_id: uuid.UUID,
     mastery_percent: int,
     bloom_levels: list[BloomLevel],
-) -> None:
-    """No-ops (rather than raising) when there is no Dataset to ground
+) -> Homework | None:
+    """Returns the new Homework, or None when it no-ops. No-ops (rather than raising) when there is no Dataset to ground
     questions in - HomeworkQuestion.dataset_id is NOT NULL, the same
     requirement the manual teacher flow has, just with no teacher present
     to pick one. Caller (test_completion.py) only invokes this once per
@@ -63,7 +64,7 @@ async def auto_generate_homework(
     student = await session.get(User, student_id)
     dataset_id = await _pick_dataset(session, user=student, test=test)
     if dataset_id is None:
-        return
+        return None
 
     chapter = await session.get(Chapter, test.chapter_id)
     gap_topic = chapter.name if chapter is not None else "this chapter"
@@ -106,6 +107,7 @@ async def auto_generate_homework(
                 **({"is_boss": True} if d.is_boss else {}),  # unset = server default false
             )
         )
+    return hw
 
 
 async def weak_spots(session: AsyncSession, *, test_id, student_id) -> dict:
@@ -191,9 +193,12 @@ def schedule_auto_homework(*, test_id: uuid.UUID, student_id: uuid.UUID, mastery
                 test = await session.get(VoiceTest, test_id)
                 if test is None:
                     return
-                await auto_generate_homework(session, test=test, student_id=student_id,
-                                             mastery_percent=mastery_percent, bloom_levels=bloom_levels)
+                hw = await auto_generate_homework(session, test=test, student_id=student_id,
+                                                  mastery_percent=mastery_percent, bloom_levels=bloom_levels)
                 await session.commit()
+                if hw is not None:
+                    await push.notify(session, [student_id], f"Homework ready: {hw.gap_topic}",
+                                      "Your homework is waiting.", {"type": "homework", "homeworkId": str(hw.id)})
         except Exception:  # logged, never raised: the test result already stands
             logging.getLogger(__name__).exception(
                 "auto_homework_failed", extra={"test_id": str(test_id), "student_id": str(student_id)})

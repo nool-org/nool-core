@@ -42,7 +42,7 @@ from src.repositories.lookups import ensure_students_in_class, get_test_for_teac
 from src.repositories.roster_repository import teaches_class_subject
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_tests
-from src.services import voice_test_prep
+from src.services import push, voice_test_prep
 
 router = APIRouter(prefix="/api/v1", tags=["voice-tests"])
 
@@ -235,6 +235,11 @@ async def schedule_test(
         raise ConflictError("Test isn't in a schedulable state.")
     test.status = TestStatus.SCHEDULED
     await session.commit()
+    chapter = await session.get(Chapter, test.chapter_id)
+    student_ids = (await session.execute(
+        select(VoiceTestTargetStudent.student_id).where(VoiceTestTargetStudent.test_id == test.id))).scalars().all()
+    await push.notify(session, student_ids, f"New voice test: {chapter.name if chapter else 'Chapter'}",
+                      "Tap to start when you're ready.", {"type": "voice_test", "testId": str(test.id)})
     await session.refresh(test)
     return await _serialize(session, test)
 

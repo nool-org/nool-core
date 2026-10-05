@@ -49,7 +49,7 @@ from src.domain.models import (
     VoiceTestQuestion,
 )
 from src.repositories.dataset_access import visible_datasets
-from src.services import generation_client
+from src.services import generation_client, push
 from src.services.growth import corrected, growth_entries, percent
 from src.services.homework_builder import _sections, question_uid
 from src.services.question_selector import text_only_filter
@@ -73,7 +73,10 @@ def status(mcq: McqTest) -> str:
 # ------------------------------------------------------------------ unlock
 async def sync_for_student(session: AsyncSession, student_id: uuid.UUID) -> list[McqTest]:
     """Creates the missing McqTest rows for the student's voice test results
-    and unlocks the due ones. Newest first. Caller commits."""
+    and unlocks the due ones. Newest first. Caller commits - except that an
+    unlock commits right here, so its push goes out only once it stands. The
+    unlock is a guarded UPDATE, so each MCQ test unlocks (and pushes) once,
+    even under concurrent requests."""
     test_ids = (await session.execute(
         select(StudentTestResult.test_id).where(StudentTestResult.student_id == student_id))).scalars().all()
     have = set((await session.execute(
@@ -93,10 +96,18 @@ async def sync_for_student(session: AsyncSession, student_id: uuid.UUID) -> list
         select(Homework.test_id).join(StudentHomeworkProgress, StudentHomeworkProgress.homework_id == Homework.id)
         .where(StudentHomeworkProgress.student_id == student_id,
                StudentHomeworkProgress.status == StudentHomeworkStatus.COMPLETED))).scalars().all())
-    for mcq in rows:
-        if mcq.unlocked_at is None and (mcq.voice_test_id in done or now >= mcq.unlocks_at):
-            mcq.unlocked_at = now
+    due = [mcq.id for mcq in rows
+           if mcq.unlocked_at is None and (mcq.voice_test_id in done or now >= mcq.unlocks_at)]
+    unlocked = (await session.execute(
+        update(McqTest).where(McqTest.id.in_(due), McqTest.unlocked_at.is_(None))
+        .values(unlocked_at=now).returning(McqTest.id))).scalars().all() if due else []
     await session.flush()
+    if unlocked:
+        await session.commit()
+        for mcq_id in unlocked:
+            await push.notify(session, [student_id], "Your MCQ check is ready",
+                              "See how much you've improved since your voice test.",
+                              {"type": "mcq_test", "mcqTestId": str(mcq_id)})
     return list(rows)
 
 

@@ -42,6 +42,7 @@ from src.domain.models import (
 from src.repositories.dataset_access import ensure_datasets_visible
 from src.repositories.lookups import ensure_students_in_class, get_homework_for_teacher
 from src.repositories.roster_repository import teaches_class_subject
+from src.services import push
 from src.services.bloom_defaults import resolve_bloom_targets
 from src.services.homework_builder import QuestionDraft, build_homework_questions, grounding_dataset_id, question_uid
 
@@ -434,5 +435,7 @@ async def assign_homework(
     hw.assigned_count = len(set(target_student_ids) | already_has_progress)
 
     await session.commit()
+    await push.notify(session, target_student_ids, f"Homework ready: {hw.gap_topic}",
+                      "Your homework is waiting.", {"type": "homework", "homeworkId": str(hw.id)})
     await session.refresh(hw)
     return await _serialize(session, hw)
