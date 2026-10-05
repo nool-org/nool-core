@@ -51,6 +51,10 @@ class CoreSettings(BaseServiceSettings):
     # Blank-safe: figures come back with url=None.
     asset_base_url: str | None = None
 
+    # Expo push notifications (src/services/push.py). Off by default so
+    # tests and local dev never call out to Expo.
+    expo_push_enabled: bool = False
+
     @property
     def database_url(self) -> str:
         """Async SQLAlchemy connection string.

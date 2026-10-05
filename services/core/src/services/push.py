@@ -1,16 +1,16 @@
 """Expo push sender. Expo's push API needs no credentials; sending is off
-unless EXPO_PUSH_ENABLED is true, so tests and local dev never call out.
+unless CoreSettings.expo_push_enabled (EXPO_PUSH_ENABLED) is true, so tests
+and local dev never call out.
 
-Not wired to any trigger yet - callers do `await send_push(session, ...)`.
+Triggers call `await notify(session, ...)` right after their own commit.
 """
-
-import os
 
 import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.logging import get_logger
+from src.config.settings import get_settings
 from src.domain.models.device import UserDevice
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 
 def push_enabled() -> bool:
-    return os.getenv("EXPO_PUSH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    return get_settings().expo_push_enabled
 
 
 async def _post(messages: list[dict]) -> dict:
@@ -55,3 +55,17 @@ async def send_push(session: AsyncSession, user_ids, title: str, body: str, data
     if dead:
         await session.execute(delete(UserDevice).where(UserDevice.expo_push_token.in_(dead)))
     return sent
+
+
+async def notify(session: AsyncSession, user_ids, title: str, body: str, data: dict | None = None) -> None:
+    """send_push for a trigger, called after the trigger's own commit: commits
+    the pruned tokens, and logs instead of raising - a push never fails the
+    request that caused it.
+    ponytail: inline, so a slow Expo delays the response (10s timeout per
+    batch); move to a background task if that bites."""
+    try:
+        async with session.begin_nested():  # a failure rolls back only this, not the caller's loaded objects
+            await send_push(session, user_ids, title, body, data)
+        await session.commit()
+    except Exception as exc:
+        logger.warning("push_notify_failed", extra={"error": str(exc), "title": title})
