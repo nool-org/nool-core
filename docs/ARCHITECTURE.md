@@ -67,7 +67,7 @@ client-selectable - see `services/colearner/README.md`.
 
 | Pipeline / feature | Used by | Models |
 | --- | --- | --- |
-| **Realtime** (WebRTC, full duplex) | nool-apps AI Assessor (the production voice test path) | `gpt-realtime-2.1-mini` (speech-to-speech), `gpt-4o-mini-transcribe` (transcript), `gpt-4o-mini` (Bloom report) |
+| **Realtime** (WebRTC, full duplex) | nool-apps AI Assessor (the production voice test path) | `gpt-realtime-2.1-mini` (speech-to-speech), `gpt-4o-mini-transcribe` (transcript), `gpt-5-mini` (Bloom report, strict schema, scores computed in code) |
 | **Chained** (one recorded clip per turn) | Core's legacy WS stream (`school.voice_pipeline`, default `chained`), playground | `whisper-1` STT, `gpt-4o-mini` LLM, Edge-TTS |
 | **Multimodal** (audio straight into the LLM) | Core's legacy WS stream, playground | `gemini-3.5-flash-lite`, Edge-TTS |
 | **Cascaded** (prototype, cost/latency comparison) | playground only | `gpt-4o-mini-transcribe` STT, `gpt-4.1-mini` LLM, `gpt-4o-mini-tts` TTS |
@@ -99,7 +99,7 @@ generation and replacement candidates, and voice test reference content
 | Step | Path | Model(s) | Fallback |
 | --- | --- | --- | --- |
 | Voice test conversation | app -> Core -> colearner realtime | `gpt-realtime-2.1-mini` + `gpt-4o-mini-transcribe` | none - the call fails with 503 |
-| Voice test scoring (Bloom report) | colearner | `gpt-4o-mini` | - |
+| Voice test scoring (Bloom report) | colearner | `gpt-5-mini` (strict schema; averages computed in code) | - |
 | Voice test reference content (on test create, background) | Core -> kg | `gpt-5.1` | session uses colearner's generic defaults |
 | Homework questions | Core: question bank -> generation gap-fill -> relaxed bank -> kg -> deterministic generator | `gpt-5.1` + `gpt-5-mini` verify (generation), `gpt-5.1` (kg) | `DeterministicContentGenerator`, last resort only |
 | Homework insight | Core -> colearner | `gpt-4o-mini` | fixed placeholder paragraph |
@@ -133,7 +133,7 @@ failed) - it is not the primary AI anywhere.
    hangs up after a 30 s grace if the client doesn't.
 6. The app calls `POST /api/v1/ai-assessor/sessions/{id}/finish`; Core calls
    colearner's `.../realtime/calls/{call_id}/finish`, which builds the Bloom
-   report from the server-side transcript (`gpt-4o-mini`). Core scores it
+   report from the server-side transcript (`gpt-5-mini`). Core scores it
    and records the test result, XP and the automatic follow-up Homework.
 
 ### Known limitations

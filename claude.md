@@ -48,7 +48,7 @@ notifications remain out of scope until a real feature needs them.
 
 AI-backed content is real and lives in three internal services that Core calls (models are fixed in code; see docs/ARCHITECTURE.md for the full table and the voice test flow):
 
-colearner — the AI Assessor voice test: WebRTC realtime voice (gpt-realtime-2.1-mini, transcript gpt-4o-mini-transcribe, Bloom report gpt-4o-mini); per-turn chained (whisper-1, gpt-4o-mini, Edge-TTS) and multimodal (gemini-3.5-flash-lite, Edge-TTS) pipelines; a cascaded prototype (gpt-4o-mini-transcribe, gpt-4.1-mini, gpt-4o-mini-tts); Homework insight (gpt-4o-mini); a dev-only playground at /api/v1/colearner/playground behind PLAYGROUND_ENABLED.
+colearner — the AI Assessor voice test: WebRTC realtime voice (gpt-realtime-2.1-mini, transcript gpt-4o-mini-transcribe, Bloom report gpt-5-mini, scores computed in code); per-turn chained (whisper-1, gpt-4o-mini, Edge-TTS) and multimodal (gemini-3.5-flash-lite, Edge-TTS) pipelines; a cascaded prototype (gpt-4o-mini-transcribe, gpt-4.1-mini, gpt-4o-mini-tts); Homework insight (gpt-4o-mini); a dev-only playground at /api/v1/colearner/playground behind PLAYGROUND_ENABLED.
 
 generation — Homework gap-fill questions (gpt-5.1 writes, gpt-5-mini verifies).
 
