@@ -115,7 +115,7 @@ async def test_completing_a_test_advances_that_chapter_on_the_real_journey_endpo
     school = await _seed_school(db_session)
     student = await _seed_student(db_session, school.id)
     subject, chapters = await _seed_subject_with_chapters(db_session, ["Motion", "Force"])
-    school_class = SchoolClass(school_id=school.id, grade=9, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school.id, grade=9, section=uuid.uuid4().hex[:8].upper())
     db_session.add(school_class)
     await db_session.flush()
     test = VoiceTest(

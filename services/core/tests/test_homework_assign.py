@@ -78,7 +78,7 @@ async def _seed_student(db_session, school_id, class_id) -> User:
 
 
 async def _seed_homework(db_session, school_id, teacher) -> tuple[Homework, "SchoolClass"]:
-    school_class = SchoolClass(school_id=school_id, grade=9, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school_id, grade=9, section=uuid.uuid4().hex[:8].upper())
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school_class, subject])
     await db_session.flush()

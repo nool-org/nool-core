@@ -20,7 +20,7 @@ async def _seed_class_subject_chapter_topic(db_session, *, order_index: int | No
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school, subject])
     await db_session.flush()
-    school_class = SchoolClass(school_id=school.id, grade=10, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school.id, grade=10, section=uuid.uuid4().hex[:8].upper())
     chapter = Chapter(subject_id=subject.id, name="Magnetic Effects", order_index=order_index)
     db_session.add_all([school_class, chapter])
     await db_session.flush()
