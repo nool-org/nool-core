@@ -22,6 +22,7 @@ from src.api.routes import (
     gamification,
     health,
     homework,
+    insights,
     journey,
     leaderboard,
     practice_bank,
@@ -94,6 +95,7 @@ def create_app() -> FastAPI:
     app.include_router(student_homework.router)
     app.include_router(practice_bank.router)
     app.include_router(bloom_result.router)
+    app.include_router(insights.router)
     app.include_router(progress.router)
     app.include_router(leaderboard.router)
     app.include_router(gamification.router)
