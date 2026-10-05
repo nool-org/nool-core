@@ -192,3 +192,30 @@ async def test_defaults_to_understand_when_no_bloom_scores_are_assessed_yet(db_s
     await student_homework.get_homework_context(homework_id=str(hw.id), user=student, session=db_session)
 
     assert captured["weak_bloom_level"] == "UNDERSTAND"
+
+
+async def test_insight_client_forwards_the_students_token(monkeypatch):
+    """Colearner's homework-insight route requires a signed-in caller, so
+    core must pass the student's own bearer token through."""
+    import httpx
+
+    from src.services import colearner_insight_client
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=_FAKE_INSIGHT)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(colearner_insight_client, "_base_url", lambda: "http://colearner")
+    monkeypatch.setattr(
+        colearner_insight_client.httpx, "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+    )
+    out = await colearner_insight_client.generate_homework_insight(
+        topic="Electricity", grade="Grade 10", subject="Science", mastery_percent=40,
+        weak_bloom_level="APPLY", textbook_context=None, token="student-token",
+    )
+    assert out == _FAKE_INSIGHT
+    assert seen["auth"] == "Bearer student-token"

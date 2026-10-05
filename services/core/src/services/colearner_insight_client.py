@@ -1,10 +1,12 @@
 """HTTP client for colearner's stateless homework-insight generation - see
 services/colearner/src/api/routes/homework_insight.py. Mirrors
 kg_client.py's REST request/response pattern (a one-shot call, no session,
-no auth token forwarded - colearner doesn't need to know which student
-asked, everything it needs is in the request body) rather than
+colearner doesn't need to know which student asked: everything it needs
+is in the request body) rather than
 colearner_client.py's live WebSocket session, which is specific to the AI
-Assessor's turn-taking conversation.
+Assessor's turn-taking conversation. Colearner requires a signed-in caller,
+so core forwards the requesting student's own ID token, the same way
+colearner_client.py does for live sessions.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ async def generate_homework_insight(
     mastery_percent: int,
     weak_bloom_level: str,
     textbook_context: str | None,
+    token: str | None = None,
 ) -> dict:
     """Returns {what_needs_understanding, references, key_idea_title,
     key_idea_body, connection_prompt} - see
@@ -59,6 +62,7 @@ async def generate_homework_insight(
                     "weak_bloom_level": weak_bloom_level,
                     "textbook_context": textbook_context,
                 },
+                headers={"Authorization": f"Bearer {token}"} if token else None,
             )
             response.raise_for_status()
             return response.json()

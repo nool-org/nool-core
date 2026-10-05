@@ -3,12 +3,10 @@ seam (see shared/auth/provider.py). Homework/Question Paper question
 generation and the AI Assessor's scripted conversation depend only on the
 ContentGenerator Protocol below, never on a concrete implementation.
 
-DeterministicContentGenerator is the only implementation today: there is
-no real LLM/STT/TTS vendor integrated anywhere in this repo (see
-CLAUDE.md's "Current Goal") - it produces plausible-shaped placeholder
-content, same spirit as nool-apps' mocks/services/homework and
-mocks/services/voice. A real vendor integration later is a second
-implementation of this Protocol plus one call-site swap, nothing else.
+DeterministicContentGenerator produces plausible-shaped placeholder
+content. Real generation now lives in the generation and kg services
+(see generation_client.py / kg_client.py); this is only the last-resort
+fallback in homework_content_resolver.py when both are unavailable.
 """
 
 from dataclasses import dataclass, field

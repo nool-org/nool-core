@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,7 +114,7 @@ def _placeholder_insight(gap_topic: str) -> dict:
     }
 
 
-async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student_id) -> dict:
+async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student_id, token: str | None = None) -> dict:
     """Generates this Homework's real, LLM-grounded insight exactly once
     and persists it - see Homework.insight_generated_at's doc comment on
     the model. Every call after the first is a plain read of the cached
@@ -162,6 +163,7 @@ async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student
             mastery_percent=hw.gap_mastery_percent,
             weak_bloom_level=weak_bloom_level,
             textbook_context=(test.textbook_context if test else None) or (chapter.name if chapter else None),
+            token=token,
         )
     except ColearnerInsightUnavailableError as exc:
         logger.warning(
@@ -185,6 +187,7 @@ async def get_homework_context(
     homework_id: str,
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
+    authorization: Annotated[str | None, Header()] = None,
 ) -> HomeworkLearningContextOut:
     await _progress_in(session, homework_id, user.id)
     result = await session.execute(select(Homework).where(Homework.id == homework_id))
@@ -192,7 +195,8 @@ async def get_homework_context(
     if hw is None:
         raise NotFoundError(f'No Homework with id "{homework_id}".')
 
-    insight = await _ensure_insight_generated(session, hw, user.id)
+    token = authorization.split(" ", 1)[-1].strip() if authorization else None
+    insight = await _ensure_insight_generated(session, hw, user.id, token)
     return HomeworkLearningContextOut(
         homework_id=str(hw.id),
         topic_label=hw.gap_topic,
