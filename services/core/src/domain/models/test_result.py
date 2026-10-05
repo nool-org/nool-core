@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy import ForeignKey, Integer, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -17,6 +17,10 @@ class StudentTestResult(IdMixin, Base):
     test_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("voice_tests.id"))
     student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     mastery_percent: Mapped[int] = mapped_column(Integer)
+    # Colearner's insight words + the fingerprint of the inputs they were
+    # written from (services/insights.py). Deferred so code that never
+    # touches it doesn't select or insert it.
+    insights_words: Mapped[dict | None] = mapped_column(JSONB, nullable=True, deferred=True)
 
 
 class StudentTestResultBloomScore(Base):

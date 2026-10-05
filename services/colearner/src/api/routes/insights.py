@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from shared.auth import AuthenticatedUser
 from shared.errors import AppError
@@ -59,7 +59,7 @@ class NextStep(BaseModel):
 class InsightsResponse(BaseModel):
     headline: str
     cards: list[InsightCardOut]
-    next_steps: list[NextStep]
+    next_steps: list[NextStep] = Field(max_length=3)  # core pads from templates if fewer
     recap_text: str
 
 

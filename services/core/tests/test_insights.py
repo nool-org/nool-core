@@ -3,13 +3,20 @@ cards for answers under 75, template-word fallback, students see only
 their own. Real rows against the dev Postgres (rolled back); colearner's
 words call is monkeypatched - no network/LLM."""
 
+import asyncio
+import importlib.util
 import uuid
+from pathlib import Path
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import DBAPIError
 
 from shared.errors import NotFoundError
 
 from src.api.routes import insights as insights_route
+from src.domain.models import Plan
 from src.services import insights
 from src.domain.models import (
     AiAssessorSession,
@@ -33,9 +40,69 @@ from src.domain.models import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _empty_cache():
-    insights._WORDS_CACHE.clear()
+REVISION = "b4d8e2f6a1c9"
+
+
+async def _ddl(db, work, attempts=5):
+    """Runs `work` (sync, gets the connection) in a savepoint, retried when
+    it deadlocks or waits too long on a lock held by another session."""
+    for attempt in range(attempts):
+        savepoint = await db.begin_nested()
+        try:
+            await db.execute(text("SET LOCAL lock_timeout = '3s'"))
+            await db.run_sync(lambda s: work(s.connection()))
+            await savepoint.commit()
+            return
+        except DBAPIError as exc:
+            await savepoint.rollback()
+            code = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            if code not in ("40P01", "55P03") or attempt == attempts - 1:  # deadlock / lock timeout
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
+
+
+@pytest_asyncio.fixture
+async def db(db_session):
+    """db_session with the insights_words column (rolled back with the test
+    when the migration isn't applied to the dev DB yet)."""
+    await _ddl(db_session, lambda conn: conn.execute(
+        text("ALTER TABLE student_test_results ADD COLUMN IF NOT EXISTS insights_words jsonb")))
+    return db_session
+
+
+def _migration_module():
+    here = Path(__file__).resolve()
+    for root in (here.parents[1], *here.parents[2:4]):
+        path = root / "database" / "migrations" / "versions" / f"{REVISION}_insights_words.py"
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location("w4_03_migration", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    pytest.skip("database/ not available in this environment")
+
+
+async def test_migration_upgrade_and_downgrade(db_session):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    module = _migration_module()
+    assert module.down_revision == "e5f1c7a2d9b3"
+
+    def run(step):
+        def work(conn):
+            with Operations.context(MigrationContext.configure(conn)):
+                step()
+        return work
+
+    def columns(sync_session):
+        return {c["name"] for c in inspect(sync_session.connection()).get_columns("student_test_results")}
+
+    if "insights_words" not in await db_session.run_sync(columns):  # not applied to this DB yet
+        await _ddl(db_session, run(module.upgrade))  # rolled back with the test's transaction
+    assert "insights_words" in await db_session.run_sync(columns)
+    await _ddl(db_session, run(module.downgrade))
+    assert "insights_words" not in await db_session.run_sync(columns)
 
 
 def _student():
@@ -109,7 +176,8 @@ async def _get(db, test, student, monkeypatch, words=None, exc=None):
     return out, calls
 
 
-async def test_numbers_cards_and_words(db_session, monkeypatch):
+async def test_numbers_cards_and_words(db, monkeypatch):
+    db_session = db
     test, student = await _seed(db_session)
     words = {"headline": "H", "key_ideas": {2: "Voltage is current times resistance."},
              "next_steps": [{"title": "Revise", "reference": "Ohm's Law"}] * 3, "recap_text": "Lovely effort."}
@@ -135,12 +203,57 @@ async def test_numbers_cards_and_words(db_session, monkeypatch):
     assert facts["cards"][0]["topic"] == "Ohm's Law" and facts["cards"][0]["subtopic"] == "Resistance"
     assert out.model_dump(by_alias=True)["cards"][0]["youSaid"] == "multiply them"
 
-    # second request is served from the cache, no second colearner call
-    _, second_calls = await _get(db_session, test, student, monkeypatch, words=words)
+    # the words are stored on the result and reused - no second colearner call
+    stored = (await db_session.execute(text(
+        "SELECT insights_words FROM student_test_results WHERE test_id = :t"), {"t": test.id})).scalar_one()
+    assert stored["words"]["headline"] == "H"
+    again, second_calls = await _get(db_session, test, student, monkeypatch, words={"boom": 1})
     assert second_calls == []
+    assert again.headline == "H" and again.generated_at == out.generated_at
+    assert [c.key_idea for c in again.cards] == [c.key_idea for c in out.cards]
 
 
-async def test_falls_back_to_template_words_when_colearner_fails(db_session, monkeypatch, caplog):
+async def test_fingerprint_change_regenerates_words(db, monkeypatch):
+    test, student = await _seed(db)
+    words = {"headline": "H1", "key_ideas": {}, "next_steps": [], "recap_text": "R"}
+    await _get(db, test, student, monkeypatch, words=words)
+    result = (await db.execute(select(StudentTestResult).where(StudentTestResult.test_id == test.id))).scalar_one()
+    result.mastery_percent = 60  # e.g. a regrade
+    await db.flush()
+
+    out, calls = await _get(db, test, student, monkeypatch, words={**words, "headline": "H2"})
+    assert len(calls) == 1 and out.headline == "H2"
+    _, calls = await _get(db, test, student, monkeypatch, words=words)
+    assert calls == []
+
+
+async def test_next_steps_padded_to_exactly_three(db, monkeypatch):
+    test, student = await _seed(db)
+    words = {"headline": "H", "key_ideas": {}, "recap_text": "R",
+             "next_steps": [{"title": "Only one", "reference": "Ohm's Law"}]}
+    out, _ = await _get(db, test, student, monkeypatch, words=words)
+    assert [s.title for s in out.next_steps][0] == "Only one" and len(out.next_steps) == 3
+
+
+def test_locked_when_plan_excludes_improvement_analysis(client, monkeypatch):
+    from src.api import deps
+
+    student = _student()
+    student.school_id = uuid.uuid4()
+    client.app.dependency_overrides[deps.get_current_app_user] = lambda: student
+    client.app.dependency_overrides[deps.get_db_session] = lambda: None
+
+    async def plan(_session, _school_id):
+        return Plan(name="p", price_label="x", teacher_limit=1, student_limit=1, enabled_features=["voice_test"])
+
+    monkeypatch.setattr(deps, "get_active_plan", plan)
+    response = client.get(f"/api/v1/me/tests/{uuid.uuid4()}/insights")
+    assert response.status_code == 403
+    assert "improvement_analysis" in response.text
+
+
+async def test_falls_back_to_template_words_when_colearner_fails(db, monkeypatch, caplog):
+    db_session = db
     test, student = await _seed(db_session)
     out, _ = await _get(db_session, test, student, monkeypatch, exc=RuntimeError("down"))
 
@@ -149,10 +262,13 @@ async def test_falls_back_to_template_words_when_colearner_fails(db_session, mon
     assert [c.key_idea for c in out.cards] == ["Use V = IR", "P = VI"]
     assert len(out.next_steps) == 3 and out.next_steps[0].reference == "Electric Power"
     assert "insights_words_fallback" in caplog.text
-    assert not insights._WORDS_CACHE  # failures are retried next time
+    stored = (await db_session.execute(text(
+        "SELECT insights_words FROM student_test_results WHERE test_id = :t"), {"t": test.id})).scalar_one()
+    assert stored is None  # template words aren't stored, so colearner is retried next time
 
 
-async def test_404_without_own_result(db_session):
+async def test_404_without_own_result(db):
+    db_session = db
     test, _owner = await _seed(db_session)
     other = _student()
     db_session.add(other)

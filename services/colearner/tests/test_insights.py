@@ -43,6 +43,8 @@ def test_generates_words_with_strict_schema_and_caps_next_steps():
     assert len(out["next_steps"]) == 3
     assert client.kwargs["model"] == "gpt-5-mini"
     assert client.kwargs["response_format"]["json_schema"]["strict"] is True
+    steps = client.kwargs["response_format"]["json_schema"]["schema"]["properties"]["next_steps"]
+    assert steps["minItems"] == steps["maxItems"] == 3
     assert "Ohm's Law" in client.kwargs["messages"][1]["content"]
 
 
@@ -70,3 +72,14 @@ def test_route_returns_503_when_generation_fails(client, monkeypatch):
 
 def test_route_requires_auth(client):
     assert client.post("/api/v1/insights", json=_FACTS).status_code == 401
+
+
+def test_route_rejects_more_than_three_next_steps(client, monkeypatch):
+    monkeypatch.setattr("src.api.deps.verify_token", lambda token: object())
+
+    async def fake_generate(facts, client=None):
+        return _WORDS  # 4 next steps
+
+    monkeypatch.setattr(insights_service, "generate_insights", fake_generate)
+    resp = client.post("/api/v1/insights", json=_FACTS, headers={"Authorization": "Bearer t"})
+    assert resp.status_code == 503

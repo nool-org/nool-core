@@ -6,6 +6,8 @@ its per-Bloom and per-topic scores, and the session record's raw grader
 report (qa_transcripts). Colearner's POST /api/v1/insights only writes the
 words (headline, a key idea per card, next steps, spoken recap); when it is
 unreachable the same numbers go out with template words, never a 500.
+Colearner's words are stored on the result (insights_words) with the
+fingerprint of their inputs and only rewritten when that changes.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.orm import undefer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import NotFoundError
@@ -41,10 +44,6 @@ logger = logging.getLogger(__name__)
 
 CARD_SCORE_BELOW = 75
 _TIMEOUT_SECONDS = 30.0
-# ponytail: in-process cache, lost on restart and per worker; durable upgrade
-# path = a JSONB insights column on student_test_results (needs a migration).
-_WORDS_CACHE: dict[tuple, tuple[dict, datetime]] = {}
-_WORDS_CACHE_MAX = 1024
 
 
 def topic_status(percent: int) -> str:
@@ -136,12 +135,19 @@ async def _colearner_words(facts: dict, token: str | None) -> dict:
     }
 
 
+def _fingerprint(result: StudentTestResult, record: AiAssessorSessionRecord | None, cards: list[dict]) -> list:
+    # records (keyed by session_id) have no updated_at; created_at stands in
+    return [str(result.id), result.mastery_percent, str(record.session_id) if record else None,
+            record.created_at.isoformat() if record and record.created_at else None,
+            [c["question_number"] for c in cards]]
+
+
 async def build_test_insights(session: AsyncSession, *, test_id: str, student_id: uuid.UUID, token: str | None) -> dict:
     try:
         test_uuid = uuid.UUID(str(test_id))
     except ValueError:
         raise NotFoundError("You haven't attempted this Test.") from None
-    result = (await session.execute(select(StudentTestResult).where(
+    result = (await session.execute(select(StudentTestResult).options(undefer(StudentTestResult.insights_words)).where(
         StudentTestResult.test_id == test_uuid, StudentTestResult.student_id == student_id
     ))).scalar_one_or_none()
     if result is None:
@@ -190,10 +196,12 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
     subject = await session.get(Subject, test.subject_id) if test else None
     school_class = await session.get(SchoolClass, test.class_id) if test else None
 
-    cache_key = (result.id, result.mastery_percent, record.session_id if record else None)
-    cached = _WORDS_CACHE.get(cache_key)
-    if cached:
-        words, generated_at = cached
+    fingerprint = _fingerprint(result, record, cards)
+    to_store = None  # template words aren't stored, so colearner is retried next time
+    stored = result.insights_words or {}
+    if stored.get("fingerprint") == fingerprint:
+        words = {**stored["words"], "key_ideas": {int(k): v for k, v in stored["words"]["key_ideas"].items()}}
+        generated_at = datetime.fromisoformat(stored["generated_at"])
     else:
         facts = {
             "grade": f"Class {school_class.grade}" if school_class else None,
@@ -212,15 +220,13 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         generated_at = datetime.now(timezone.utc)
         try:
             words = await _colearner_words(facts, token)
-            if len(_WORDS_CACHE) >= _WORDS_CACHE_MAX:
-                _WORDS_CACHE.clear()
-            _WORDS_CACHE[cache_key] = (words, generated_at)
+            to_store = {"fingerprint": fingerprint, "words": words, "generated_at": generated_at.isoformat()}
         except Exception as exc:  # any failure -> template words, never a 500
             logger.warning("insights_words_fallback", extra={"test_id": str(test_uuid), "reason": str(exc)[:300]})
             words = template_words(per_bloom, topics, cards, chapter.name if chapter else None)
 
     fallback = template_words(per_bloom, topics, cards, chapter.name if chapter else None)
-    return {
+    out = {
         "test_id": str(test_uuid),
         "headline": words["headline"],
         "mastery_percent": result.mastery_percent,
@@ -231,7 +237,11 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
             "you_said": c["you_said"], "missed_points": c["missed_points"],
             "key_idea": words["key_ideas"].get(c["question_number"]) or fallback["key_ideas"][c["question_number"]],
         } for c in cards],
-        "next_steps": words["next_steps"] or fallback["next_steps"],
+        "next_steps": (list(words["next_steps"]) + fallback["next_steps"])[:3],
         "recap_text": words["recap_text"],
         "generated_at": generated_at,
     }
+    if to_store:
+        result.insights_words = to_store
+        await session.commit()
+    return out
