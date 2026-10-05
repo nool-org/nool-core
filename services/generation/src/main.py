@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from shared.errors import register_exception_handlers
 from shared.logging import RequestContextMiddleware, configure_logging, get_logger
 from shared.tracing import configure_tracing
+from shared.observability import configure_observability
 
 from src.api.routes import gap_fill, health
 from src.config.settings import get_settings
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
     configure_tracing(app, settings.service_name, settings.otel_exporter_otlp_endpoint)
+    configure_observability(app, settings)
 
     app.include_router(health.router)
     app.include_router(gap_fill.router)
