@@ -22,12 +22,8 @@ class SessionState:
         self.openai_messages: List[Dict[str, Any]] = []
         self.report: Optional[Dict[str, Any]] = None
 
-        # Token and cost metrics
+        # Per-call LLM cost metrics (see cost_service.record_turn_metrics)
         self.turn_metrics: List[Dict[str, Any]] = []
-        self.cost_report: Optional[Dict[str, Any]] = None
-        self.total_input_tokens: int = 0
-        self.total_output_tokens: int = 0
-        self.total_audio_seconds: float = 0.0
         self.total_cost_usd: float = 0.0
 
 

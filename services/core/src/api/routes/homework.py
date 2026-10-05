@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 
@@ -268,6 +269,7 @@ async def list_homework_questions(
 async def _questions_out(session: AsyncSession, homework_id: str) -> ListEnvelope[HomeworkQuestionOut]:
     result = await session.execute(
         select(HomeworkQuestion)
+        .options(undefer(HomeworkQuestion.is_boss))
         .where(HomeworkQuestion.homework_id == homework_id)
         .order_by(HomeworkQuestion.order)
     )
@@ -280,6 +282,7 @@ async def _questions_out(session: AsyncSession, homework_id: str) -> ListEnvelop
             dataset_id=str(q.dataset_id),
             text=q.text,
             answer=q.answer,
+            is_boss=q.is_boss,
         )
         for q in result.scalars().all()
     ]

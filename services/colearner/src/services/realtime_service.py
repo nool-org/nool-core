@@ -1,7 +1,7 @@
-"""Realtime pipeline: live, full-duplex voice over WebRTC (OpenAI Realtime).
+"""Realtime pipeline - the production voice-test path: live, full-duplex
+voice over WebRTC (OpenAI Realtime).
 
-Unlike chained/multimodal (one recorded clip per turn -> STT -> LLM -> TTS),
-the app streams its mic straight to OpenAI over WebRTC and hears the reply
+The app streams its mic straight to OpenAI over WebRTC and hears the reply
 as it's generated - server-side VAD decides when the student has finished,
 and the student can interrupt. The app never sees the API key or the
 instructions: it hands its SDP offer to us (via Core), we create the call
