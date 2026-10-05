@@ -1,6 +1,14 @@
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+# Input size caps - every field below is client-supplied and ends up in an
+# LLM prompt or a decode buffer, so nothing is unbounded.
+MAX_AUDIO_BASE64_CHARS = 7_000_000  # ~5 MB of audio
+MAX_USER_TEXT_CHARS = 4_000
+MAX_TEXTBOOK_CONTEXT_CHARS = 20_000
+ShortText = Annotated[str, StringConstraints(max_length=200)]
+ReferenceQuestion = Annotated[str, StringConstraints(max_length=500)]
 
 
 class SessionConfig(BaseModel):
@@ -13,20 +21,23 @@ class SessionConfig(BaseModel):
     OpenAI model.
     """
 
-    grade: str = Field(default="10th Grade", description="Grade / level of the student")
-    subject: str = Field(default="Science (Physics)", description="Academic subject")
-    chapter_name: str = Field(default="Electricity & Circuits", description="Name of the chapter / topic")
+    grade: ShortText = Field(default="10th Grade", description="Grade / level of the student")
+    subject: ShortText = Field(default="Science (Physics)", description="Academic subject")
+    chapter_name: ShortText = Field(default="Electricity & Circuits", description="Name of the chapter / topic")
     num_questions: int = Field(default=2, ge=1, le=10, description="Target number of questions to evaluate")
-    blooms_attributes: List[str] = Field(
+    blooms_attributes: List[ShortText] = Field(
         default_factory=lambda: ["Understanding", "Applying", "Analyzing"],
+        max_length=10,
         description="Target Bloom's Taxonomy cognitive levels to assess (e.g. Understanding, Applying, Analyzing)"
     )
     textbook_context: Optional[str] = Field(
         default=None,
+        max_length=MAX_TEXTBOOK_CONTEXT_CHARS,
         description="Comprehensive textbook concepts, principles, formulas, and syllabus context passed in JSON"
     )
-    reference_questions: List[str] = Field(
+    reference_questions: List[ReferenceQuestion] = Field(
         default_factory=list,
+        max_length=20,
         description="Reference topic inspirations and core concepts for the co-learner to formulate creative scenario questions"
     )
     session_max_time_seconds: int = Field(
@@ -54,6 +65,7 @@ class SessionConfig(BaseModel):
 class CoLearnerRequest(BaseModel):
     session_id: Optional[str] = Field(
         default=None,
+        max_length=64,
         description="Session ID. Omit or pass null on Turn 0 to initialize session and receive greeting; pass returned ID on subsequent turns."
     )
     config: Optional[SessionConfig] = Field(
@@ -62,10 +74,12 @@ class CoLearnerRequest(BaseModel):
     )
     user_audio_base64: Optional[str] = Field(
         default=None,
+        max_length=MAX_AUDIO_BASE64_CHARS,
         description="Base64-encoded audio bytes (WAV/WebM/MP3) recorded from student microphone."
     )
     user_text: Optional[str] = Field(
         default=None,
+        max_length=MAX_USER_TEXT_CHARS,
         description="Direct text response (convenient for testing conversational turns in Swagger UI without recording audio)."
     )
     time_limit_reached: bool = Field(
@@ -118,18 +132,19 @@ class CoLearnerResponse(BaseModel):
 
 class HomeworkInsightRequest(BaseModel):
     """Stateless, one-shot request - see
-    src/services/homework_insight_service.py. No session_id/auth: unlike
-    the live AI Assessor conversation, this call carries everything it
-    needs in the request itself and doesn't need to know which student
-    asked - Core has already resolved that.
+    src/services/homework_insight_service.py. No session_id: unlike the
+    live AI Assessor conversation, this call carries everything it needs in
+    the request itself. Still requires an authenticated caller (see
+    src/api/routes/homework_insight.py).
     """
-    topic: str = Field(..., description="The Homework's gap_topic (usually a chapter name).")
-    grade: str = Field(..., description="e.g. 'Grade 10' - keeps the explanation pitched right.")
-    subject: str = Field(..., description="e.g. 'Science'.")
+    topic: ShortText = Field(..., description="The Homework's gap_topic (usually a chapter name).")
+    grade: ShortText = Field(..., description="e.g. 'Grade 10' - keeps the explanation pitched right.")
+    subject: ShortText = Field(..., description="e.g. 'Science'.")
     mastery_percent: int = Field(..., description="The student's overall score on the originating Test.")
-    weak_bloom_level: str = Field(..., description="The single Bloom's level the student scored lowest on.")
+    weak_bloom_level: ShortText = Field(..., description="The single Bloom's level the student scored lowest on.")
     textbook_context: Optional[str] = Field(
         default=None,
+        max_length=MAX_TEXTBOOK_CONTEXT_CHARS,
         description="The Test's syllabus excerpt, if any - grounds the paragraph/section reference in real material instead of inventing one."
     )
 
