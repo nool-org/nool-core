@@ -1,36 +1,19 @@
-import io
 import json
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
 from openai import AsyncOpenAI
 
 from src.config.settings import get_settings
 from src.domain.schemas import SessionConfig
-from src.services.audio_service import detect_audio_container, synthesize_speech_base64
-from src.services.cost_service import (
-    calculate_turn_cost,
-    count_tokens,
-    estimate_audio_duration_seconds,
-    generate_cost_report,
-    record_turn_metrics,
-)
 from src.services.evaluation import grade_transcript
 from src.services.session_store import SessionState
 
-# Fixed model-specific data for the Chained pipeline (Whisper STT -> OpenAI
-# chat LLM -> Edge-TTS). No longer client-configurable - see
-# src/domain/schemas.py's SessionConfig docstring for why. Values match
-# nool-research's prior per-request defaults exactly.
-MODEL_PROVIDER = "openai"
-STT_MODEL = "whisper-1"
-LLM_MODEL = "gpt-4o-mini"
-TTS_VOICE = "en-IN-NeerjaNeural"
-TTS_RATE = "+0%"
-
+# Shared by realtime_service and cascaded_service: the co-learner system
+# prompt, the Bloom report, and (for cascaded) the OpenAI client. The old
+# per-turn chained pipeline that gave this module its name is gone.
 _settings = get_settings()
 openai_client = AsyncOpenAI(api_key=_settings.openai_api_key) if _settings.openai_api_key else None
-
 
 
 def _fallback_context(config: SessionConfig) -> str:
@@ -95,28 +78,6 @@ WORKFLOW & TURN PROGRESSION:
 """
 
 
-async def transcribe_audio_bytes(wav_bytes: bytes, hint: str = "") -> str:
-    """Transcribes audio bytes using OpenAI Whisper. `hint` (subject/chapter)
-    biases Whisper toward the session's vocabulary - science terms like
-    "calcium oxide" otherwise come back misheard."""
-    if not wav_bytes or not openai_client:
-        return ""
-    try:
-        extension, _mime = detect_audio_container(wav_bytes)
-        audio_file = io.BytesIO(wav_bytes)
-        audio_file.name = f"student_speech{extension}"
-        transcription = await openai_client.audio.transcriptions.create(
-            model=STT_MODEL,
-            file=audio_file,
-            language="en",
-            prompt=hint,
-        )
-        return transcription.text.strip()
-    except Exception as e:
-        print(f"Whisper STT Error: {e}")
-        return ""
-
-
 async def generate_bloom_report(session: SessionState, full_transcript: str) -> Dict[str, Any]:
     """Grades the session with the strict grader (src/services/evaluation) and saves transcript + report."""
     report_data = await grade_transcript(session, full_transcript)
@@ -136,184 +97,3 @@ async def generate_bloom_report(session: SessionState, full_transcript: str) -> 
         json.dump(report_data, f, indent=2)
 
     return report_data
-
-
-async def process_chained_turn(
-    session: SessionState,
-    user_audio_bytes: Optional[bytes] = None,
-    user_text: Optional[str] = None,
-    time_limit_reached: bool = False,
-    is_hint_request: bool = False,
-) -> Tuple[Optional[str], str, str, bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
-    """
-    Processes a turn in the Chained pipeline (Whisper STT -> gpt-4o-mini -> Edge-TTS).
-    Accepts either raw audio bytes (from microphone) or direct user text (convenient for Swagger testing).
-    Returns: (student_transcript, co_learner_text, co_learner_audio_base64, is_completed, report, turn_metrics, cost_report, is_hint_reply)
-    """
-    config = session.config
-
-    # -------------------------------------------------------------------------
-    # Turn 0: Opening Greeting
-    # -------------------------------------------------------------------------
-    if session.turn_index == 0 and not user_audio_bytes and not user_text and not time_limit_reached:
-        greeting_text = (
-            f"Hi! Welcome to our {config.subject} discussion on {config.chapter_name}. "
-            f"We'll explore {config.num_questions} quick real-world scenario{'s' if config.num_questions > 1 else ''} together. "
-            f"Are you ready to begin?"
-        )
-        system_prompt = build_chained_system_prompt(config)
-
-        session.openai_messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "assistant", "content": greeting_text}
-        ]
-        session.turns.append({"role": "assistant", "content": greeting_text})
-        session.turn_index = 1
-
-        # Track initial turn metrics
-        in_toks = count_tokens(system_prompt, LLM_MODEL)
-        out_toks = count_tokens(greeting_text, LLM_MODEL)
-        turn_metrics = calculate_turn_cost(LLM_MODEL, in_toks, out_toks, stt_seconds=0.0, tts_chars=len(greeting_text))
-        record_turn_metrics(session, turn_metrics)
-
-        audio_b64 = await synthesize_speech_base64(greeting_text, voice=TTS_VOICE, rate=TTS_RATE)
-        return None, greeting_text, audio_b64, False, None, turn_metrics, None, False
-
-    # -------------------------------------------------------------------------
-    # Timeout Wrap-up (Handled strictly in backend - NO fake student turn created)
-    # -------------------------------------------------------------------------
-    elapsed_seconds = (datetime.now() - session.created_at).total_seconds()
-    server_time_limit_reached = elapsed_seconds >= config.session_max_time_seconds
-    is_timeout_wrapup = time_limit_reached or (server_time_limit_reached and not user_audio_bytes and not user_text)
-
-    if is_timeout_wrapup:
-        session.is_completed = True
-
-        full_transcript = "\n".join(
-            f"[{('CO-LEARNER' if t.get('role') == 'assistant' else 'STUDENT')}]: {t.get('content', '')}"
-            for t in session.turns if t.get('content')
-        )
-        report_data = await generate_bloom_report(session, full_transcript)
-        session.report = report_data
-        cost_report_data = generate_cost_report(session, "Chained", MODEL_PROVIDER, LLM_MODEL, TTS_VOICE)
-        session.cost_report = cost_report_data
-
-        # Timeout info is shown in UI notification pane only - not spoken out by model
-        return None, "", "", True, report_data, None, cost_report_data, False
-
-    # -------------------------------------------------------------------------
-    # Hint Request (guiding nudge only - never an answer, never validates
-    # correctness, never advances to the next question) - see
-    # src/api/routes/ai_assessor.py's is_hint_reply branch for how the
-    # bridge keeps the student on the same question afterward.
-    # -------------------------------------------------------------------------
-    if is_hint_request:
-        session.openai_messages.append({
-            "role": "user",
-            "content": (
-                "[The student is stuck and asked for a hint on the CURRENT question - "
-                "this is not their answer, do not treat it as one. Give ONE short, "
-                "thought-provoking nudge toward their own reasoning - a guiding question "
-                "or a pointer to a relevant idea. Do NOT reveal, confirm, or state whether "
-                "any answer is right or wrong, and do NOT move on to a new question - stay "
-                "on this one and invite them to try again.]"
-            ),
-        })
-        resp = await openai_client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=session.openai_messages,
-            temperature=0.5,
-        )
-        hint_text = resp.choices[0].message.content.strip()
-        session.openai_messages.append({"role": "assistant", "content": hint_text})
-        # Deliberately NOT appended to session.turns: a hint isn't a graded
-        # Q&A exchange, and must not reach generate_bloom_report's transcript
-        # or count toward all_questions_answered.
-
-        if hasattr(resp, "usage") and resp.usage:
-            in_toks = resp.usage.prompt_tokens
-            out_toks = resp.usage.completion_tokens
-        else:
-            in_toks = sum(count_tokens(m.get("content", ""), LLM_MODEL) for m in session.openai_messages)
-            out_toks = count_tokens(hint_text, LLM_MODEL)
-        turn_metrics = calculate_turn_cost(LLM_MODEL, in_toks, out_toks, stt_seconds=0.0, tts_chars=len(hint_text))
-        record_turn_metrics(session, turn_metrics)
-
-        audio_b64 = await synthesize_speech_base64(hint_text, voice=TTS_VOICE, rate=TTS_RATE)
-        return None, hint_text, audio_b64, False, None, turn_metrics, None, True
-
-    # -------------------------------------------------------------------------
-    # Interactive User Turn
-    # -------------------------------------------------------------------------
-    student_transcript = ""
-    stt_seconds = 0.0
-    if user_audio_bytes:
-        stt_seconds = estimate_audio_duration_seconds(user_audio_bytes)
-        student_transcript = await transcribe_audio_bytes(
-            user_audio_bytes, hint=f"A student answering a {config.subject} question about {config.chapter_name}."
-        )
-    elif user_text:
-        student_transcript = user_text.strip()
-
-    if not student_transcript:
-        student_transcript = "(Inaudible audio response)"
-
-    session.turns.append({"role": "user", "content": student_transcript})
-
-    # Query text reasoning LLM
-    session.openai_messages.append({"role": "user", "content": student_transcript})
-    resp = await openai_client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=session.openai_messages,
-        temperature=0.5
-    )
-    ai_raw_reply = resp.choices[0].message.content.strip()
-    if hasattr(resp, "usage") and resp.usage:
-        in_toks = resp.usage.prompt_tokens
-        out_toks = resp.usage.completion_tokens
-    else:
-        in_toks = sum(count_tokens(m.get("content", ""), LLM_MODEL) for m in session.openai_messages)
-        out_toks = count_tokens(ai_raw_reply, LLM_MODEL)
-    session.openai_messages.append({"role": "assistant", "content": ai_raw_reply})
-
-    turn_metrics = calculate_turn_cost(LLM_MODEL, in_toks, out_toks, stt_seconds=stt_seconds, tts_chars=len(ai_raw_reply))
-    record_turn_metrics(session, turn_metrics)
-
-    # Check for session completion or time limit
-    is_completed = False
-    report_data = None
-    cost_report_data = None
-    clean_ai_reply = ai_raw_reply
-
-    elapsed_seconds = (datetime.now() - session.created_at).total_seconds()
-    time_limit_reached = elapsed_seconds >= config.session_max_time_seconds
-    user_turns_count = sum(1 for t in session.turns if t.get("role") == "user")
-    # Turn 1 is readiness ack ("Ready"), turns 2..N+1 are answers to the N questions
-    all_questions_answered = user_turns_count >= (config.num_questions + 1)
-
-    if "[SESSION_COMPLETED]" in ai_raw_reply or "that concludes our session" in ai_raw_reply.lower() or time_limit_reached or all_questions_answered:
-        is_completed = True
-        clean_ai_reply = ai_raw_reply.replace("[SESSION_COMPLETED]", "").strip()
-        if all_questions_answered and "that concludes our session" not in clean_ai_reply.lower():
-            clean_ai_reply += "\nThat concludes all questions for our session. Great job discussing these concepts today!"
-        session.is_completed = True
-
-    # MUST append assistant turn to session.turns BEFORE building full_transcript
-    session.turns.append({"role": "assistant", "content": clean_ai_reply})
-    session.turn_index += 1
-
-    if is_completed:
-        # Format complete transcript with ALL turns included
-        full_transcript = "\n".join(
-            f"[{('CO-LEARNER' if t.get('role') == 'assistant' else 'STUDENT')}]: {t.get('content', '')}"
-            for t in session.turns if t.get('content')
-        )
-        report_data = await generate_bloom_report(session, full_transcript)
-        session.report = report_data
-
-        # Generate and save separate Cost Analysis report
-        cost_report_data = generate_cost_report(session, "Chained", MODEL_PROVIDER, LLM_MODEL, TTS_VOICE)
-        session.cost_report = cost_report_data
-
-    audio_b64 = await synthesize_speech_base64(clean_ai_reply, voice=TTS_VOICE, rate=TTS_RATE)
-    return student_transcript, clean_ai_reply, audio_b64, is_completed, report_data, turn_metrics, cost_report_data, False

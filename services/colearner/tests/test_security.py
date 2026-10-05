@@ -1,5 +1,5 @@
 """Audit fixes: auth on homework-insight, session ownership, input size
-caps, generic WebSocket errors, idle session expiry, and PLAYGROUND_ENABLED
+caps, idle session expiry, and PLAYGROUND_ENABLED
 being ignored in production. verify_token is faked to treat the bearer
 token as the uid, so "Bearer alice" is user alice."""
 
@@ -21,7 +21,7 @@ INSIGHT_BODY = {
     "weak_bloom_level": "APPLY",
 }
 
-TURN_RESULT = ("hi", "reply", None, False, None, {}, None, False)
+TURN_RESULT = {"student_transcript": "hi", "text": "reply", "audio": b"", "completed": False, "timing": {}}
 
 
 @pytest.fixture
@@ -47,11 +47,10 @@ def test_homework_insight_with_auth_returns_fallback(client, as_user, monkeypatc
 # --- session ownership -------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", ["chained", "multimodal", "cascaded"])
-def test_other_users_session_is_404(client, as_user, pipeline):
+def test_other_users_session_is_404(client, as_user):
     session = session_store.create_session(SessionConfig(), owner_uid="alice")
     res = client.post(
-        f"/api/v1/colearner/{pipeline}",
+        "/api/v1/colearner/cascaded",
         json={"session_id": session.session_id, "user_text": "hi"},
         headers=as_user("bob"),
     )
@@ -59,16 +58,16 @@ def test_other_users_session_is_404(client, as_user, pipeline):
 
 
 def test_owner_can_continue_own_session(client, as_user, monkeypatch):
-    async def fake_turn(**_kwargs):
+    async def fake_turn(*_args):
         return TURN_RESULT
 
-    monkeypatch.setattr("src.api.routes.chained.process_chained_turn", fake_turn)
-    first = client.post("/api/v1/colearner/chained", json={}, headers=as_user("alice"))
+    monkeypatch.setattr("src.api.routes.cascaded.process_cascaded_turn", fake_turn)
+    first = client.post("/api/v1/colearner/cascaded", json={}, headers=as_user("alice"))
     assert first.status_code == 200
     sid = first.json()["session_id"]
     assert session_store.get_session(sid).owner_uid == "alice"
 
-    again = client.post("/api/v1/colearner/chained", json={"session_id": sid, "user_text": "x"}, headers=as_user("alice"))
+    again = client.post("/api/v1/colearner/cascaded", json={"session_id": sid, "user_text": "x"}, headers=as_user("alice"))
     assert again.status_code == 200
 
 
@@ -98,39 +97,12 @@ def test_store_owner_check():
     ],
 )
 def test_oversize_rest_input_rejected(client, as_user, body):
-    assert client.post("/api/v1/colearner/chained", json=body, headers=as_user("alice")).status_code == 422
+    assert client.post("/api/v1/colearner/cascaded", json=body, headers=as_user("alice")).status_code == 422
 
 
 def test_oversize_homework_insight_rejected(client, as_user):
     body = {**INSIGHT_BODY, "textbook_context": "x" * 20_001}
     assert client.post("/api/v1/homework-insight", json=body, headers=as_user("alice")).status_code == 422
-
-
-@pytest.mark.parametrize("pipeline", ["chained", "multimodal"])
-def test_oversize_ws_message_gets_error_event(client, as_user, pipeline):
-    with client.websocket_connect(f"/api/v1/colearner/{pipeline}/stream?token=alice") as ws:
-        ws.send_text('{"config": {"textbook_context": "' + "x" * 20_001 + '"}}')
-        assert ws.receive_json() == {"event": "error", "detail": "Invalid or oversized message."}
-
-
-# --- generic WS error --------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "pipeline,target",
-    [("chained", "process_chained_turn"), ("multimodal", "process_multimodal_turn")],
-)
-def test_ws_error_does_not_leak_exception_text(client, as_user, monkeypatch, caplog, pipeline, target):
-    async def boom(*_args, **_kwargs):
-        raise RuntimeError("upstream said sk-secret-123")
-
-    monkeypatch.setattr(f"src.api.routes.{pipeline}.{target}", boom)
-    with client.websocket_connect(f"/api/v1/colearner/{pipeline}/stream?token=alice") as ws:
-        ws.send_text('{"config": {}}')
-        event = ws.receive_json()
-    assert event["event"] == "error"
-    assert "sk-secret" not in event["detail"]
-    assert "colearner_ws_turn_failed" in caplog.text
 
 
 # --- idle expiry -------------------------------------------------------------
@@ -161,4 +133,4 @@ def test_playground_flag_ignored_in_production(client, monkeypatch):
     monkeypatch.setenv("PLAYGROUND_ENABLED", "true")
     monkeypatch.setenv("ENVIRONMENT", "production")
     assert client.get("/api/v1/colearner/playground").status_code == 404
-    assert client.post("/api/v1/colearner/chained", json={}).status_code == 401
+    assert client.post("/api/v1/colearner/cascaded", json={}).status_code == 401

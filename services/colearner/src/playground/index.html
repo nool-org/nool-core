@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Co-Learner Playground</title>
-<!-- Dev test page for all three pipelines (realtime / chained / multimodal).
+<!-- Dev test page for the realtime pipeline and the cascaded prototype.
      Served by src/api/routes/playground.py only when PLAYGROUND_ENABLED is on;
      calls go out without a token, which that same flag lets through. -->
 <style>
@@ -53,8 +53,6 @@
     <h2>1 · Pipeline</h2>
     <div class="modes">
       <label><input type="radio" name="mode" value="realtime" checked><span>Realtime<small>Live WebRTC call (OpenAI Realtime) - what the app uses</small></span></label>
-      <label><input type="radio" name="mode" value="chained"><span>Chained<small>Record a turn → speech-to-text → LLM → TTS</small></span></label>
-      <label><input type="radio" name="mode" value="multimodal"><span>Multimodal<small>Record a turn → Gemini native audio → TTS</small></span></label>
       <label><input type="radio" name="mode" value="cascaded"><span>Cascaded (prototype)<small>Record a turn → gpt-4o-mini-transcribe → gpt-4.1-mini → gpt-4o-mini-tts</small></span></label>
     </div>
   </section>
@@ -84,7 +82,7 @@
       <span id="status" class="status">Pick a pipeline and start.</span>
     </div>
 
-    <!-- chained / multimodal turn controls -->
+    <!-- cascaded turn controls -->
     <div id="turnControls" hidden>
       <div class="row">
         <button id="record">● Record answer</button>
@@ -102,7 +100,7 @@
 
   <section class="card">
     <h2>Report</h2>
-    <pre id="report" class="empty">The Bloom report (and cost report, for chained/multimodal) appears here when the session ends.</pre>
+    <pre id="report" class="empty">The Bloom report (and cost report) appears here when the session ends.</pre>
   </section>
 </main>
 
@@ -165,7 +163,7 @@ function meter(stream) {
 
 function resetUi() {
   $('transcript').innerHTML = '<p class="empty">The transcript appears here.</p>';
-  $('report').textContent = 'The Bloom report (and cost report, for chained/multimodal) appears here when the session ends.';
+  $('report').textContent = 'The Bloom report (and cost report) appears here when the session ends.';
   $('report').className = 'empty';
 }
 
@@ -272,7 +270,7 @@ async function finishRealtime() {
   }
 }
 
-/* ---------- chained / multimodal: one request per turn ---------- */
+/* ---------- cascaded: one request per turn ---------- */
 
 async function startTurnBased() {
   status('Getting the greeting…');
