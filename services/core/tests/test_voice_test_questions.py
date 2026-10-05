@@ -5,9 +5,12 @@ review routes, the live session config, and scoring at finish
 
 Real rows against the dev Postgres via db_session. Until the dev DB has
 this item's migration, the `schema` fixture creates the new tables inside
-the test's own transaction, so they're rolled back with everything else.
+the test's own transaction, so they're rolled back with everything else -
+without their foreign keys, which would lock the referenced tables the dev
+stack and parallel test runs write to (and deadlock with them).
 """
 
+import asyncio
 import importlib.util
 import logging
 import uuid
@@ -17,6 +20,8 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.schema import CreateTable
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError
 from src.api.routes import ai_assessor, voice_test
@@ -61,9 +66,34 @@ NEW_TABLES = [VoiceTestQuestion.__table__, StudentTestResultTopicScore.__table__
 REVISION = "b3d9e1f04a7c"
 
 
+async def _ddl(db, work, attempts=5):
+    """Runs `work` (sync, gets the connection) in a savepoint, retried when
+    it deadlocks or waits too long on a lock held by another session."""
+    for attempt in range(attempts):
+        savepoint = await db.begin_nested()
+        try:
+            await db.execute(text("SET LOCAL lock_timeout = '3s'"))
+            await db.run_sync(lambda s: work(s.connection()))
+            await savepoint.commit()
+            return
+        except DBAPIError as exc:
+            await savepoint.rollback()
+            code = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+            if code not in ("40P01", "55P03") or attempt == attempts - 1:  # deadlock / lock timeout
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
+
+
+def _create_new_tables(conn):
+    VoiceTestQuestion.__table__.c.status.type.create(conn, checkfirst=True)
+    for table in NEW_TABLES:
+        if not inspect(conn).has_table(table.name):
+            conn.execute(CreateTable(table, include_foreign_key_constraints=[]))
+
+
 @pytest_asyncio.fixture
 async def schema(db_session):
-    await db_session.run_sync(lambda s: Base.metadata.create_all(s.connection(), tables=NEW_TABLES, checkfirst=True))
+    await _ddl(db_session, _create_new_tables)
     return db_session
 
 
@@ -161,12 +191,11 @@ async def test_migration_creates_what_the_models_map(db_session):
     current = (await db_session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
     if current != REVISION:
         assert module.down_revision == current, "migration must sit on the dev DB's current head"
-        await db_session.execute(text("SET LOCAL lock_timeout = '10s'"))
 
-        def upgrade(sync_session):
-            with Operations.context(MigrationContext.configure(sync_session.connection())):
+        def upgrade(conn):
+            with Operations.context(MigrationContext.configure(conn)):
                 module.upgrade()
-        await db_session.run_sync(upgrade)  # rolled back with the test's transaction
+        await _ddl(db_session, upgrade)  # rolled back with the test's transaction
 
     def columns(sync_session):
         insp = inspect(sync_session.connection())
@@ -448,3 +477,50 @@ async def test_grading_error_records_no_score_and_flags_for_review(schema, monke
     record = await db.get(AiAssessorSessionRecord, ai_session.id)
     assert record.needs_review is True and record.report["grading_error"]
     assert "ai_assessor_grading_failed_needs_review" in caplog.text
+    assert s["test"].completed_count == 1  # the attempt counts, and freezes the questions
+
+    # a second failed session of the same student doesn't count twice
+    again = AiAssessorSession(student_id=student.id, test_id=s["test"].id, context_label="x", duration_seconds=600)
+    db.add(again)
+    await db.flush()
+    await db.refresh(again)
+    await ai_assessor.finish_session(str(again.id), FinishSessionIn(call_id="c2"), authorization="Bearer t",
+                                     app_user=student, db=db)
+    assert s["test"].completed_count == 1
+
+    # no retake while it waits for the teacher
+    async def no_call(**kwargs):
+        raise AssertionError("must not start a live call")
+    monkeypatch.setattr(ai_assessor, "create_realtime_call", no_call)
+    with pytest.raises(ConflictError):
+        await ai_assessor.realtime_offer(str(again.id), ai_assessor.RealtimeOfferIn(sdp="v=0"),
+                                         authorization="Bearer t", app_user=student, db=db)
+
+    # the teacher sees it, other teachers don't
+    reviews = await voice_test.list_test_reviews(str(s["test"].id), user=s["teacher"], _feature=s["teacher"],
+                                                 session=db)
+    assert {r.session_id for r in reviews.items} == {str(ai_session.id), str(again.id)}
+    assert reviews.items[0].student_id == str(student.id)
+    assert reviews.items[0].grading_error == "APITimeoutError: timed out"
+    stranger = await _teacher(db, s["school"].id)
+    with pytest.raises(ForbiddenError):
+        await voice_test.list_test_reviews(str(s["test"].id), user=stranger, _feature=stranger, session=db)
+
+
+async def test_an_exited_session_keeps_its_transcript_but_scores_nothing(schema, monkeypatch):
+    db = schema
+    s = await _prepared(db, monkeypatch)
+    s["test"].status = TestStatus.SCHEDULED
+    student, ai_session = await _student_session(db, s)
+    payload = {"report": {"qa_transcripts": [_qa(1, "Remembering", 80)], "session_summary": {}},
+               "answers": [], "transcript": [{"role": "user", "text": "bye", "question_number": 1}],
+               "answered": 1, "model_completed": False}
+    _wire_finish(monkeypatch, db, payload)
+
+    out = await ai_assessor.finish_session(str(ai_session.id), FinishSessionIn(call_id="c1", exited=True),
+                                           authorization="Bearer t", app_user=student, db=db)
+
+    assert out.outcome == "exited"
+    assert (await db.execute(select(StudentTestResult).where(StudentTestResult.test_id == s["test"].id))).first() is None
+    record = await db.get(AiAssessorSessionRecord, ai_session.id)
+    assert record.transcript == payload["transcript"] and record.needs_review is False

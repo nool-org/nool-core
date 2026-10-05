@@ -38,7 +38,7 @@ class RealtimeAnswerOut(CamelModel):
 
 class FinishSessionIn(CamelModel):
     call_id: str
-    # True when the student left early - the call is ended but nothing is recorded.
+    # True when the student left early - the call is ended and its transcript kept, but no result recorded.
     exited: bool = False
     # Only ever lowers the XP awarded (50 - 5 per hint), so trusting it is safe.
     hints_used: int = Field(default=0, ge=0)

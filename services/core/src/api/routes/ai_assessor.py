@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ForbiddenError, NotFoundError
+from shared.errors import ConflictError, ForbiddenError, NotFoundError
 from shared.logging import get_logger
 
 from src.api.deps import get_db_session, require_feature
@@ -31,6 +31,7 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestQuestion,
     Role,
+    StudentTestResult,
     VoiceTestTargetStudent,
 )
 from src.repositories import get_session
@@ -108,6 +109,9 @@ async def _colearner_config(
     chapter = await db.get(Chapter, test.chapter_id) if test else None
     subject = await db.get(Subject, test.subject_id) if test else None
     school_class = await db.get(SchoolClass, test.class_id) if test else None
+    # ponytail: a session started before the create-time prep finished (~10-60s)
+    # gets no questions and improvises; mark prep pending on VoiceTest and refuse
+    # here if teachers schedule + students start that fast in practice.
     questions = await _test_questions(db, ai_session.test_id)
 
     num_questions = _question_count(questions, bloom_levels)
@@ -133,30 +137,57 @@ async def _colearner_config(
     return config, num_questions
 
 
+def _store_record(db: AsyncSession, ai_session: AiAssessorSession, result: dict, needs_review: bool = False):
+    """Keeps colearner's finish payload (contract C3) as-is - every finished
+    session, scored or not - for review and re-grading."""
+    return db.merge(AiAssessorSessionRecord(
+        session_id=ai_session.id,
+        transcript=result.get("transcript") or result.get("turns"),
+        answers=result.get("answers"),
+        report=result.get("report"),
+        needs_review=needs_review,
+    ))
+
+
+def _awaiting_review(test_id, student_id):
+    """A session of this student on this test whose grading failed - their
+    attempt is with the teacher (GET /tests/{id}/reviews)."""
+    return exists().where(
+        AiAssessorSessionRecord.session_id == AiAssessorSession.id,
+        AiAssessorSessionRecord.needs_review.is_(True),
+        AiAssessorSession.test_id == test_id,
+        AiAssessorSession.student_id == student_id,
+    )
+
+
 async def _record_completion(
     ai_session: AiAssessorSession, bloom_levels: list[BloomLevel], result: dict,
     answered: int, num_questions: int, hints_used: int = 0,
 ) -> None:
-    """Keeps colearner's finish payload (contract C3) and records the test
-    result with per-Bloom and per-topic scores, XP (first completion only)
-    and auto homework. A report with `grading_error` is kept for teacher
-    review but scores nothing - no made-up mastery."""
+    """Stores colearner's finish payload and records the test result with
+    per-Bloom and per-topic scores, XP (first completion only) and auto
+    homework. A report with `grading_error` scores nothing - no made-up
+    mastery: the attempt counts as taken (completed_count, no retake) and
+    waits for the teacher's review."""
     report = result.get("report")
     grading_error = isinstance(report, dict) and bool(report.get("grading_error"))
     async with get_session() as completion_db:
-        await completion_db.merge(AiAssessorSessionRecord(
-            session_id=ai_session.id,
-            transcript=result.get("transcript") or result.get("turns"),
-            answers=result.get("answers"),
-            report=report,
-            needs_review=grading_error,
-        ))
         if grading_error:
             logger.warning("ai_assessor_grading_failed_needs_review", extra={
                 "session_id": str(ai_session.id), "test_id": str(ai_session.test_id),
                 "grading_error": str(report.get("grading_error"))[:300]})
+            if ai_session.test_id is not None and not (await completion_db.execute(select(
+                exists().where(StudentTestResult.test_id == ai_session.test_id,
+                               StudentTestResult.student_id == ai_session.student_id)
+                | _awaiting_review(ai_session.test_id, ai_session.student_id)
+            ))).scalar():
+                test = await completion_db.get(VoiceTest, ai_session.test_id)
+                if test is not None:
+                    test.completed_count += 1  # also freezes the questions (voice_test.py)
+            await _store_record(completion_db, ai_session, result, needs_review=True)
             await completion_db.commit()
             return
+        await _store_record(completion_db, ai_session, result)
         if ai_session.test_id is None:
             await completion_db.commit()
             return
@@ -213,6 +244,10 @@ async def realtime_offer(
     then flows directly between the app and the voice model; colearner
     records the transcript server-side (see its realtime_service.py)."""
     ai_session, bloom_levels = await _owned_session(db, session_id, app_user)
+    if ai_session.test_id is not None and (await db.execute(
+        select(_awaiting_review(ai_session.test_id, ai_session.student_id))
+    )).scalar():
+        raise ConflictError("Your answers to this test are with your teacher for review.")
     config, _ = await _colearner_config(db, ai_session, bloom_levels)
     answer = await create_realtime_call(
         sdp=body.sdp, config=config, owner_ref=str(ai_session.id), token=_bearer(authorization)
@@ -239,6 +274,9 @@ async def finish_session(
     summary = SessionSummary(questions_answered=answered, total_questions=num_questions, elapsed_seconds=elapsed)
 
     if body.exited:
+        async with get_session() as record_db:
+            await _store_record(record_db, ai_session, result)
+            await record_db.commit()
         return FinishSessionOut(outcome="exited", summary=summary)
     await _record_completion(ai_session, bloom_levels, result, answered, num_questions, hints_used=hints_used)
     finished = result.get("model_completed") or answered >= num_questions

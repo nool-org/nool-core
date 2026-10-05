@@ -64,3 +64,20 @@ class UpdateVoiceTestQuestionIn(CamelModel):
     reworded_text: str | None = Field(default=None, min_length=1)
     spoken_text: str | None = Field(default=None, min_length=1)
     status: VoiceTestQuestionStatus | None = None
+
+
+class SessionReviewOut(CamelModel):
+    """A finished session whose grading failed - no score was recorded, the
+    teacher reads the transcript instead."""
+
+    session_id: str
+    student_id: str
+    student_name: str
+    finished_at: datetime
+    grading_error: str
+    transcript: list[dict]
+    answers: list[dict]
+
+
+class SessionReviewListOut(CamelModel):
+    items: list[SessionReviewOut]

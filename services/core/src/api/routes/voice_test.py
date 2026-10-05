@@ -11,12 +11,16 @@ from src.api.schemas.common import ListEnvelope
 from src.api.schemas.roster import AssignmentTarget
 from src.api.schemas.voice_test import (
     CreateTestIn,
+    SessionReviewListOut,
+    SessionReviewOut,
     UpdateVoiceTestQuestionIn,
     VoiceTestOut,
     VoiceTestQuestionListOut,
     VoiceTestQuestionOut,
 )
 from src.domain.models import (
+    AiAssessorSession,
+    AiAssessorSessionRecord,
     AssignmentTargetMode,
     Chapter,
     Feature,
@@ -275,3 +279,29 @@ async def swap_test_question(
         raise ConflictError("No other question of this Bloom level is available for this chapter.")
     await session.commit()
     return _question_out(question)
+
+
+@router.get("/tests/{test_id}/reviews", summary="Sessions whose grading failed - for the teacher to review")
+async def list_test_reviews(
+    test_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> SessionReviewListOut:
+    test = await get_test_for_teacher(session, test_id, user)
+    rows = (await session.execute(
+        select(AiAssessorSessionRecord, AiAssessorSession.student_id, User.display_name)
+        .join(AiAssessorSession, AiAssessorSession.id == AiAssessorSessionRecord.session_id)
+        .join(User, User.id == AiAssessorSession.student_id)
+        .where(AiAssessorSession.test_id == test.id, AiAssessorSessionRecord.needs_review.is_(True))
+        .order_by(AiAssessorSessionRecord.created_at)
+    )).all()
+    return SessionReviewListOut(items=[SessionReviewOut(
+        session_id=str(record.session_id),
+        student_id=str(student_id),
+        student_name=name or "",
+        finished_at=record.created_at,
+        grading_error=str((record.report or {}).get("grading_error") or ""),
+        transcript=record.transcript or [],
+        answers=record.answers or [],
+    ) for record, student_id, name in rows])
