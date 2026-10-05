@@ -42,6 +42,8 @@ RESPONSE_FORMAT = {
                 },
                 "next_steps": {
                     "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -87,5 +89,5 @@ async def generate_insights(facts: dict[str, Any], client: Optional[Any] = None)
         response_format=RESPONSE_FORMAT,
     )
     data = json.loads(resp.choices[0].message.content)
-    data["next_steps"] = data["next_steps"][:3]
+    data["next_steps"] = data["next_steps"][:3]  # schema says exactly 3; core pads if fewer
     return data
