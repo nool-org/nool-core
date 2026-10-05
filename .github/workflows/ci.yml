@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [auth, core, kg, generation, colearner]
+    services:
+      # Only core's db_session tests use it; the others ignore it.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nool
+          POSTGRES_PASSWORD: nool
+          POSTGRES_DB: nool
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nool -d nool"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Real DB credentials for core's tests/conftest.py (db_session) and
+      # alembic's database/migrations/env.py.
+      POSTGRES_USER: nool
+      POSTGRES_PASSWORD: nool
+      POSTGRES_DB: nool
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/${{ matrix.service }}/requirements*.txt
+      - name: Install dependencies
+        run: |
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install -r requirements.txt pytest==8.3.4 pytest-asyncio==0.25.2 httpx==0.28.1
+          fi
+      - name: Apply migrations
+        if: matrix.service == 'core'
+        working-directory: database
+        env:
+          PYTHONPATH: ${{ github.workspace }}/services/core:${{ github.workspace }}
+        run: alembic upgrade head
+      - name: Run tests
+        run: python -m pytest -q
