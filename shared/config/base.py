@@ -19,3 +19,6 @@ class BaseServiceSettings(BaseSettings):
     # shared/tracing/setup.py. Unset by default: tracing is optional and a
     # service must boot cleanly without a collector available.
     otel_exporter_otlp_endpoint: str | None = None
+    # shared/error_reporting: Sentry is off unless SENTRY_DSN is set.
+    sentry_dsn: str | None = None
+    sentry_traces_sample_rate: float = 0.05
