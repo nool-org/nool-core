@@ -86,17 +86,29 @@ async def test_award_session_xp_rolls_a_level_over(db_session):
     school = await _seed_school(db_session)
     student = await _seed_student(db_session, school.id)
 
+    # the client-reported award is capped at SESSION_XP (anti-minting), so
+    # roll-over is exercised through apply_xp, which server-side awards use
+    state = await gamification.apply_xp(db_session, student.id, 520)
+
+    assert state.level == 2
+    assert state.xp == 20
+
+
+async def test_award_session_xp_caps_the_client_reported_amount(db_session):
+    school = await _seed_school(db_session)
+    student = await _seed_student(db_session, school.id)
+
     body = gamification.AwardSessionXpIn(xp_earned=520)
     result = await gamification.award_session_xp(body=body, user=student, session=db_session)
 
-    assert result.level == 2
-    assert result.xp == 20
+    assert result.level == 1
+    assert result.xp == gamification.SESSION_XP
 
 
 async def test_achievements_unlock_from_real_rows(db_session):
     school = await _seed_school(db_session)
     student = await _seed_student(db_session, school.id)
-    school_class = SchoolClass(school_id=school.id, grade=9, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school.id, grade=9, section=uuid.uuid4().hex[:8].upper())
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school_class, subject])
     await db_session.flush()

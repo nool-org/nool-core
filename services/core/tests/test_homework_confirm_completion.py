@@ -35,7 +35,7 @@ async def _seed_homework(db_session, *, assigned_count: int) -> Homework:
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school, subject])
     await db_session.flush()
-    school_class = SchoolClass(school_id=school.id, grade=9, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school.id, grade=9, section=uuid.uuid4().hex[:8].upper())
     chapter = Chapter(subject_id=subject.id, name="Chapter 1")
     db_session.add_all([school_class, chapter])
     await db_session.flush()

@@ -196,20 +196,32 @@ async def _apply_body(session: AsyncSession, paper: QuestionPaper, body: CreateQ
         )
 
 
+async def _ensure_teaches(session: AsyncSession, user: User, subject_id, grade: int) -> None:
+    teaches = (await session.execute(
+        select(TeacherClassAssignment.id)
+        .join(SchoolClass, SchoolClass.id == TeacherClassAssignment.class_id)
+        .where(TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.subject_id == subject_id,
+               SchoolClass.grade == grade, SchoolClass.school_id == user.school_id)
+        .limit(1)
+    )).first()
+    if teaches is None:
+        raise ForbiddenError(f"You don't teach this subject in grade {grade}.")
+
+
+async def _get_paper_to_edit(session: AsyncSession, paper_id: str, user: User) -> QuestionPaper:
+    """A paper in the teacher's school that they also teach (subject + grade)
+    - reading stays school-wide, changing it doesn't."""
+    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    await _ensure_teaches(session, user, paper.subject_id, paper.grade)
+    return paper
+
+
 async def _check_blueprint(session: AsyncSession, user: User, body: CreateQuestionPaperIn) -> None:
     """A paper is one subject of one grade, set by a teacher of it: the
     subject is enabled for the school and is that grade's, every chapter
     belongs to it, every topic to a chosen chapter, and every dataset share
     to the same subject + grade (and is one this teacher may use)."""
-    teaches = (await session.execute(
-        select(TeacherClassAssignment.id)
-        .join(SchoolClass, SchoolClass.id == TeacherClassAssignment.class_id)
-        .where(TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.subject_id == body.subject_id,
-               SchoolClass.grade == body.grade, SchoolClass.school_id == user.school_id)
-        .limit(1)
-    )).first()
-    if teaches is None:
-        raise ForbiddenError(f"You don't teach this subject in grade {body.grade}.")
+    await _ensure_teaches(session, user, body.subject_id, body.grade)
     await ensure_subjects_enabled_for_school(session, [body.subject_id], user.school_id)
     await ensure_subjects_fit_grade(session, [body.subject_id], body.grade, what=f"a grade-{body.grade} paper")
 
@@ -300,7 +312,7 @@ async def update_paper(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
-    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_to_edit(session, paper_id, user)
     if paper.status == QuestionPaperStatus.FINALIZED:
         raise ConflictError("This paper is finalized and can't be changed.")
     await _check_blueprint(session, user, body)
@@ -475,7 +487,7 @@ async def generate_paper(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
-    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_to_edit(session, paper_id, user)
 
     bloom_dist = await session.execute(
         select(QuestionPaperBloomDistribution).where(QuestionPaperBloomDistribution.paper_id == paper.id)
@@ -607,7 +619,7 @@ async def update_paper_question(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[QuestionPaperQuestionOut]:
-    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_to_edit(session, paper_id, user)
     if paper.status != QuestionPaperStatus.REVIEW:
         raise ConflictError("Paper isn't in REVIEW.")
     result = await session.execute(
@@ -672,7 +684,7 @@ async def reorder_questions(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[QuestionPaperQuestionOut]:
-    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_to_edit(session, paper_id, user)
     if paper.status != QuestionPaperStatus.REVIEW:
         raise ConflictError("Paper isn't in REVIEW.")
     result = await session.execute(
@@ -695,7 +707,7 @@ async def finalize_paper(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
-    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_to_edit(session, paper_id, user)
     if paper.status != QuestionPaperStatus.REVIEW:
         raise ConflictError("Only a paper in review can be finalized.")
     paper.status = QuestionPaperStatus.FINALIZED

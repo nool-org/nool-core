@@ -40,7 +40,7 @@ async def _seed_school(db_session) -> School:
 
 
 async def _seed_class_subject_chapter_topic(db_session, school_id):
-    school_class = SchoolClass(school_id=school_id, grade=8, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school_id, grade=8, section=uuid.uuid4().hex[:8].upper())
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school_class, subject])
     await db_session.flush()
@@ -101,6 +101,11 @@ async def test_whole_class_target_resolves_current_roster_at_creation_time(db_se
     delivered_ids = {str(row[0]) for row in delivered.all()}
     assert delivered_ids == {str(student_a.id), str(student_b.id)}
 
+    # still a DRAFT - students only see it once the teacher schedules it
+    my_tests = await assigned_test.list_my_tests(user=student_a, session=db_session)
+    assert result.id not in {t.id for t in my_tests.items}
+    await voice_test.schedule_test(result.id, user=teacher, _feature=teacher, session=db_session)
+
     # The real end-to-end regression check: each student's own
     # "my assigned tests" read path (what nool-apps' student side actually
     # calls) must now return this test - before the fix, it returned
@@ -130,6 +135,7 @@ async def test_specific_students_target_still_only_delivers_to_the_picked_studen
     result = await voice_test.create_test(body, background_tasks=BackgroundTasks(), user=teacher, session=db_session)
 
     assert result.assigned_count == 1
+    await voice_test.schedule_test(result.id, user=teacher, _feature=teacher, session=db_session)
 
     picked_tests = await assigned_test.list_my_tests(user=picked, session=db_session)
     assert result.id in {t.id for t in picked_tests.items}

@@ -229,7 +229,11 @@ async def create_chapter(
     actor: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterOut:
-    chapter = Chapter(subject_id=subject_id, name=body.name)
+    subject = await session.get(Subject, subject_id)
+    if subject is None:
+        raise NotFoundError("Subject not found.")
+    # a subject has one grade - a hand-added chapter belongs to it too
+    chapter = Chapter(subject_id=subject_id, name=body.name, grade=subject.grade)
     session.add(chapter)
     await session.flush()
     await audit_repository.record(

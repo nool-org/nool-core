@@ -52,7 +52,7 @@ async def _seed_admin(db_session, school_id) -> User:
 
 
 async def _seed_class_subject_chapter(db_session, school_id) -> tuple[SchoolClass, Subject, Chapter]:
-    school_class = SchoolClass(school_id=school_id, grade=8, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school_id, grade=8, section=uuid.uuid4().hex[:8].upper())
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school_class, subject])
     await db_session.flush()

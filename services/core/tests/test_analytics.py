@@ -47,7 +47,7 @@ async def _seed_super_admin(db_session) -> User:
 
 
 async def _seed_test_result(db_session, school_id, *, mastery_percent: int) -> None:
-    school_class = SchoolClass(school_id=school_id, grade=9, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school_id, grade=9, section=uuid.uuid4().hex[:8].upper())
     subject = Subject(name=f"Subject-{uuid.uuid4()}")
     db_session.add_all([school_class, subject])
     await db_session.flush()

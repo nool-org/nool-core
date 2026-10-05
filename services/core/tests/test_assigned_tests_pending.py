@@ -18,6 +18,7 @@ from src.domain.models import (
     StudentTestResult,
     Subject,
     User,
+    TestStatus,
     UserStatus,
     VoiceTest,
     VoiceTestTargetStudent,
@@ -35,13 +36,14 @@ async def _seed_student(db_session, school_id) -> User:
 
 
 async def _seed_targeted_test(db_session, *, school_id, subject) -> VoiceTest:
-    school_class = SchoolClass(school_id=school_id, grade=9, section=str(uuid.uuid4())[:1].upper())
+    school_class = SchoolClass(school_id=school_id, grade=9, section=uuid.uuid4().hex[:8].upper())
     chapter = Chapter(subject_id=subject.id, name="Chapter 1")
     db_session.add_all([school_class, chapter])
     await db_session.flush()
     test = VoiceTest(
         class_id=school_class.id, subject_id=subject.id, chapter_id=chapter.id, topic_id=None,
         duration_minutes=20, completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS,
+        status=TestStatus.SCHEDULED,  # a DRAFT never reaches students
     )
     db_session.add(test)
     await db_session.flush()

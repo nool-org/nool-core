@@ -12,7 +12,7 @@ from src.api.schemas.ai_assessor import OpenSessionIn
 from src.api.schemas.school_admin import ClassAssignmentOut, CreateStudentIn, UpdateClassAssignmentsIn, UpdateStudentIn
 from src.domain.models import (
     AssignmentTargetMode, BloomLevel, Chapter, Homework, HomeworkDifficulty, HomeworkStatus, Role, School,
-    SchoolClass, SchoolCurriculum, StudentProfile, Subject, TeacherClassAssignment, User, UserStatus, VoiceTest,
+    SchoolClass, SchoolCurriculum, StudentProfile, Subject, TeacherClassAssignment, TestStatus, User, UserStatus, VoiceTest,
     VoiceTestTargetStudent,
 )
 
@@ -35,7 +35,8 @@ async def _school(db_session):
     db_session.add_all([section, admin, teacher, student, chapter])
     await db_session.flush()
     test = VoiceTest(class_id=section.id, subject_id=subject.id, chapter_id=chapter.id, duration_minutes=20,
-                     completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS)
+                     completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS,
+                     status=TestStatus.SCHEDULED)
     db_session.add_all([
         StudentProfile(user_id=student.id, class_id=section.id, roll_number=uuid.uuid4().int % 100000),
         TeacherClassAssignment(teacher_id=teacher.id, class_id=section.id, subject_id=subject.id),
