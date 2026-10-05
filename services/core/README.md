@@ -34,13 +34,14 @@ from the actual route/schema code.
   gates each route. Teacher/School Admin routes are scoped to the caller's
   `school_id`; Student routes (`/me/...`) are scoped to the caller
   themselves; `/admin/...` (Super Admin) is cross-tenant by design.
-- **AI-backed content**: Homework/Question Paper question generation and
-  the AI Assessor's realtime voice conversation are implemented against
-  `src/services/content_generator.py`'s `ContentGenerator` interface -
-  mirrors `shared/auth`'s `IdentityProvider` seam. The only implementation
-  today is deterministic/placeholder (no real LLM/STT/TTS vendor is
-  integrated anywhere in this repo) - a real vendor integration is a
-  second implementation of that interface plus one call-site swap.
+- **AI-backed content**: Core calls the internal AI services rather than
+  any model directly - `colearner_client.py` (AI Assessor realtime voice
+  calls and the legacy WS stream), `colearner_insight_client.py` (Homework
+  insight), `generation_client.py` (Homework gap-fill) and `kg_client.py`
+  (curriculum sync, question papers, voice test grounding, KG-grounded
+  Homework). `content_generator.py`'s `DeterministicContentGenerator` is
+  only the last Homework fallback (`homework_content_resolver.py`). See
+  `docs/ARCHITECTURE.md` for the model used at each step.
 
 ## Endpoints
 
@@ -68,6 +69,9 @@ Read from the environment (see `.env.example` at the repo root):
 | `POSTGRES_PORT`               | no       | Defaults to `5432`.                            |
 | `FIREBASE_PROJECT_ID`         | no       | Needed for the auth middleware to verify tokens. |
 | `FIREBASE_CREDENTIALS_PATH`   | no       | Path to a service account JSON key.            |
+| `KG_SERVICE_URL`              | no       | kg service base URL (compose: `http://kg:8000`). |
+| `COLEARNER_SERVICE_URL`       | no       | colearner base URL; voice tests 503 without it. |
+| `GENERATION_SERVICE_URL`      | no       | generation base URL; Homework skips gap-fill without it. |
 
 ## Database & migrations
 

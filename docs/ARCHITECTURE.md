@@ -2,22 +2,28 @@
 
 ## Overview
 
-nool-core is the backend platform for noolAI: an authentication service, a
-core business API, an NGINX reverse proxy, and PostgreSQL, run together via
-Docker Compose for local development. `nool-app` and the admin web app are
-separate repositories that talk to this stack over HTTP.
+nool-core is the backend platform for noolAI, an AI voice co-learner for
+Indian school students: an authentication service, a core business API,
+three AI services (colearner, generation, kg), an NGINX reverse proxy and
+PostgreSQL, run together via Docker Compose for local development.
+`nool-apps` and the admin web apps are separate repositories that talk to
+this stack over HTTP.
 
 ```
-                    NGINX
-                      |
-              +-------+-------+
-              v               v
-        Auth Service      Core Service
-              |               |
-              +-------+-------+
-                      v
-                  PostgreSQL
+                          NGINX (:8080)
+          /auth/*  |      /api/*      |  /api/v1/colearner/*
+                   v         v        v
+                 Auth      Core ---> Colearner ---> OpenAI Realtime / OpenAI / Gemini / Edge-TTS
+                   |         |                     |         |   +--> Generation ---> OpenAI (gpt-5.1, gpt-5-mini)
+                   |         |   +--> KG ---------> nool-kg (FalkorDB textbook graph) + OpenAI (gpt-5.1)
+                   +----+----+
+                        v
+                    PostgreSQL
 ```
+
+Only NGINX is public. Core reaches colearner, generation and kg over the
+Compose network (`COLEARNER_SERVICE_URL`, `GENERATION_SERVICE_URL`,
+`KG_SERVICE_URL`); generation and kg are not routed through NGINX at all.
 
 ## Services
 
@@ -54,17 +60,91 @@ the schema/route/authorization architecture.
 
 ### Colearner Service
 
-Turn-based voice Bloom's Taxonomy oral co-learner, ported from the
-`nool-research` prototype. Two pipelines, each with a model fixed in code
-rather than client-selectable - see `services/colearner/README.md`:
+The voice co-learner ("Milo"): runs a Bloom's Taxonomy oral session with a
+student and scores it. Firebase-authenticated like Auth/Core (same
+`shared/auth` seam). Models are fixed in code per pipeline, never
+client-selectable - see `services/colearner/README.md`.
 
-```
-nool-app -> NGINX -> Colearner Service -> OpenAI / Gemini / Edge-TTS
-```
+| Pipeline / feature | Used by | Models |
+| --- | --- | --- |
+| **Realtime** (WebRTC, full duplex) | nool-apps AI Assessor (the production voice test path) | `gpt-realtime-2.1-mini` (speech-to-speech), `gpt-4o-mini-transcribe` (transcript), `gpt-4o-mini` (Bloom report) |
+| **Chained** (one recorded clip per turn) | Core's legacy WS stream (`school.voice_pipeline`, default `chained`), playground | `whisper-1` STT, `gpt-4o-mini` LLM, Edge-TTS |
+| **Multimodal** (audio straight into the LLM) | Core's legacy WS stream, playground | `gemini-3.5-flash-lite`, Edge-TTS |
+| **Cascaded** (prototype, cost/latency comparison) | playground only | `gpt-4o-mini-transcribe` STT, `gpt-4.1-mini` LLM, `gpt-4o-mini-tts` TTS |
+| **Homework insight** (`POST /api/v1/homework-insight`) | Core, student Homework screen | `gpt-4o-mini` (deterministic fallback paragraph on failure) |
 
-Firebase-authenticated like Auth/Core (same `shared/auth` seam). Sessions
-are in-memory only (no Postgres/Redis) - a known v1 limitation, not a
-gap; see the service's own README for why.
+A dev-only browser test page for the pipelines lives at
+`/api/v1/colearner/playground`, served only when `PLAYGROUND_ENABLED` is on
+(set in `compose.override.yml`, never in production); with it on, requests
+without a token are also let through.
+
+### Generation Service
+
+Stateless LLM question writer; only Core calls it, it has no database.
+`POST /v1/homework/gap-fill` writes questions for the Homework slots the
+question bank couldn't fill: `gpt-5.1` writes, `gpt-5-mini` verifies, failed
+slots are regenerated once. See `services/generation/README.md`.
+
+### KG Service
+
+Curriculum and grounded generation over the `nool-kg` textbook graph
+(FalkorDB behind nool-kg's REST API, `NOOL_KG_BASE_URL`). Serves the
+curriculum tree that the admin catalog sync imports, question paper
+generation and replacement candidates, and voice test reference content
+(`textbook_context` + `reference_questions`) - all generation with
+`gpt-5.1` using Structured Outputs. See `services/kg/README.md`.
+
+### Where each AI step runs
+
+| Step | Path | Model(s) | Fallback |
+| --- | --- | --- | --- |
+| Voice test conversation | app -> Core -> colearner realtime | `gpt-realtime-2.1-mini` + `gpt-4o-mini-transcribe` | none - the call fails with 503 |
+| Voice test scoring (Bloom report) | colearner | `gpt-4o-mini` | - |
+| Voice test reference content (on test create, background) | Core -> kg | `gpt-5.1` | session uses colearner's generic defaults |
+| Homework questions | Core: question bank -> generation gap-fill -> relaxed bank -> kg -> deterministic generator | `gpt-5.1` + `gpt-5-mini` verify (generation), `gpt-5.1` (kg) | `DeterministicContentGenerator`, last resort only |
+| Homework insight | Core -> colearner | `gpt-4o-mini` | fixed placeholder paragraph |
+| Question paper questions / replacements | Core -> kg | `gpt-5.1` | none - errors surface to the teacher |
+| Teacher Assistant chat | Core | none - keyword-matched canned replies | - |
+
+`services/core/src/services/content_generator.py`'s
+`DeterministicContentGenerator` still exists, but only as that last
+Homework fallback (chapter never synced from KG, or every real source
+failed) - it is not the primary AI anywhere.
+
+### A voice test, end to end
+
+1. Teacher creates a Voice Test (`POST /api/v1/tests`); Core asks kg, in
+   the background, for `textbook_context` and `reference_questions` and
+   stores them on the test.
+2. Student opens it in nool-apps: `POST /api/v1/ai-assessor/sessions`
+   creates an `ai_assessor_sessions` row.
+3. The app creates a WebRTC peer connection (mic track + data channel) and
+   sends its SDP offer to `POST /api/v1/ai-assessor/sessions/{id}/realtime`.
+   Core builds the colearner `SessionConfig` (grade, subject, chapter, Bloom
+   levels, time limit, grounding) and forwards it with the student's own
+   Firebase token to colearner `POST /api/v1/colearner/realtime/calls`.
+4. Colearner creates the OpenAI Realtime call with the instructions and
+   tools server-side (the app never sees the key or the prompt), returns the
+   SDP answer, and attaches a sideband WebSocket to the same call to record
+   the transcript itself.
+5. Audio flows directly app <-> OpenAI. Server VAD detects turn ends; the
+   student can interrupt. The model calls `end_session` after the last
+   question (or on `[TIME_UP]`), speaks a closing summary, and colearner
+   hangs up after a 30 s grace if the client doesn't.
+6. The app calls `POST /api/v1/ai-assessor/sessions/{id}/finish`; Core calls
+   colearner's `.../realtime/calls/{call_id}/finish`, which builds the Bloom
+   report from the server-side transcript (`gpt-4o-mini`). Core scores it
+   and records the test result, XP and the automatic follow-up Homework.
+
+### Known limitations
+
+- **Colearner state is in process memory** (`session_store.py`, the
+  realtime call registry) - lost on restart, invisible to a second replica.
+  Colearner must run as a **single replica**; Core's own WS fan-out
+  (`src/services/realtime.py`) has the same single-instance constraint.
+- Colearner reports are written to a container-local `reports/` directory.
+- Voice tests and question papers have no non-LLM fallback: no
+  `OPENAI_API_KEY` (or kg / nool-kg down) means they fail.
 
 ### PostgreSQL
 
@@ -127,7 +207,7 @@ business logic:
 
 ## Service boundaries
 
-Auth and Core are logically independent within one repository (a deliberate
+Auth, Core and the AI services are logically independent within one repository (a deliberate
 monorepo decision - see the root README). Auth does not import Core business
 modules; Core does not import Auth implementation details. A service is
 extracted into its own repository only if it later needs independent

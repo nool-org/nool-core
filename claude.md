@@ -46,7 +46,15 @@ School Admin (teacher/student roster, classes, school curriculum, school analyti
 
 notifications remain out of scope until a real feature needs them.
 
-AI-backed content (Homework/Question Paper question generation, the AI Assessor's realtime voice conversation) is implemented behind a pluggable content-generation interface — mirroring `shared/auth`'s `IdentityProvider` seam — with one deterministic placeholder implementation. There is no real LLM/STT/TTS vendor integrated anywhere in this repo; building one is separate, future work that only touches that one interface's implementation.
+AI-backed content is real and lives in three internal services that Core calls (models are fixed in code; see docs/ARCHITECTURE.md for the full table and the voice test flow):
+
+colearner — the AI Assessor voice test: WebRTC realtime voice (gpt-realtime-2.1-mini, transcript gpt-4o-mini-transcribe, Bloom report gpt-4o-mini); per-turn chained (whisper-1, gpt-4o-mini, Edge-TTS) and multimodal (gemini-3.5-flash-lite, Edge-TTS) pipelines; a cascaded prototype (gpt-4o-mini-transcribe, gpt-4.1-mini, gpt-4o-mini-tts); Homework insight (gpt-4o-mini); a dev-only playground at /api/v1/colearner/playground behind PLAYGROUND_ENABLED.
+
+generation — Homework gap-fill questions (gpt-5.1 writes, gpt-5-mini verifies).
+
+kg — curriculum tree, question paper questions and voice test grounding over the nool-kg textbook graph (gpt-5.1).
+
+Core's `DeterministicContentGenerator` (services/core/src/services/content_generator.py) is only the last-resort Homework fallback. Colearner keeps session state in process memory, so it runs as a single replica.
 
 Repository Structure
 
@@ -160,15 +168,7 @@ docker compose down -v
 
 docker compose down -v is destructive for local database data and must be documented clearly.
 
-compose.yml initially contains:
-
-nginx
-
-auth
-
-core
-
-postgres
+compose.yml initially contained nginx, auth, core and postgres; it now also runs jaeger (tracing), kg, generation and colearner, each added for an actual requirement. compose.override.yml adds local-only ports and azurite; compose.prod.yml is the production overlay.
 
 Do not add Redis, Kafka, RabbitMQ, Elasticsearch, Kubernetes or other infrastructure without an actual requirement.
 
