@@ -20,6 +20,17 @@ start → generate (one LLM call per slot, in parallel)
 Slots that still fail come back in `unfilled_slot_indexes`, never as an
 unverified question; core then falls back to the bank / legacy generator.
 
+`POST /v1/voice-test/prep` - readies the voice-test questions core picked
+from the school's datasets (one candidate per Bloom level): rewords each in
+simple Indian classroom English (same meaning, answer, Bloom level and
+difficulty), writes `spoken_text` (symbols in words) and a rubric
+(`expected_points`, `misconceptions`, two `hints`). Same workflow shape
+(`src/services/voice_prep.py`): gpt-5.1 rewords → code checks (sentence
+length, numbers/units kept, banned words) + gpt-5-mini answers the reworded
+question and compares with the dataset answer → failed items regenerate
+once → still failing: original wording, rubric kept if well-formed. One
+output per requested level, in `levels` order.
+
 ## Config
 
 | Env | Default | |

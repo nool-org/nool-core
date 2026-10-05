@@ -7,7 +7,7 @@ from shared.logging import RequestContextMiddleware, configure_logging, get_logg
 from shared.tracing import configure_tracing
 from shared.observability import configure_observability
 
-from src.api.routes import gap_fill, health
+from src.api.routes import gap_fill, health, voice_prep
 from src.config.settings import get_settings
 from src.services.llm import OpenAIStructured
 
@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(gap_fill.router)
+    app.include_router(voice_prep.router)
 
     return app
 
