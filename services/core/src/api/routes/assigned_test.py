@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import NotFoundError
@@ -8,6 +8,8 @@ from src.api.deps import get_db_session, require_role
 from src.api.schemas.assigned_test import AssignedTestOut
 from src.api.schemas.common import ListEnvelope
 from src.domain.models import (
+    AiAssessorSession,
+    AiAssessorSessionRecord,
     Role,
     StudentTestResult,
     TestStatus,
@@ -19,6 +21,18 @@ from src.domain.models import (
 )
 
 router = APIRouter(prefix="/api/v1", tags=["assigned-tests"])
+
+
+def taken_test_ids(student_id):
+    """Tests the student is done with: a result, or an attempt whose grading
+    failed and waits for the teacher (needs_review) - never "pending" again."""
+    return union(
+        select(StudentTestResult.test_id).where(StudentTestResult.student_id == student_id),
+        select(AiAssessorSession.test_id)
+        .join(AiAssessorSessionRecord, AiAssessorSessionRecord.session_id == AiAssessorSession.id)
+        .where(AiAssessorSession.student_id == student_id, AiAssessorSession.test_id.is_not(None),
+               AiAssessorSessionRecord.needs_review.is_(True)),
+    )
 
 
 async def _serialize(session: AsyncSession, test: VoiceTest) -> AssignedTestOut:
@@ -48,19 +62,19 @@ async def list_my_tests(
     """Returns items: [] when nothing is assigned yet - a real empty state.
 
     Excludes a Test the student has already completed (a real
-    StudentTestResult row exists for it) - before this, a finished Test
+    StudentTestResult row exists for it, or its grading failed and it waits
+    for the teacher's review) - before this, a finished Test
     never left this "current" list, since the only filter here was class
     membership, not the student's own completion. GET /me/assigned-tests/
     {test_id} below stays unfiltered - a student who navigates straight to
     a finished Test (e.g. from its Results) can still open it.
     """
-    already_done = select(StudentTestResult.test_id).where(StudentTestResult.student_id == user.id)
     result = await session.execute(
         select(VoiceTest)
         .join(VoiceTestTargetStudent, VoiceTestTargetStudent.test_id == VoiceTest.id)
         .where(
             VoiceTestTargetStudent.student_id == user.id,
-            VoiceTest.id.not_in(already_done),
+            VoiceTest.id.not_in(taken_test_ids(user.id)),
             VoiceTest.status != TestStatus.DRAFT,  # a teacher's unpublished draft
         )
     )

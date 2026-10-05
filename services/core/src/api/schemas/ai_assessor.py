@@ -16,6 +16,7 @@ class OpenSessionIn(CamelModel):
 
 class OpenSessionOut(CamelModel):
     session_id: str
+    question_count: int = 0  # the test's prepared questions (0: none, the co-learner improvises)
 
 
 class SessionSummary(CamelModel):

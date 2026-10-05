@@ -17,6 +17,7 @@ from src.api.schemas.ai_assessor import (
     RealtimeOfferIn,
     SessionSummary,
 )
+from src.domain.models.voice_test import VoiceTestPrepStatus
 from src.domain.models import (
     AiAssessorSession,
     AiAssessorSessionBloomLevel,
@@ -70,6 +71,8 @@ async def open_session(
         )).first()
         if targeted is None:
             raise NotFoundError("This test isn't assigned to you.")
+        if await db.scalar(select(VoiceTest.prep_status).where(VoiceTest.id == body.test_id))                 == VoiceTestPrepStatus.PENDING:
+            raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.")
     ai_session = AiAssessorSession(
         student_id=app_user.id,
         test_id=body.test_id,
@@ -82,7 +85,8 @@ async def open_session(
         db.add(AiAssessorSessionBloomLevel(session_id=ai_session.id, bloom_level=level))
     await db.commit()
 
-    return OpenSessionOut(session_id=str(ai_session.id))
+    return OpenSessionOut(session_id=str(ai_session.id),
+                          question_count=len(await _test_questions(db, body.test_id)))
 
 
 async def _test_questions(db: AsyncSession, test_id) -> list[VoiceTestQuestion]:
@@ -109,9 +113,6 @@ async def _colearner_config(
     chapter = await db.get(Chapter, test.chapter_id) if test else None
     subject = await db.get(Subject, test.subject_id) if test else None
     school_class = await db.get(SchoolClass, test.class_id) if test else None
-    # ponytail: a session started before the create-time prep finished (~10-60s)
-    # gets no questions and improvises; mark prep pending on VoiceTest and refuse
-    # here if teachers schedule + students start that fast in practice.
     questions = await _test_questions(db, ai_session.test_id)
 
     num_questions = _question_count(questions, bloom_levels)

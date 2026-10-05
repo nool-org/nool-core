@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_db_session, require_role
+from src.api.routes.assigned_test import taken_test_ids
 from src.api.schemas.student_dashboard import (
     ContinueJourneyOut,
     LearningStreakOut,
@@ -71,14 +72,13 @@ async def get_student_dashboard(
     # Excludes a Test the student has already completed - see
     # assigned_test.py's list_my_tests for the same fix and the same
     # reasoning (a finished Test used to never leave this "pending" list).
-    already_done = select(StudentTestResult.test_id).where(StudentTestResult.student_id == user.id)
     pending_tests = await session.execute(
         select(VoiceTest, Subject)
         .join(VoiceTestTargetStudent, VoiceTestTargetStudent.test_id == VoiceTest.id)
         .join(Subject, Subject.id == VoiceTest.subject_id)
         .where(
             VoiceTestTargetStudent.student_id == user.id,
-            VoiceTest.id.not_in(already_done),
+            VoiceTest.id.not_in(taken_test_ids(user.id)),
             VoiceTest.status != TestStatus.DRAFT,  # same rule as assigned_test.py
         )
         .order_by(VoiceTest.created_at)

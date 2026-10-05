@@ -7,10 +7,13 @@ teacher can then review/approve/swap them (voice_test.py's /questions).
 Never fails silently: generation down -> the dataset text is used as-is
 (no rubric); no question for a level -> that level is skipped; no question
 at all -> the co-learner improvises from textbook_context, as before. Each
-case logs a warning.
+case logs a warning. VoiceTest.prep_status tells sessions whether to wait
+(PENDING) or go (READY / FAILED). Questions that can't be asked aloud - MCQ
+stems, {tex} markup, broken encoding - are never picked (logged).
 """
 
 import logging
+import re
 import uuid
 
 from sqlalchemy import select
@@ -33,6 +36,7 @@ from src.domain.models import (
     VoiceTestQuestionStatus,
 )
 from src.domain.models.question_paper import PaperDifficultyLevel
+from src.domain.models.voice_test import VoiceTestPrepStatus
 from src.repositories import get_session
 from src.repositories.dataset_access import visible_datasets
 from src.services import generation_client, kg_client
@@ -56,30 +60,45 @@ async def prepare_in_background(test_id: uuid.UUID, teacher_id: uuid.UUID) -> No
             await prepare_test(session, test, teacher)
         except Exception:
             logger.exception("voice_test_prep_failed", extra={"test_id": str(test_id)})
+            await session.rollback()
+            test = await session.get(VoiceTest, test_id)
+            test.prep_status = VoiceTestPrepStatus.FAILED  # never leave sessions blocked
+            await session.commit()
 
 
 async def prepare_test(session: AsyncSession, test: VoiceTest, teacher: User) -> None:
+    """Sets test.prep_status: PENDING while it runs (sessions wait), then
+    READY with questions or FAILED without (the co-learner improvises)."""
+    test.prep_status = VoiceTestPrepStatus.PENDING
+    await session.commit()
+    test.prep_status = (VoiceTestPrepStatus.READY if await _prepare(session, test, teacher)
+                        else VoiceTestPrepStatus.FAILED)
+    await session.commit()
+
+
+async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> bool:
+    """True when the test has its questions."""
     ctx = await _context(session, test)
     if ctx is None:
-        return
+        return False
     await _fill_textbook_context(test, ctx)
     await session.commit()
 
     if (await session.execute(
         select(VoiceTestQuestion.id).where(VoiceTestQuestion.voice_test_id == test.id).limit(1)
     )).first():
-        return  # already prepared (a retry) - the class must keep the same questions
+        return True  # already prepared (a retry) - the class must keep the same questions
 
     order = list(BloomLevel)
     levels = sorted((await session.execute(
         select(VoiceTestBloomLevel.bloom_level).where(VoiceTestBloomLevel.test_id == test.id)
     )).scalars().all(), key=order.index)
     dataset_ids = await _dataset_ids(session, teacher, test, ctx["grade"])
-    avoid = await _choice_uids(session, dataset_ids, test.chapter_id)
+    unusable = await _unusable_uids(session, test, dataset_ids)
 
     picked: list[DatasetQuestion] = []
     for level in levels:
-        question = await _pick(session, test, dataset_ids, level, {_uid(q) for q in picked}, avoid)
+        question = await _pick(session, test, dataset_ids, level, {_uid(q) for q in picked} | unusable)
         if question is None:
             logger.warning("voice_test_prep_no_question_for_level",
                            extra={"test_id": str(test.id), "bloom_level": level.value})
@@ -87,11 +106,12 @@ async def prepare_test(session: AsyncSession, test: VoiceTest, teacher: User) ->
         picked.append(question)
     if not picked:
         logger.warning("voice_test_prep_no_questions", extra={"test_id": str(test.id)})
-        return
+        return False
 
     for number, (question, prepped) in enumerate(zip(picked, await _prep(test, ctx, picked)), start=1):
         session.add(VoiceTestQuestion(voice_test_id=test.id, order=number, **_fields(question, prepped)))
     await session.commit()
+    return True
 
 
 async def swap_question(
@@ -111,8 +131,8 @@ async def swap_question(
         )).all()
     }
     dataset_ids = await _dataset_ids(session, teacher, test, ctx["grade"])
-    avoid = await _choice_uids(session, dataset_ids, test.chapter_id)
-    replacement = await _pick(session, test, dataset_ids, question.bloom_level, used, avoid)
+    unusable = await _unusable_uids(session, test, dataset_ids)
+    replacement = await _pick(session, test, dataset_ids, question.bloom_level, used | unusable)
     if replacement is None:
         return False
     [prepped] = await _prep(test, ctx, [replacement])
@@ -161,28 +181,46 @@ async def _dataset_ids(session: AsyncSession, teacher: User, test: VoiceTest, gr
     return [d.id for d in visible if d.type == DatasetType.QA]
 
 
-async def _choice_uids(session: AsyncSession, dataset_ids: list, chapter_id) -> set[str]:
-    """MCQ/true-false questions - they only make sense with options to read,
-    so a spoken test takes them only when nothing else fits a level."""
+# A stem with its options written in: "... (a) 2 (b) 4 ..." / "... A. 2 B. 4 ...".
+_LISTED_OPTIONS = re.compile(r"(?:^|\s)\(?[aA][.)]\s+\S.*(?:^|\s)\(?[bB][.)]\s+\S", re.S)
+
+
+def _unspeakable(question: DatasetQuestion) -> str | None:
+    """Why a dataset question can't be asked aloud, or None when it can."""
+    text = question.text or ""
+    if question.question_type in (QuestionType.MCQ, QuestionType.TRUE_FALSE) or _LISTED_OPTIONS.search(text):
+        return "options"  # only makes sense with options to read
+    if "{tex}" in text.lower():
+        return "tex"
+    if "\ufffd" in text:  # stray encoding characters
+        return "encoding"
+    return None
+
+
+async def _unusable_uids(session: AsyncSession, test: VoiceTest, dataset_ids: list) -> set[str]:
+    """The chapter's dataset questions a spoken test must never ask - logged."""
     if not dataset_ids:
         return set()
-    rows = (await session.execute(
-        select(DatasetQuestion.external_uid, DatasetQuestion.id).where(
-            DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.chapter_id == chapter_id,
-            DatasetQuestion.question_type.in_([QuestionType.MCQ, QuestionType.TRUE_FALSE]))
-    )).all()
-    return {external_uid or str(question_id) for external_uid, question_id in rows}
+    questions = (await session.execute(select(DatasetQuestion).where(
+        DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.chapter_id == test.chapter_id,
+    ))).scalars().all()
+    skipped = {_uid(q): reason for q in questions if (reason := _unspeakable(q))}
+    if skipped:
+        logger.info("voice_test_prep_skipped_candidates", extra={
+            "test_id": str(test.id), "skipped": len(skipped),
+            "by_reason": {r: sum(1 for v in skipped.values() if v == r) for r in set(skipped.values())},
+            "uids": sorted(skipped)[:50]})
+    return set(skipped)
 
 
-async def _pick(session, test, dataset_ids, level, exclude: set[str], avoid: set[str]) -> DatasetQuestion | None:
-    for skip in (exclude | avoid, exclude):
-        for difficulty in _DIFFICULTIES:
-            selection = await select_questions(
-                session, dataset_ids=dataset_ids, chapter_id=test.chapter_id, topic_id=test.topic_id,
-                slots=[Slot(level, difficulty)], exclude_uids=skip, text_only=True,
-            )
-            if selection.by_slot and selection.by_slot[0] is not None:
-                return selection.by_slot[0]
+async def _pick(session, test, dataset_ids, level, exclude: set[str]) -> DatasetQuestion | None:
+    for difficulty in _DIFFICULTIES:
+        selection = await select_questions(
+            session, dataset_ids=dataset_ids, chapter_id=test.chapter_id, topic_id=test.topic_id,
+            slots=[Slot(level, difficulty)], exclude_uids=exclude, text_only=True,
+        )
+        if selection.by_slot and selection.by_slot[0] is not None:
+            return selection.by_slot[0]
     return None
 
 
