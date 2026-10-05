@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -116,6 +116,8 @@ class HomeworkTargetStudent(Base):
 
 class HomeworkQuestion(IdMixin, Base):
     __tablename__ = "homework_questions"
+    # don't RETURN is_boss's server default on INSERT (see is_boss below)
+    __mapper_args__ = {"eager_defaults": False}
 
     homework_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("homework.id"))
     order: Mapped[int] = mapped_column(Integer)
@@ -129,6 +131,27 @@ class HomeworkQuestion(IdMixin, Base):
     source_question_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("dataset_questions.id", ondelete="SET NULL"), nullable=True
     )
+    # Auto homework's "boss": the concept of the student's lowest-scoring
+    # voice-test answer, worth double XP. Deferred + server default so code
+    # that never touches it doesn't select or insert it.
+    is_boss: Mapped[bool] = mapped_column(Boolean, server_default=false(), deferred=True)
+
+
+class HomeworkAnswer(IdMixin, TimestampMixin, Base):
+    """A student's own answer to one homework question (POST
+    /me/homework/{id}/questions/{qid}/answer). One row per (question,
+    student): a repeat updates it; XP is awarded only when it's created."""
+
+    __tablename__ = "homework_answers"
+    __table_args__ = (UniqueConstraint("homework_question_id", "student_id"),)
+
+    homework_question_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("homework_questions.id", ondelete="CASCADE")
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    self_rating: Mapped[str] = mapped_column(String)  # "got_it" | "confused"
+    xp_awarded: Mapped[int] = mapped_column(Integer)
 
 
 class StudentHomeworkProgress(IdMixin, Base):

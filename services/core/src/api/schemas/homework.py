@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field
 
 from src.domain.models import BloomLevel, HomeworkDifficulty, HomeworkStatus
@@ -49,6 +51,17 @@ class HomeworkQuestionOut(CamelModel):
     dataset_id: str
     text: str
     answer: str
+    is_boss: bool = False  # auto homework's double-XP question
+
+
+class HomeworkAnswerIn(CamelModel):
+    answer_text: str | None = Field(default=None, max_length=4000)
+    self_rating: Literal["got_it", "confused"]
+
+
+class HomeworkAnswerOut(CamelModel):
+    saved: bool = True
+    xp_awarded: int  # 0 when this question was already answered
 
 
 class UpdateHomeworkQuestionIn(CamelModel):

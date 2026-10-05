@@ -51,6 +51,18 @@ class QuestionDraft:
     dataset_id: uuid.UUID
     source_question_id: uuid.UUID | None = None  # None = generated
     source_uid: str | None = None
+    is_boss: bool = False
+
+
+@dataclass(frozen=True)
+class Focus:
+    """Where a student is weak (homework_autogen.py): the bank is searched
+    on this topic/subtopic, preferring questions on these concepts.
+    `bloom_level` only matters for the boss question - the slot it takes."""
+    topic_id: uuid.UUID | None = None
+    subtopic_id: uuid.UUID | None = None
+    concepts: tuple[str, ...] = ()
+    bloom_level: BloomLevel | None = None
 
 
 async def build_homework_questions(
@@ -67,12 +79,17 @@ async def build_homework_questions(
     release_before_generation: bool = False,
     student_id: uuid.UUID | None = None,
     keep: list[QuestionDraft] = (),
+    focus: Focus | None = None,
+    boss: Focus | None = None,
 ) -> list[QuestionDraft]:
     """`picked_dataset_ids` = the teacher's choice (None = every dataset the
     user may use); `fallback_dataset_id` is recorded on generated questions
     (HomeworkQuestion.dataset_id is NOT NULL); `student_id` = the one student
     this homework is for (auto homework), whose own past homework is excluded too;
-    `keep` = questions staying in this homework (a replacement mustn't repeat them)."""
+    `keep` = questions staying in this homework (a replacement mustn't repeat them);
+    `focus` = the student's weak spots to target; `boss` = one slot (of the
+    boss's Bloom level if the plan has one, else the hardest) goes to the
+    boss's concept and comes back is_boss."""
     school_class = await session.get(SchoolClass, test.class_id)
     grade = school_class.grade if school_class else None
     visible = await visible_datasets(session, user, subject_id=test.subject_id, grade=grade)
@@ -81,29 +98,53 @@ async def build_homework_questions(
 
     slots = plan_slots(total, bloom_weights, difficulty)
     seen = await _seen_uids(session, test.class_id, student_id) | {d.source_uid for d in keep if d.source_uid}
+    focus = focus or Focus()
+    topic_id = focus.topic_id or test.topic_id
+    select_args = dict(dataset_ids=dataset_ids, chapter_id=test.chapter_id, seed=seed, text_only=True)
+    drafts: dict[int, QuestionDraft] = {}
+    picked: list[DatasetQuestion] = []
+
+    boss_slot = None
+    if boss and slots:
+        boss_slot = next((i for i, s in enumerate(slots) if s.bloom_level == boss.bloom_level), len(slots) - 1)
+        hit = (await select_questions(
+            session, **select_args, slots=[slots[boss_slot]], topic_id=boss.topic_id or topic_id,
+            subtopic_id=boss.subtopic_id, exclude_uids=seen, focus_concepts=set(boss.concepts),
+        )).by_slot[0]
+        if hit is not None:
+            drafts[boss_slot] = _from_bank(hit)
+            picked.append(hit)
+            seen = seen | {question_uid(hit)}
+
+    rest = [i for i in range(len(slots)) if i not in drafts]
     selection = await select_questions(
-        session, dataset_ids=dataset_ids, chapter_id=test.chapter_id, topic_id=test.topic_id, slots=slots,
-        exclude_uids=seen, seed=seed, text_only=True,
+        session, **select_args, slots=[slots[i] for i in rest], topic_id=topic_id, subtopic_id=focus.subtopic_id,
+        exclude_uids=seen, focus_concepts=set(focus.concepts),
     )
-    drafts = {i: _from_bank(q) for i, q in enumerate(selection.by_slot) if q is not None}
-    open_slots = [i for i, q in enumerate(selection.by_slot) if q is None]
+    for i, q in zip(rest, selection.by_slot):
+        if q is not None:
+            drafts[i] = _from_bank(q)
+            picked.append(q)
+    open_slots = [i for i in range(len(slots)) if i not in drafts]
     counts = {"bank": len(drafts)}
 
     if open_slots:
-        await _generate(session, test=test, slots=slots, open_slots=open_slots, drafts=drafts,
-                        examples=[q for _, q in selection.picked], fallback_dataset_id=fallback_dataset_id,
+        await _generate(session, test=test, topic_id=topic_id, slots=slots, open_slots=open_slots, drafts=drafts,
+                        examples=picked, fallback_dataset_id=fallback_dataset_id,
                         release_before_generation=release_before_generation, keep=keep)
     counts["generated"] = len(drafts) - counts["bank"]
     still_open = [i for i in range(len(slots)) if i not in drafts]
     if still_open:
-        await _bank_relaxed_fill(session, test=test, dataset_ids=dataset_ids, open_slots=still_open, drafts=drafts,
-                                 exclude_uids=seen)
+        await _bank_relaxed_fill(session, test=test, topic_id=topic_id, dataset_ids=dataset_ids,
+                                 open_slots=still_open, drafts=drafts, exclude_uids=seen)
     counts["relaxed_bank"] = len(drafts) - counts["bank"] - counts["generated"]
     still_open = [i for i in range(len(slots)) if i not in drafts]
     if still_open:
         await _legacy_fill(session, test=test, slots=slots, open_slots=still_open, drafts=drafts,
                            fallback_dataset_id=fallback_dataset_id)
     counts["legacy"] = len(drafts) - sum(counts.values())
+    if boss_slot in drafts:
+        drafts[boss_slot].is_boss = True
     logger.info("homework_questions_built", extra={
         "test_id": str(test.id), "requested": total, "usable_datasets": len(dataset_ids), **counts})
     return [drafts[i] for i in sorted(drafts)]
@@ -160,10 +201,10 @@ def _from_bank(q: DatasetQuestion) -> QuestionDraft:
                          source_question_id=q.id, source_uid=question_uid(q))
 
 
-async def _sections(session: AsyncSession, test: VoiceTest) -> tuple[str, list[dict]]:
+async def _sections(session: AsyncSession, test: VoiceTest, topic_id=None) -> tuple[str, list[dict]]:
     chapter = await session.get(Chapter, test.chapter_id)
-    if test.topic_id:
-        topics = [await session.get(Topic, test.topic_id)]
+    if topic_id:
+        topics = [await session.get(Topic, topic_id)]
     else:
         topics = (await session.execute(select(Topic).where(Topic.chapter_id == test.chapter_id))).scalars().all()
     sections, used = [], 0
@@ -176,11 +217,11 @@ async def _sections(session: AsyncSession, test: VoiceTest) -> tuple[str, list[d
     return (chapter.name if chapter else ""), sections
 
 
-async def _generate(session, *, test, slots, open_slots, drafts, examples, fallback_dataset_id,
+async def _generate(session, *, test, topic_id, slots, open_slots, drafts, examples, fallback_dataset_id,
                     release_before_generation=False, keep=()) -> None:
     if not generation_client.is_configured():
         return
-    chapter_name, sections = await _sections(session, test)
+    chapter_name, sections = await _sections(session, test, topic_id)
     if not sections:
         return  # nothing to ground a question in - leave it to the legacy path
     subject = await session.get(Subject, test.subject_id)
@@ -212,7 +253,7 @@ async def _generate(session, *, test, slots, open_slots, drafts, examples, fallb
                                            dataset_id=fallback_dataset_id)
 
 
-async def _bank_relaxed_fill(session, *, test, dataset_ids, open_slots, drafts, exclude_uids) -> None:
+async def _bank_relaxed_fill(session, *, test, topic_id, dataset_ids, open_slots, drafts, exclude_uids) -> None:
     if not dataset_ids:
         return
     # what's already in this homework counts as used - by uid, since the same
@@ -222,7 +263,7 @@ async def _bank_relaxed_fill(session, *, test, dataset_ids, open_slots, drafts, 
              .where(DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.chapter_id == test.chapter_id,
                     text_only_filter())
              # same topic first, then the rest of the chapter
-             .order_by((DatasetQuestion.topic_id == test.topic_id).desc().nulls_last(), DatasetQuestion.id))
+             .order_by((DatasetQuestion.topic_id == topic_id).desc().nulls_last(), DatasetQuestion.id))
     free = iter(open_slots)
     slot = next(free, None)
     for q in (await session.execute(query)).scalars():
@@ -246,6 +287,11 @@ async def _legacy_fill(session, *, test, slots, open_slots, drafts, fallback_dat
         topic_id=test.topic_id, topic=chapter.name if chapter else "this topic",
         bloom_distribution=weights, count=len(open_slots),
     )
-    for i, q in zip(open_slots, generated):
+    pool = list(generated)
+    for i in open_slots:  # each slot takes a question of its own Bloom level when there is one
+        q = next((g for g in pool if g.bloom_level == slots[i].bloom_level), pool[0] if pool else None)
+        if q is None:
+            break
+        pool.remove(q)
         drafts[i] = QuestionDraft(bloom_level=q.bloom_level, text=q.text, answer=q.answer,
                                   dataset_id=fallback_dataset_id)
