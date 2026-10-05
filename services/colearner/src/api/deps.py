@@ -3,9 +3,15 @@ from fastapi import Header
 from shared.auth import AuthenticatedUser, verify_token
 from shared.errors import UnauthorizedError
 
-from src.config.settings import get_settings
+from src.config.settings import ColearnerSettings, get_settings
 
 _PLAYGROUND_USER = AuthenticatedUser(uid="playground", email=None, claims={})
+
+
+def playground_active(settings: ColearnerSettings) -> bool:
+    """PLAYGROUND_ENABLED is dev-only: it is ignored outright when
+    ENVIRONMENT=production, so a stray flag can never open the no-auth path."""
+    return settings.playground_enabled and settings.environment.lower() != "production"
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -24,7 +30,7 @@ def get_current_user(authorization: str | None = Header(default=None)) -> Authen
     authenticated," not a resolved application profile.
     """
     # A token that IS sent is still verified - only "no header" is waved through.
-    if not authorization and get_settings().playground_enabled:
+    if not authorization and playground_active(get_settings()):
         return _PLAYGROUND_USER
     token = _extract_bearer_token(authorization)
     return verify_token(token)

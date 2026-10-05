@@ -14,14 +14,14 @@ router = APIRouter(prefix="/api/v1", tags=["colearner-cascaded"])
 
 
 @router.post("/colearner/cascaded", response_model=CoLearnerResponse, summary="Cascaded Co-Learner Turn (prototype)")
-async def handle_cascaded_turn(payload: CoLearnerRequest, _user: AuthenticatedUser = Depends(get_current_user)) -> CoLearnerResponse:
+async def handle_cascaded_turn(payload: CoLearnerRequest, user: AuthenticatedUser = Depends(get_current_user)) -> CoLearnerResponse:
     """Same request/response shape as /colearner/chained; see cascaded_service."""
     if payload.session_id:
-        session = session_store.get_session(payload.session_id)
+        session = session_store.get_session(payload.session_id, owner_uid=user.uid)
         if not session:
             raise HTTPException(status_code=404, detail=f"Session '{payload.session_id}' not found or expired.")
     else:
-        session = session_store.create_session(config=payload.config or SessionConfig())
+        session = session_store.create_session(config=payload.config or SessionConfig(), owner_uid=user.uid)
 
     audio = decode_base64_audio(payload.user_audio_base64) if payload.user_audio_base64 else None
     r = await process_cascaded_turn(session, audio, payload.user_text, payload.time_limit_reached, payload.is_hint_request)

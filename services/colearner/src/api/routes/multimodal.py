@@ -1,6 +1,7 @@
-import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from shared.auth import AuthenticatedUser
 from shared.errors import UnauthorizedError
@@ -11,13 +12,15 @@ from src.services.audio_service import decode_base64_audio
 from src.services.multimodal_service import process_multimodal_turn
 from src.services.session_store import session_store
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1", tags=["colearner-multimodal"])
 
 
 @router.post("/colearner/multimodal", response_model=CoLearnerResponse, summary="Multimodal Voice Co-Learner Turn")
 async def handle_multimodal_turn(
     payload: CoLearnerRequest,
-    _user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> CoLearnerResponse:
     """
     Turn-based Multimodal Voice Co-Learner endpoint (direct audio-in to
@@ -28,12 +31,12 @@ async def handle_multimodal_turn(
       Returns student transcript, AI reply, audio base64, and the final report on completion.
     """
     if payload.session_id:
-        session = session_store.get_session(payload.session_id)
+        session = session_store.get_session(payload.session_id, owner_uid=user.uid)
         if not session:
             raise HTTPException(status_code=404, detail=f"Session '{payload.session_id}' not found or expired.")
     else:
         config = payload.config or SessionConfig()
-        session = session_store.create_session(config=config)
+        session = session_store.create_session(config=config, owner_uid=user.uid)
 
     user_bytes = decode_base64_audio(payload.user_audio_base64) if payload.user_audio_base64 else None
 
@@ -77,16 +80,15 @@ async def stream_multimodal_session(websocket: WebSocket, token: str = Query(...
     # chained.py's stream_chained_session for why.
     await websocket.accept()
     try:
-        get_current_user(authorization=f"Bearer {token}")
+        user = get_current_user(authorization=f"Bearer {token}")
     except UnauthorizedError:
         await websocket.close(code=4401)
         return
 
     try:
-        init_data = await websocket.receive_text()
-        init_json = json.loads(init_data)
-        config = SessionConfig(**init_json.get("config", {}))
-        session = session_store.create_session(config=config)
+        # Same pydantic model (and size caps) as the REST endpoint.
+        init = CoLearnerRequest.model_validate_json(await websocket.receive_text())
+        session = session_store.create_session(config=init.config or SessionConfig(), owner_uid=user.uid)
 
         transcript, ai_text, audio_b64, is_completed, report, turn_metrics, cost_report, is_hint_reply = await process_multimodal_turn(session, None)
         await websocket.send_json({
@@ -101,15 +103,11 @@ async def stream_multimodal_session(websocket: WebSocket, token: str = Query(...
         })
 
         while not session.is_completed:
-            msg_data = json.loads(await websocket.receive_text())
-            b64_audio = msg_data.get("user_audio_base64")
-            user_text = msg_data.get("user_text")
-            user_bytes = decode_base64_audio(b64_audio) if b64_audio else None
-            time_limit_reached = bool(msg_data.get("time_limit_reached", False))
-            is_hint_request = bool(msg_data.get("is_hint_request", False))
+            msg = CoLearnerRequest.model_validate_json(await websocket.receive_text())
+            user_bytes = decode_base64_audio(msg.user_audio_base64) if msg.user_audio_base64 else None
 
             transcript, ai_text, audio_b64, is_completed, report, turn_metrics, cost_report, is_hint_reply = await process_multimodal_turn(
-                session, user_bytes, user_text, time_limit_reached, is_hint_request
+                session, user_bytes, msg.user_text, msg.time_limit_reached, msg.is_hint_request
             )
             await websocket.send_json({
                 "event": "ai_turn" if not is_completed else "session_completed",
@@ -126,5 +124,10 @@ async def stream_multimodal_session(websocket: WebSocket, token: str = Query(...
             })
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        await websocket.send_json({"event": "error", "detail": str(e)})
+    except ValidationError:
+        await websocket.send_json({"event": "error", "detail": "Invalid or oversized message."})
+    except Exception:
+        # Never echo exception text to the client - it can carry upstream
+        # provider details. The log has the full traceback.
+        logger.exception("colearner_ws_turn_failed")
+        await websocket.send_json({"event": "error", "detail": "Something went wrong. Please try again."})

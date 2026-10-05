@@ -12,15 +12,25 @@ generic paragraph the same shape as before this feature existed.
 """
 
 import json
+import logging
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from src.config.settings import get_settings
 
 LLM_MODEL = "gpt-4o-mini"
+# Per attempt; 3 attempts (max_retries=2) + backoff stay under the 30s
+# Core waits on this call (colearner_insight_client.py).
+_TIMEOUT_SECONDS = 8.0
+
+logger = logging.getLogger(__name__)
 
 _settings = get_settings()
-openai_client = OpenAI(api_key=_settings.openai_api_key) if _settings.openai_api_key else None
+openai_client = (
+    AsyncOpenAI(api_key=_settings.openai_api_key, timeout=_TIMEOUT_SECONDS, max_retries=2)
+    if _settings.openai_api_key
+    else None
+)
 
 
 def _fallback(topic: str) -> dict:
@@ -33,7 +43,7 @@ def _fallback(topic: str) -> dict:
     }
 
 
-def generate_homework_insight(
+async def generate_homework_insight(
     *,
     topic: str,
     grade: str,
@@ -73,7 +83,7 @@ Return 1-2 references. Be concrete and grounded in the context above, not vague 
 """
 
     try:
-        resp = openai_client.chat.completions.create(
+        resp = await openai_client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {
@@ -94,6 +104,6 @@ Return 1-2 references. Be concrete and grounded in the context above, not vague 
             "key_idea_body": data.get("key_idea_body") or fallback["key_idea_body"],
             "connection_prompt": data.get("connection_prompt") or fallback["connection_prompt"],
         }
-    except Exception as ex:
-        print(f"Homework insight generation error: {ex}")
+    except Exception:
+        logger.exception("homework_insight_generation_failed")
         return _fallback(topic)
