@@ -121,58 +121,29 @@ def _build_user_message(
 
 ASSESSOR_CONTENT_SCHEMA = {
     "type": "object",
-    "properties": {
-        "reference_questions": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "textbook_context": {"type": "string"},
-    },
-    "required": ["reference_questions", "textbook_context"],
+    "properties": {"textbook_context": {"type": "string"}},
+    "required": ["textbook_context"],
     "additionalProperties": False,
 }
 
 ASSESSOR_SYSTEM_PROMPT = """You are writing grounding material for a spoken "Co-Learner & Study Companion" -
-an AI that has a live voice conversation with a student, exploring a chapter
-through creative real-world scenario questions rather than a written exam.
+an AI that has a live voice conversation with a student about a chapter.
 
 You are given topics/subtopics retrieved from the actual NCERT textbook -
 each with its own textbook text, worked examples, and activities. Produce
-two things, strictly grounded in the given content only - do not introduce
-facts, numbers, or terminology not present in the provided context:
-
-1. `reference_questions`: a list of creative, real-world scenario questions
-   (household gadgets, appliances, vehicles, weather, sports, design
-   puzzles) that test the target Bloom's levels - inspirational raw
-   material a live conversational agent will draw from and rephrase on the
-   fly, not a fixed script to recite verbatim. Match the requested count.
-2. `textbook_context`: a compact prose/bullet summary of the grounding
-   topics/subtopics (key facts, formulas, relationships) written in plain
-   spoken-friendly language - no LaTeX, no raw symbols - suitable to hand
-   directly to that conversational agent as its factual grounding."""
+`textbook_context`: a compact prose/bullet summary of the grounding
+topics/subtopics (key facts, formulas, relationships) written in plain
+spoken-friendly language - no LaTeX, no raw symbols - suitable to hand
+directly to that conversational agent as its factual grounding. Use only
+the given content - do not introduce facts, numbers, or terminology not
+present in it. Do not write any questions."""
 
 
-def _build_assessor_user_message(
-    *, concept_context: list[dict], bloom_levels: list[str], num_questions: int
-) -> str:
-    parts = [
-        f"Generate {num_questions} reference scenario questions.",
-        f"Target Bloom's Taxonomy levels: {json.dumps(bloom_levels)}",
-        "\nAvailable topics/subtopics (grounding context):",
-        json.dumps(concept_context, indent=2),
-    ]
-    return "\n".join(parts)
-
-
-async def generate_assessor_content(
-    *, api_key: str, concept_context: list[dict], bloom_levels: list[str], num_questions: int
-) -> dict:
-    """Grounded reference questions + a spoken-friendly context summary for
-    the colearner voice pipeline's SessionConfig (reference_questions/
-    textbook_context - see services/colearner/src/domain/schemas.py). Same
-    one-call Structured-Outputs approach as generate_questions above; a
-    distinct schema/prompt since this is scenario material for a live
-    conversation, not written exam questions with answers/difficulty/type.
+async def generate_assessor_content(*, api_key: str, concept_context: list[dict]) -> dict:
+    """Grounded spoken-friendly textbook context for a Voice Test. The test's
+    questions now come from the school's question datasets via the
+    generation service, so this no longer invents any: reference_questions
+    is always [] (kept for core's kg_client contract).
     """
     if not concept_context:
         return {"reference_questions": [], "textbook_context": ""}
@@ -182,12 +153,7 @@ async def generate_assessor_content(
         max_completion_tokens=MAX_COMPLETION_TOKENS,
         messages=[
             {"role": "system", "content": ASSESSOR_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": _build_assessor_user_message(
-                    concept_context=concept_context, bloom_levels=bloom_levels, num_questions=num_questions
-                ),
-            },
+            {"role": "user", "content": "Grounding topics/subtopics:\n" + json.dumps(concept_context, indent=2)},
         ],
         response_format={
             "type": "json_schema",
@@ -202,7 +168,7 @@ async def generate_assessor_content(
     message = response.choices[0].message
     if message.refusal or message.content is None:
         raise RuntimeError(f"Model refused or returned no content: {message.refusal}")
-    return json.loads(message.content)
+    return {"reference_questions": [], "textbook_context": json.loads(message.content)["textbook_context"]}
 
 
 async def generate_questions(

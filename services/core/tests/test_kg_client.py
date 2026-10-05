@@ -61,3 +61,20 @@ async def test_get_curriculum_tree_raises_service_unavailable_on_connection_erro
 
     with pytest.raises(kg_client.KgServiceUnavailableError):
         await kg_client.get_curriculum_tree(board="CBSE", grade=10, subject="Science")
+
+
+@pytest.mark.asyncio
+async def test_generate_assessor_content_returns_context_and_no_reference_questions(monkeypatch):
+    monkeypatch.setattr(kg_client, "_base_url", lambda: "http://kg-test")
+
+    async def fake_post(self, path, json=None):
+        assert path == "/voice-tests/generate"
+        return _FakeResponse(200, {"textbook_context": "Rusting is...", "reference_questions": ["stale"]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    result = await kg_client.generate_assessor_content(
+        subject="Science", board="CBSE", grade=10, chapters=[{"number": 1, "name": "Ch 1"}],
+        topic_names=[], bloom_levels=["APPLY"], num_questions=5,
+    )
+    assert result == {"textbook_context": "Rusting is...", "reference_questions": []}
