@@ -24,6 +24,7 @@ from src.api.routes import (
     homework,
     journey,
     leaderboard,
+    mcq_test,
     practice_bank,
     profile,
     progress,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard.router)
     app.include_router(gamification.router)
     app.include_router(journey.router)
+    app.include_router(mcq_test.router)
     app.include_router(realtime.router)
     # Super Admin / School Admin
     app.include_router(admin.router)

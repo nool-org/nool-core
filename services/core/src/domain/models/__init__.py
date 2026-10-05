@@ -41,6 +41,7 @@ from .import_job import ImportJob, ImportJobType
 from .practice_bank import PracticeBankEntry
 from .reporting import ReportConfiguration, ReportShare
 from .leaderboard import StudentPoints
+from .mcq_test import McqTest, McqTestQuestion
 from .question_paper import (
     PaperDifficultyLevel,
     QuestionPaper,
@@ -119,6 +120,8 @@ __all__ = [
     "ReportConfiguration",
     "ReportShare",
     "StudentPoints",
+    "McqTest",
+    "McqTestQuestion",
     "PaperDifficultyLevel",
     "QuestionPaper",
     "QuestionPaperBloomDistribution",
