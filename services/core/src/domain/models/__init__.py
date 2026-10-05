@@ -4,7 +4,7 @@ side effect before pointing Alembic's target_metadata at Base.metadata.
 """
 
 from ..base import Base
-from .ai_assessor import AiAssessorSession, AiAssessorSessionBloomLevel
+from .ai_assessor import AiAssessorSession, AiAssessorSessionBloomLevel, AiAssessorSessionRecord
 from .assistant import AssistantMessage, ChatRole
 from .bloom import BloomLevel
 from .curriculum import Chapter, GradeSubject, SchoolCurriculum, Subject, SubjectGrade, Subtopic, Topic
@@ -56,12 +56,14 @@ from .question_paper import (
 )
 from .roster import SchoolClass, SchoolGrade, StudentProfile, TeacherClassAssignment
 from .support_ticket import SupportTicket, SupportTicketComment, TicketStatus
-from .test_result import StudentTestResult, StudentTestResultBloomScore
+from .test_result import StudentTestResult, StudentTestResultBloomScore, StudentTestResultTopicScore
 from .voice_test import (
     AssignmentTargetMode,
     TestStatus,
     VoiceTest,
     VoiceTestBloomLevel,
+    VoiceTestQuestion,
+    VoiceTestQuestionStatus,
     VoiceTestTargetStudent,
 )
 
@@ -69,6 +71,7 @@ __all__ = [
     "Base",
     "AiAssessorSession",
     "AiAssessorSessionBloomLevel",
+    "AiAssessorSessionRecord",
     "AssistantMessage",
     "ChatRole",
     "BloomLevel",
@@ -136,9 +139,12 @@ __all__ = [
     "TicketStatus",
     "StudentTestResult",
     "StudentTestResultBloomScore",
+    "StudentTestResultTopicScore",
     "AssignmentTargetMode",
     "TestStatus",
     "VoiceTest",
     "VoiceTestBloomLevel",
+    "VoiceTestQuestion",
+    "VoiceTestQuestionStatus",
     "VoiceTestTargetStudent",
 ]

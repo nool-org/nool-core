@@ -1,5 +1,7 @@
+import uuid
+
 from src.domain.models import BloomLevel
-from src.services.evaluation_service import evaluate_colearner_session
+from src.services.evaluation_service import evaluate_colearner_session, topic_scores
 
 
 def test_returns_none_for_empty_report():
@@ -46,3 +48,16 @@ def test_clamps_out_of_range_scores():
     assert result is not None
     mastery_percent, _ = result
     assert mastery_percent == 100
+
+
+def test_topic_scores_map_question_numbers_to_topics():
+    t1, t2 = uuid.uuid4(), uuid.uuid4()
+    report = {"qa_transcripts": [
+        {"question_number": 1, "score_percent": 80, "student_response": "x"},
+        {"question_number": 2, "score_percent": 41, "student_response": " "},
+        {"question_number": 3, "score_percent": 150, "student_response": "y"},
+        {"question_number": 4, "score_percent": 10, "student_response": "z"},  # topic-less question
+        {"question_number": 5, "student_response": "unscored"},
+    ]}
+    assert topic_scores(report, {1: t1, 2: t1, 3: t2, 4: None, 5: t2}) == {t1: (60, 1), t2: (100, 1)}
+    assert topic_scores(None, {1: t1}) == {}

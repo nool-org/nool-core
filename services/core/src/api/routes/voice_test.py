@@ -1,42 +1,43 @@
-import logging
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ConflictError, ForbiddenError, ValidationError
+from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 
 from src.api.deps import get_db_session, require_feature, require_role
 from src.api.schemas.common import ListEnvelope
 from src.api.schemas.roster import AssignmentTarget
-from src.api.schemas.voice_test import CreateTestIn, VoiceTestOut
+from src.api.schemas.voice_test import (
+    CreateTestIn,
+    UpdateVoiceTestQuestionIn,
+    VoiceTestOut,
+    VoiceTestQuestionListOut,
+    VoiceTestQuestionOut,
+)
 from src.domain.models import (
     AssignmentTargetMode,
     Chapter,
     Feature,
     Role,
-    School,
     SchoolClass,
     StudentProfile,
-    Subject,
     TeacherClassAssignment,
     TestStatus,
     Topic,
     User,
     VoiceTest,
     VoiceTestBloomLevel,
+    VoiceTestQuestion,
     VoiceTestTargetStudent,
 )
-from src.repositories import get_session
 from src.services.subject_grades import ensure_subjects_enabled_for_school
 from src.repositories.lookups import ensure_students_in_class, get_test_for_teacher
 from src.repositories.roster_repository import teaches_class_subject
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_tests
-from src.services import kg_client
-
-logger = logging.getLogger(__name__)
+from src.services import voice_test_prep
 
 router = APIRouter(prefix="/api/v1", tags=["voice-tests"])
 
@@ -71,64 +72,38 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> VoiceTestOut:
     )
 
 
-async def _generate_reference_content(
-    session: AsyncSession, test: VoiceTest, bloom_levels: list[str]
-) -> None:
-    """Grounds this Test's colearner session in real curriculum content -
-    see kg's services/kg/src/api/routes/voice_test.py:generate. Deliberately
-    swallows any failure (KG service down, no OPENAI_API_KEY there, chapter
-    never synced from KG) rather than blocking test creation on it: a
-    missing reference_questions/textbook_context just means the AI Assessor
-    session falls back to colearner's own generic defaults (see
-    services/colearner/src/services/chained_service.py's DEFAULT_CONTEXT).
-    """
-    chapter = await session.get(Chapter, test.chapter_id)
-    if chapter is None or chapter.order_index is None:
-        return  # Never synced from KG (see Chapter.order_index's docstring) - nothing to ground against.
+def _question_out(question: VoiceTestQuestion) -> VoiceTestQuestionOut:
+    return VoiceTestQuestionOut(
+        id=str(question.id),
+        voice_test_id=str(question.voice_test_id),
+        order=question.order,
+        dataset_question_id=str(question.dataset_question_id) if question.dataset_question_id else None,
+        bloom_level=question.bloom_level,
+        topic_id=str(question.topic_id) if question.topic_id else None,
+        subtopic_id=str(question.subtopic_id) if question.subtopic_id else None,
+        concepts=question.concepts or [],
+        original_text=question.original_text,
+        reworded_text=question.reworded_text,
+        spoken_text=question.spoken_text,
+        expected_points=question.expected_points or [],
+        misconceptions=question.misconceptions or [],
+        hints=question.hints or [],
+        status=question.status,
+    )
 
-    subject = await session.get(Subject, test.subject_id)
-    school_class = await session.get(SchoolClass, test.class_id)
-    school = await session.get(School, school_class.school_id) if school_class else None
-    topic = await session.get(Topic, test.topic_id) if test.topic_id else None
-    if subject is None or school_class is None or school is None:
-        return
 
+async def _editable_question(session: AsyncSession, test_id: str, question_id: str, user: User) -> tuple[VoiceTest, VoiceTestQuestion]:
+    test = await get_test_for_teacher(session, test_id, user)
     try:
-        result = await kg_client.generate_assessor_content(
-            subject=subject.name,
-            board=school.board,
-            grade=school_class.grade,
-            chapters=[{"number": chapter.order_index, "name": chapter.name}],
-            topic_names=[topic.name] if topic else [],
-            bloom_levels=bloom_levels,
-            num_questions=max(len(bloom_levels), 2),
-        )
-    except Exception:
-        logger.warning("voice_test_reference_content_generation_failed", extra={"test_id": str(test.id)})
-        return
-
-    test.reference_questions = result.get("reference_questions") or None
-    test.textbook_context = result.get("textbook_context") or None
-    await session.commit()
-
-
-async def _generate_reference_content_in_background(test_id: uuid.UUID, bloom_levels: list[str]) -> None:
-    """FastAPI BackgroundTasks entrypoint - runs after create_test's response
-    has already been sent (see its `background_tasks.add_task(...)` call).
-
-    A grounded generation call to kg (a real OpenAI call) reliably takes
-    10-25s - previously awaited inline before create_test returned, which
-    routinely blew past nool-apps' apiClient.ts's 10s REQUEST_TIMEOUT_MS,
-    so the app showed test creation as failed/hung even though Core went on
-    to create the test successfully a few seconds later. Opens its own
-    session via get_session() rather than reusing create_test's - that one
-    is closed by the time this runs, well after the response.
-    """
-    async with get_session() as session:
-        test = await session.get(VoiceTest, test_id)
-        if test is None:
-            return  # Deleted/unreachable between request and background run - nothing to ground.
-        await _generate_reference_content(session, test, bloom_levels)
+        question = await session.get(VoiceTestQuestion, uuid.UUID(question_id))
+    except ValueError:
+        question = None
+    if question is None or question.voice_test_id != test.id:
+        raise NotFoundError("Question not found.")
+    if test.completed_count:
+        # every student must be asked the same questions
+        raise ConflictError("Students have already taken this test - its questions can't change now.")
+    return test, question
 
 
 @router.get("/tests")
@@ -233,15 +208,10 @@ async def create_test(
     await session.commit()
     await session.refresh(test)
 
-    # Grounding the colearner session in real curriculum content is a real
-    # LLM call (10-25s) - runs after this response is sent, not before, so
-    # "Create" doesn't sit there for that long (see
-    # _generate_reference_content_in_background's docstring). The test is
-    # immediately usable either way; reference_questions/textbook_context
-    # just fill in a few seconds later if generation succeeds.
-    background_tasks.add_task(
-        _generate_reference_content_in_background, test.id, [level.value for level in body.bloom_levels]
-    )
+    # Picking + rewording the questions are LLM calls (10-60s) - run after
+    # this response is sent so "Create" stays fast (the app's client times
+    # out at 10s). The questions show up in GET /tests/{id}/questions once done.
+    background_tasks.add_task(voice_test_prep.prepare_in_background, test.id, user.id)
 
     return await _serialize(session, test)
 
@@ -260,3 +230,48 @@ async def schedule_test(
     await session.commit()
     await session.refresh(test)
     return await _serialize(session, test)
+
+
+@router.get("/tests/{test_id}/questions", summary="The questions every student of the test is asked")
+async def list_test_questions(
+    test_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> VoiceTestQuestionListOut:
+    test = await get_test_for_teacher(session, test_id, user)
+    questions = (await session.execute(
+        select(VoiceTestQuestion).where(VoiceTestQuestion.voice_test_id == test.id).order_by(VoiceTestQuestion.order)
+    )).scalars().all()
+    return VoiceTestQuestionListOut(items=[_question_out(q) for q in questions])
+
+
+@router.patch("/tests/{test_id}/questions/{question_id}", summary="Edit or approve a question")
+async def update_test_question(
+    test_id: str,
+    question_id: str,
+    body: UpdateVoiceTestQuestionIn,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> VoiceTestQuestionOut:
+    _test, question = await _editable_question(session, test_id, question_id, user)
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(question, field, value.strip() if isinstance(value, str) else value)
+    await session.commit()
+    return _question_out(question)
+
+
+@router.post("/tests/{test_id}/questions/{question_id}/swap", summary="Replace a question with another of its level")
+async def swap_test_question(
+    test_id: str,
+    question_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> VoiceTestQuestionOut:
+    test, question = await _editable_question(session, test_id, question_id, user)
+    if not await voice_test_prep.swap_question(session, test, question, user):
+        raise ConflictError("No other question of this Bloom level is available for this chapter.")
+    await session.commit()
+    return _question_out(question)

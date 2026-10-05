@@ -31,3 +31,22 @@ class StudentTestResultBloomScore(Base):
     )
     bloom_level: Mapped[BloomLevel] = mapped_column(SAEnum(BloomLevel, name="bloom_level"))
     percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class StudentTestResultTopicScore(Base):
+    """Per-topic score of one result - the test's questions mapped to their
+    topics (VoiceTestQuestion.topic_id). `answered` = questions of that topic
+    the student actually answered."""
+
+    __tablename__ = "student_test_result_topic_scores"
+    __table_args__ = (UniqueConstraint("student_test_result_id", "topic_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    student_test_result_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("student_test_results.id")
+    )
+    topic_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"))
+    percent: Mapped[int] = mapped_column(Integer)
+    answered: Mapped[int] = mapped_column(Integer)
