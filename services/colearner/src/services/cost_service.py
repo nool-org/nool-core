@@ -15,6 +15,11 @@ MODEL_PRICING = {
         "input_per_million": 0.15,
         "output_per_million": 0.60,
     },
+    "gpt-5-mini": {
+        "input_per_million": 0.25,
+        "cached_input_per_million": 0.025,
+        "output_per_million": 2.00,
+    },
     "gpt-4o": {
         "input_per_million": 2.50,
         "output_per_million": 10.00,

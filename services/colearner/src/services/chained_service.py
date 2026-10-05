@@ -15,6 +15,7 @@ from src.services.cost_service import (
     generate_cost_report,
     record_turn_metrics,
 )
+from src.services.evaluation import grade_transcript
 from src.services.session_store import SessionState
 
 # Fixed model-specific data for the Chained pipeline (Whisper STT -> OpenAI
@@ -117,74 +118,8 @@ async def transcribe_audio_bytes(wav_bytes: bytes, hint: str = "") -> str:
 
 
 async def generate_bloom_report(session: SessionState, full_transcript: str) -> Dict[str, Any]:
-    """Generates structured Bloom's Taxonomy Cognitive Mapper Report adhering to notebook schema."""
-    config = session.config
-
-    mapping_prompt = f"""Based on the following complete oral assessment transcript between the Co-Learner and the student on '{config.chapter_name}', generate a structured JSON evaluation report adhering strictly to this schema:
-
-```json
-{{
-  "session_summary": {{
-    "grade": "{config.grade}",
-    "subject": "{config.subject}",
-    "chapter": "{config.chapter_name}",
-    "total_questions_asked": {config.num_questions},
-    "overall_feedback": "<1-2 sentences summarizing student engagement and conceptual understanding>",
-    "overall_mastery_percent": <0-100 integer, the average of every qa_transcripts entry's score_percent>
-  }},
-  "qa_transcripts": [
-    {{
-      "question_number": 1,
-      "blooms_attribute": "<Understanding / Applying / Analyzing / Remembering / Evaluating / Creating>",
-      "question_asked": "<Exact question asked by Co-Learner>",
-      "student_response": "<Student response summary or spoken answer>",
-      "probing_or_hints_given": "<Any hints/probes given or null>",
-      "score_percent": <0-100 integer, how well the response demonstrates mastery of this question's target Bloom's level and the underlying concept - not just "did they answer">,
-      "is_substantively_correct": <true/false, a stricter pass/fail read of the same response>
-    }}
-  ]
-}}
-```
-
-CRITICAL INSTRUCTIONS:
-- Include all substantive questions asked and the student's corresponding responses in 'qa_transcripts'.
-- Do NOT include the introductory readiness exchange ("Are you ready to begin?") as an assessment question.
-- Accurately map each question and answer to its target Bloom's Taxonomy level (Remembering, Understanding, Applying, Analyzing, Evaluating, Creating).
-- Grade each response on its merits: a confident but wrong or vague answer scores low; a correct, well-reasoned answer scores high. Be an honest evaluator, not a cheerleader.
-
-TRANSCRIPT:
-\"\"\"
-{full_transcript}
-\"\"\"
-"""
-    try:
-        resp = await openai_client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "You are an expert Bloom's Taxonomy educational mapper. Output strictly valid JSON."},
-                {"role": "user", "content": mapping_prompt}
-            ],
-            response_format={"type": "json_object"}
-        )
-        report_data = json.loads(resp.choices[0].message.content)
-
-        # Record tokens consumed by evaluation LLM call
-        eval_in_toks = count_tokens(mapping_prompt, LLM_MODEL)
-        eval_out_toks = count_tokens(json.dumps(report_data), LLM_MODEL)
-        eval_metrics = calculate_turn_cost(LLM_MODEL, eval_in_toks, eval_out_toks, stt_seconds=0.0, tts_chars=0)
-        record_turn_metrics(session, eval_metrics)
-    except Exception as ex:
-        print(f"Report generation error: {ex}")
-        report_data = {
-            "session_summary": {
-                "grade": config.grade,
-                "subject": config.subject,
-                "chapter": config.chapter_name,
-                "total_questions_asked": config.num_questions,
-                "overall_feedback": "Session concluded successfully."
-            },
-            "qa_transcripts": []
-        }
+    """Grades the session with the strict grader (src/services/evaluation) and saves transcript + report."""
+    report_data = await grade_transcript(session, full_transcript)
 
     # Save transcript and report files to reports/
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

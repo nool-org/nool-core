@@ -1,0 +1,202 @@
+"""Strict Bloom grader: gpt-5-mini via Structured Outputs (strict JSON schema).
+
+The model grades each answer; every aggregate (mastery, per-Bloom means,
+hint penalty) is computed here in code, never trusted to the model.
+"""
+import json
+import logging
+from statistics import mean
+from typing import Any, Dict, List, Optional
+
+from openai import AsyncOpenAI
+
+from src.config.settings import get_settings
+from src.services.cost_service import MODEL_PRICING, calculate_turn_cost, record_turn_metrics
+from src.services.session_store import SessionState
+
+logger = logging.getLogger(__name__)
+
+GRADER_MODEL = "gpt-5-mini"
+PROMPT_VERSION = "strict-v2"
+HINT_PENALTY = 10      # points per hint used
+HINT_PENALTY_MAX = 20  # per answer
+
+_client: Optional[AsyncOpenAI] = None
+
+_ANSWER_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "question_number": {"type": "integer"},
+        "blooms_attribute": {
+            "type": "string",
+            "enum": ["Remembering", "Understanding", "Applying", "Analyzing", "Evaluating", "Creating"],
+        },
+        "question_asked": {"type": "string"},
+        "student_response": {"type": "string"},
+        "probing_or_hints_given": {"type": ["string", "null"]},
+        "points_covered": {"type": "array", "items": {"type": "string"}},
+        "misconception": {"type": ["string", "null"]},
+        "score_percent": {"type": "integer"},
+        "is_substantively_correct": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number"},
+        "hints_used": {"type": "integer"},
+    },
+    "required": [
+        "question_number", "blooms_attribute", "question_asked", "student_response", "probing_or_hints_given",
+        "points_covered", "misconception", "score_percent", "is_substantively_correct", "reason", "confidence",
+        "hints_used",
+    ],
+}
+
+RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "bloom_grading",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "overall_feedback": {"type": "string"},
+                "answers": {"type": "array", "items": _ANSWER_SCHEMA},
+            },
+            "required": ["overall_feedback", "answers"],
+        },
+    },
+}
+
+SYSTEM_PROMPT = """You are an honest, strict evaluator of a school student's oral answers, mapping each to Bloom's Taxonomy. You are not a cheerleader.
+
+For every substantive question the Co-Learner asked, and the student's answer to it, return one entry:
+- question_number: 1, 2, 3... in the order asked.
+- blooms_attribute: the Bloom's level the question targets.
+- question_asked: the question itself (without the Co-Learner's acknowledgement of the previous answer).
+- student_response: the student's answer, close to verbatim.
+- probing_or_hints_given: any hint or probe the Co-Learner gave on this question, else null.
+- points_covered: the correct key points the answer actually states (empty if none).
+- misconception: the specific wrong idea the answer contains, else null.
+- score_percent: 0-100 for how well the answer shows correct understanding at the target level.
+- is_substantively_correct: true only if the core idea of the answer is scientifically/factually correct.
+- reason: one line justifying the score.
+- confidence: 0-1, how sure you are of this verdict.
+- hints_used: number of hints the student was given on this question (0 if none).
+
+Rules:
+- Judge correctness against standard textbook knowledge for the stated grade and subject. Check every claim.
+- A confident but wrong answer scores low (under 40) and is NOT substantively correct. Fluency, length and keywords are not correctness.
+- A vague, evasive, or "I don't know" answer scores low and is NOT substantively correct.
+- Any answer whose central claim is wrong is NOT substantively correct, even if parts of it are right.
+- A claim that breaks a basic principle (e.g. energy being created or used up, charge being consumed) is a misconception, even if worded casually.
+- Judge directions, conventions and definitions by the textbook for the stated grade: loose wording that makes the stated fact false (e.g. calling electron flow "electricity" or "current" and giving the wrong direction for it) is wrong.
+- A correct but shallow answer is substantively correct with a moderate score; a correct, well-reasoned answer scores high.
+- Do NOT include the opening readiness exchange (e.g. "Are you ready to begin?") or closing small talk.
+- If a rubric is given, use its expected key points and known misconceptions for that question.
+
+overall_feedback: 1-2 sentences on the student's engagement and conceptual understanding."""
+
+
+def _get_client() -> Optional[AsyncOpenAI]:
+    global _client
+    key = get_settings().openai_api_key
+    if _client is None and key:
+        _client = AsyncOpenAI(api_key=key, timeout=90.0, max_retries=2)
+    return _client
+
+
+def _user_prompt(transcript: str, grade: str, subject: str, chapter: str, rubric: Optional[List[Dict[str, Any]]]) -> str:
+    rubric_part = (
+        f"\nRUBRIC (expected key points and known misconceptions per question):\n{json.dumps(rubric, ensure_ascii=False)}\n"
+        if rubric else ""
+    )
+    return (
+        f"Grade: {grade}\nSubject: {subject}\nChapter: {chapter}\n{rubric_part}\n"
+        f'TRANSCRIPT:\n"""\n{transcript}\n"""'
+    )
+
+
+def penalized_score(score: Any, hints: Any) -> int:
+    score = max(0, min(100, int(score or 0)))
+    return max(0, score - min(HINT_PENALTY * max(0, int(hints or 0)), HINT_PENALTY_MAX))
+
+
+def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str, num_questions: int) -> Dict[str, Any]:
+    """Turns the model's per-answer grades into the report core consumes, aggregates computed here."""
+    qa = []
+    for a in graded.get("answers") or []:
+        qa.append({
+            **a,
+            "raw_score_percent": a["score_percent"],
+            "score_percent": penalized_score(a["score_percent"], a.get("hints_used")),
+            "confidence": max(0.0, min(1.0, float(a.get("confidence") or 0))),
+        })
+    by_level: Dict[str, List[int]] = {}
+    for a in qa:
+        by_level.setdefault(a["blooms_attribute"], []).append(a["score_percent"])
+    return {
+        "session_summary": {
+            "grade": grade,
+            "subject": subject,
+            "chapter": chapter,
+            "total_questions_asked": num_questions,
+            "overall_feedback": graded.get("overall_feedback") or "",
+            "overall_mastery_percent": round(mean(a["score_percent"] for a in qa)) if qa else 0,
+            "per_bloom": {level: round(mean(s)) for level, s in by_level.items()},
+        },
+        "qa_transcripts": qa,
+        "model": GRADER_MODEL,
+        "prompt_version": PROMPT_VERSION,
+    }
+
+
+def _record_cost(session: SessionState, usage: Any) -> None:
+    if not usage:
+        return
+    cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+    metrics = calculate_turn_cost(GRADER_MODEL, usage.prompt_tokens, usage.completion_tokens)
+    # calculate_turn_cost bills all input at the uncached rate - credit the cached part back
+    pricing = MODEL_PRICING[GRADER_MODEL]
+    saving = cached / 1_000_000 * (pricing["input_per_million"] - pricing["cached_input_per_million"])
+    metrics["input_cost_usd"] = round(metrics["input_cost_usd"] - saving, 7)
+    metrics["turn_cost_usd"] = round(metrics["turn_cost_usd"] - saving, 6)
+    metrics["cached_input_tokens"] = cached
+    record_turn_metrics(session, metrics)
+
+
+async def grade_transcript(
+    session: SessionState,
+    transcript: str,
+    rubric: Optional[List[Dict[str, Any]]] = None,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Grades a full session transcript. Records the call's real cost on `session`.
+
+    rubric: optional [{question_number, key_points: [...], misconceptions: [...]}].
+    Never fakes success: on failure returns qa_transcripts [] plus `grading_error`.
+    """
+    config = session.config
+    report_args = (config.grade, config.subject, config.chapter_name, config.num_questions)
+    try:
+        client = client or _get_client()
+        if client is None:
+            raise RuntimeError("openai_api_key is not configured")
+        resp = await client.chat.completions.create(
+            model=GRADER_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": _user_prompt(transcript, *report_args[:3], rubric)},
+            ],
+            response_format=RESPONSE_FORMAT,
+        )
+        _record_cost(session, getattr(resp, "usage", None))
+        msg = resp.choices[0].message
+        if getattr(msg, "refusal", None):
+            raise RuntimeError(f"grader refused: {msg.refusal}")
+        return build_report(json.loads(msg.content), *report_args)
+    except Exception as ex:
+        logger.exception("Bloom grading failed for session %s", session.session_id)
+        report = build_report({}, *report_args)
+        report["session_summary"]["overall_mastery_percent"] = None
+        report["grading_error"] = f"{type(ex).__name__}: {ex}"
+        return report
