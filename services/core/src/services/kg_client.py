@@ -130,13 +130,16 @@ async def generate_assessor_content(
     bloom_levels: list[str],
     num_questions: int,
 ) -> dict:
-    """Used by POST /tests (voice_test.py's create_test) - grounded
-    reference questions + a spoken-friendly context summary for the
-    colearner pipeline's SessionConfig. See generate_paper_questions'
-    docstring for why subject/board/grade must be passed explicitly; same
-    reasoning applies here.
+    """Used by POST /tests (voice_test.py's create_test) - a grounded,
+    spoken-friendly textbook context summary for the colearner's
+    SessionConfig. Returns {"textbook_context": str, "reference_questions": []}:
+    the test's questions now come from datasets via the generation service,
+    so kg no longer generates any and reference_questions is always empty
+    (kept so existing callers don't break). bloom_levels/num_questions are
+    still sent for request compatibility. See generate_paper_questions'
+    docstring for why subject/board/grade must be passed explicitly.
     """
-    return await _post(
+    body = await _post(
         "/voice-tests/generate",
         {
             "subject": subject,
@@ -149,6 +152,7 @@ async def generate_assessor_content(
         },
         timeout=120.0,
     )
+    return {"textbook_context": body.get("textbook_context") or "", "reference_questions": []}
 
 
 async def generate_replacement_candidates(

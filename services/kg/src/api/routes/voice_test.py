@@ -12,11 +12,11 @@ router = APIRouter(prefix="/voice-tests", tags=["voice-tests"])
 
 @router.post("/generate", response_model=GenerateAssessorContentOut)
 async def generate(body: GenerateAssessorContentIn) -> GenerateAssessorContentOut:
-    """Grounded reference questions + spoken-friendly context for a Voice
-    Test, generated once at creation time (see nool-core's
-    src/api/routes/voice_test.py:create_test) and handed to the colearner
-    pipeline's SessionConfig on every attempt - same shape/reasoning as
-    question_paper.py's /question-papers/generate.
+    """Grounded spoken-friendly textbook context for a Voice Test, generated
+    once at creation time (see nool-core's src/api/routes/voice_test.py:
+    create_test). Questions come from datasets via the generation service,
+    so reference_questions is always []; bloom_levels/num_questions are
+    accepted for request compatibility and ignored.
     """
     settings = get_settings()
     if not settings.openai_api_key:
@@ -32,7 +32,5 @@ async def generate(body: GenerateAssessorContentIn) -> GenerateAssessorContentOu
     result = await generate_assessor_content(
         api_key=settings.openai_api_key,
         concept_context=context,
-        bloom_levels=body.bloom_levels,
-        num_questions=body.num_questions,
     )
     return GenerateAssessorContentOut(**result)

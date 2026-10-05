@@ -96,15 +96,26 @@ async def test_question_paper_generate_route(api, fake):
 
 
 @pytest.mark.asyncio
-async def test_voice_test_generate_route(api, fake):
-    payload = {"reference_questions": ["Why does a bicycle chain rust?"], "textbook_context": "Rusting is..."}
-    fake(payload)
+async def test_voice_test_generate_route_returns_context_and_no_questions(api, fake):
+    client = fake({"textbook_context": "Rusting is..."})
     async with api:
         response = await api.post("/voice-tests/generate", json={
             "chapters": [{"number": 1, "name": "Ch 1"}], "bloom_levels": ["APPLY"], "num_questions": 2,
         })
     assert response.status_code == 200, response.text
-    assert response.json() == payload
+    assert response.json() == {"reference_questions": [], "textbook_context": "Rusting is..."}
+    call = client.calls[0]
+    assert call["response_format"]["json_schema"]["schema"]["required"] == ["textbook_context"]
+    assert "reference_questions" not in call["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_assessor_content_skips_the_model_with_no_grounding(fake):
+    client = fake({"textbook_context": "x"})
+    assert await generator.generate_assessor_content(api_key="k", concept_context=[]) == {
+        "reference_questions": [], "textbook_context": "",
+    }
+    assert client.calls == []
 
 
 @pytest.mark.asyncio
