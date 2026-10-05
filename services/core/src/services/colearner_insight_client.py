@@ -2,11 +2,10 @@
 services/colearner/src/api/routes/homework_insight.py. Mirrors
 kg_client.py's REST request/response pattern (a one-shot call, no session,
 colearner doesn't need to know which student asked: everything it needs
-is in the request body) rather than
-colearner_client.py's live WebSocket session, which is specific to the AI
-Assessor's turn-taking conversation. Colearner requires a signed-in caller,
-so core forwards the requesting student's own ID token, the same way
-colearner_client.py does for live sessions.
+is in the request body), like colearner_client.py's realtime-call
+requests. Colearner requires a signed-in caller, so core forwards the
+requesting student's own ID token, the same way colearner_client.py does
+for live sessions.
 """
 
 from __future__ import annotations

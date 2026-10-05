@@ -20,6 +20,10 @@ start → generate (one LLM call per slot, in parallel)
 Slots that still fail come back in `unfilled_slot_indexes`, never as an
 unverified question; core then falls back to the bank / legacy generator.
 
+Core calls `/v1/voice-test/prep` from `services/voice_test_prep.py`, in the
+background after a teacher creates a voice test; the result becomes the
+test's `voice_test_questions` rows (the same questions for every student).
+
 `POST /v1/voice-test/prep` - readies the voice-test questions core picked
 from the school's datasets (one candidate per Bloom level): rewords each in
 simple Indian classroom English (same meaning, answer, Bloom level and

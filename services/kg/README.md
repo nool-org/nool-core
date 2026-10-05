@@ -12,7 +12,7 @@ and has no database of its own.
 | GET | `/curriculum/subjects`, `/curriculum/tree` | Subjects and the Chapter -> Topic tree the Super Admin catalog sync imports. |
 | POST | `/question-papers/generate` | Question paper questions (also KG-grounded Homework). |
 | POST | `/question-papers/replacement-candidates` | Alternatives for one question. |
-| POST | `/voice-tests/generate` | `textbook_context` + `reference_questions` that ground a voice test's colearner session. |
+| POST | `/voice-tests/generate` | `textbook_context` that grounds a voice test's colearner session (textbook context only: the questions come from datasets via the generation service, so `reference_questions` is always `[]`). |
 | GET | `/health`, `/ready` | `/ready` checks that nool-kg answers. |
 
 Retrieval (`src/services/nool_kg_client.py`) builds context from each

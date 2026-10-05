@@ -25,12 +25,11 @@ class LiveQuestion(BaseModel):
 
 class SessionConfig(BaseModel):
     """Pedagogical session configuration only. Model-specific data (LLM
-    provider/model, STT engine, TTS voice/rate) is deliberately NOT part of
-    this schema - each pipeline (chained/multimodal) fixes its own models as
-    constants in its own service module (see chained_service.py's
-    LLM_MODEL/STT_MODEL and multimodal_service.py's LLM_MODEL), so a caller
-    can no longer request e.g. the Gemini-only multimodal pipeline with an
-    OpenAI model.
+    model, STT engine, TTS voice) is deliberately NOT part of this schema -
+    each pipeline fixes its own models as constants in its own service
+    module (realtime_service.py's REALTIME_MODEL/TRANSCRIBE_MODEL,
+    cascaded_service.py's STT/LLM/TTS_MODEL), so a caller cannot pick a
+    model.
     """
 
     grade: ShortText = Field(default="10th Grade", description="Grade / level of the student")
@@ -122,7 +121,7 @@ class CoLearnerResponse(BaseModel):
     turn_index: int = Field(..., description="Current turn number (0 for greeting, 1+ for questions)")
     student_transcript: Optional[str] = Field(
         default=None,
-        description="Transcribed or submitted student response (from Whisper STT or text fallback)"
+        description="Transcribed or submitted student response (from STT or text fallback)"
     )
     co_learner_text: str = Field(
         ...,

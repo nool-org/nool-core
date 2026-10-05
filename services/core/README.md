@@ -36,10 +36,12 @@ from the actual route/schema code.
   themselves; `/admin/...` (Super Admin) is cross-tenant by design.
 - **AI-backed content**: Core calls the internal AI services rather than
   any model directly - `colearner_client.py` (AI Assessor realtime voice
-  calls and the legacy WS stream), `colearner_insight_client.py` (Homework
-  insight), `generation_client.py` (Homework gap-fill) and `kg_client.py`
-  (curriculum sync, question papers, voice test grounding, KG-grounded
-  Homework). `content_generator.py`'s `DeterministicContentGenerator` is
+  calls: create + finish), `colearner_insight_client.py` (Homework
+  insight), `generation_client.py` (voice test question prep, Homework
+  gap-fill) and `kg_client.py` (curriculum sync, question papers, voice
+  test textbook context, KG-grounded Homework). `voice_test_prep.py` picks
+  and preps a test's questions in the background after create.
+  `content_generator.py`'s `DeterministicContentGenerator` is
   only the last Homework fallback (`homework_content_resolver.py`). See
   `docs/ARCHITECTURE.md` for the model used at each step.
 

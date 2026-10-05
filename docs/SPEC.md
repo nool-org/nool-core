@@ -32,9 +32,9 @@ Four client apps talk to this stack:
 **Service boundary**: Auth and Core are logically independent — Auth never imports Core business modules and vice versa. Auth owns all Firebase interaction (token verification, password-check proxying, user provisioning); Core owns the product schema and business logic, and calls the Firebase Admin SDK directly only for account provisioning (creating/resetting users), sharing the same service-account credentials Auth uses.
 
 **AI-backed content** is real and runs in three internal services (models fixed in code; full table and the end-to-end voice flow in `docs/ARCHITECTURE.md`):
-- **colearner** — the AI Assessor voice test over WebRTC with OpenAI Realtime (`gpt-realtime-2.1-mini`, transcript by `gpt-4o-mini-transcribe`, Bloom report by `gpt-5-mini` (scores computed in code)); older per-turn pipelines chained (`whisper-1` → `gpt-4o-mini` → Edge-TTS) and multimodal (`gemini-3.5-flash-lite` → Edge-TTS); a cascaded prototype (`gpt-4o-mini-transcribe` → `gpt-4.1-mini` → `gpt-4o-mini-tts`); Homework insight (`gpt-4o-mini`); a dev-only playground at `/api/v1/colearner/playground` behind `PLAYGROUND_ENABLED`.
-- **generation** — Homework gap-fill (`gpt-5.1` writes, `gpt-5-mini` verifies).
-- **kg** — curriculum tree, question paper questions, voice test reference content, grounded in the nool-kg textbook graph (`gpt-5.1`).
+- **colearner** — the AI Assessor voice test over WebRTC with OpenAI Realtime (`gpt-realtime-2.1-mini`, transcript by `gpt-4o-mini-transcribe`), the only production voice path: Milo asks the test's prepared questions via tools, and `gpt-5-mini` grades each answer against its rubric (scores computed in code; accuracy gate in `services/colearner/evals`); a cascaded prototype (`gpt-4o-mini-transcribe` → `gpt-4.1-mini` → `gpt-4o-mini-tts`); Homework insight (`gpt-4o-mini`); a dev-only playground at `/api/v1/colearner/playground` behind `PLAYGROUND_ENABLED`. (The chained and multimodal/Gemini pipelines were removed.)
+- **generation** — voice test question prep (rewording + rubric) and Homework gap-fill (`gpt-5.1` writes, `gpt-5-mini` verifies).
+- **kg** — curriculum tree, question paper questions, a voice test's textbook context (grounding only, no questions), grounded in the nool-kg textbook graph (`gpt-5.1`).
 
 `services/core/src/services/content_generator.py`'s `DeterministicContentGenerator` survives only as Homework's last fallback (chapter not synced from KG, or every real source failed).
 
@@ -90,8 +90,9 @@ The user changes their password on first login (`/change-password` in every app)
 | `classes` | school_id, grade, section | — |
 | `teacher_class_assignments` | teacher_id, class_id, subject_id | The "assign a class to a teacher" relationship. |
 | `student_profiles` | user_id (PK/FK), class_id, roll_number, guardian_name?, guardian_phone?, date_of_birth? | — |
-| `voice_tests` (+ bloom_levels, target_students) | class_id, subject_id, chapter_id, topic_id?, duration_minutes, status | — |
-| `student_test_results` (+ bloom_scores) | test_id, student_id, mastery_percent | — |
+| `voice_tests` (+ bloom_levels, target_students) | class_id, subject_id, chapter_id, topic_id?, duration_minutes, status, textbook_context? | — |
+| `voice_test_questions` | voice_test_id, order, bloom_level, topic_id?, subtopic_id?, concepts, original/reworded/spoken text, expected_points, misconceptions, hints, status | The fixed questions every student of the test is asked (one per Bloom level), prepped in the background after create; frozen once a student completes the test. |
+| `student_test_results` (+ bloom_scores, topic_scores) | test_id, student_id, mastery_percent | `student_test_result_topic_scores`: per-topic percent from the graded answers. |
 | `homework` (+ datasets, bloom_distribution, target_students, questions; `student_homework_progress`) | test_id, class_id, gap_topic, difficulty, status | — |
 | `practice_bank_entries` | student_id, source_homework_id, source_question_id, subject_id?, chapter_id?, topic_id?, bloom_level, text, answer | A standalone copy, not a live pointer to the source question — archived once a Homework's Q&A is confirmed complete. |
 | `student_chapter_progress` | student_id, chapter_id, stars, completed_at? | Drives the Journey chapter map; written only by `record_test_completion`, never re-run. |
@@ -99,6 +100,7 @@ The user changes their password on first login (`/change-password` in every app)
 | `student_points` | student_id (PK), points | Leaderboard basis. |
 | `assistant_messages` | teacher_id, role, text | Teacher-only chat. |
 | `ai_assessor_sessions` (+ bloom_levels) | student_id, test_id?, context_label, duration_seconds | — |
+| `ai_assessor_session_records` | session_id (PK), transcript, answers, report, needs_review | colearner's finish payload as-is (per-answer points covered, misconception, reason, student response); `needs_review` when grading failed. |
 
 ---
 
@@ -151,7 +153,7 @@ All business endpoints require a Firebase ID token (`Authorization: Bearer <toke
 **Teacher-facing** (`require_role(TEACHER)`)
 - Curriculum browse: `/subjects`, `/classes/{id}/subjects`, `/subjects/{id}/chapters`, `/chapters/{id}/topics`; dataset browse
 - Roster: `/classes`, `/classes/{id}`, `/classes/{id}/students`
-- Voice Tests: list/get/create/schedule
+- Voice Tests: list/get/create/schedule; question review `GET /tests/{id}/questions`, `PATCH /tests/{id}/questions/{qid}` (edit/approve), `POST /tests/{id}/questions/{qid}/swap`; `GET /tests/{id}/reviews` (sessions whose grading failed)
 - Test Results: class / students / one student
 - Homework: create → generate → questions → edit/replace question → assign (full lifecycle)
 - Question Papers: DRAFT → generate → questions → finalize (same lifecycle shape), candidate-shuffle picker, section reordering
@@ -165,8 +167,7 @@ All business endpoints require a Firebase ID token (`Authorization: Bearer <toke
 **AI Assessor**
 - `POST /ai-assessor/sessions` (opens a session)
 - `POST /ai-assessor/sessions/{id}/realtime` — WebRTC SDP offer in, answer + `callId` out; audio then flows app ↔ OpenAI Realtime, colearner records the transcript server-side
-- `POST /ai-assessor/sessions/{id}/finish` — ends the call, scores the server-side transcript, records the result
-- `WS /ai-assessor/sessions/{id}/stream` — older per-turn voice stream bridged to colearner's chained/multimodal pipeline (`school.voice_pipeline`); nool-apps no longer uses it
+- `POST /ai-assessor/sessions/{id}/finish` — ends the call, grades the server-side transcript against each question's rubric, records the result (per Bloom level and per topic) and the session record; a grading failure records no score and flags the session for teacher review
 
 **Health**: `GET /health`, `GET /ready` (both services)
 
@@ -193,7 +194,7 @@ Route groups: `(auth)` (login, unknown-profile), `(app)/teacher`, `(app)/student
 | Dashboard | `GET /teacher/dashboard` | Real |
 | Classes/roster | `GET /classes` | Real |
 | Curriculum/dataset browsing | `GET /subjects`, `GET /datasets` | Real |
-| Voice Test setup/class/live/review | `GET/POST /tests` | Real |
+| Voice Test setup/class/live/review, question review | `GET/POST /tests`, `/tests/{id}/questions` | Real |
 | Test results (class & per-student) | `GET /tests/{id}/results/...` | Real |
 | Question Paper authoring (incl. Bloom/difficulty mix editor) | `GET/POST /question-papers` | Real — always sends an explicit distribution, so the new school-level default is never actually exercised from this screen |
 | Homework assign/live/review | `GET/POST /homework` | Real |

@@ -13,7 +13,7 @@ this stack over HTTP.
                           NGINX (:8080)
           /auth/*  |      /api/*      |  /api/v1/colearner/*
                    v         v        v
-                 Auth      Core ---> Colearner ---> OpenAI Realtime / OpenAI / Gemini / Edge-TTS
+                 Auth      Core ---> Colearner ---> OpenAI (Realtime, transcribe, gpt-5-mini grader)
                    |         |                     |         |   +--> Generation ---> OpenAI (gpt-5.1, gpt-5-mini)
                    |         |   +--> KG ---------> nool-kg (FalkorDB textbook graph) + OpenAI (gpt-5.1)
                    +----+----+
@@ -60,47 +60,66 @@ the schema/route/authorization architecture.
 
 ### Colearner Service
 
-The voice co-learner ("Milo"): runs a Bloom's Taxonomy oral session with a
-student and scores it. Firebase-authenticated like Auth/Core (same
-`shared/auth` seam). Models are fixed in code per pipeline, never
-client-selectable - see `services/colearner/README.md`.
+The voice co-learner ("Milo"): runs a Bloom's Taxonomy oral test with a
+student and grades it. Firebase-authenticated like Auth/Core (same
+`shared/auth` seam). Models are fixed in code, never client-selectable -
+see `services/colearner/README.md`. Realtime is the only production voice
+path; the chained and multimodal pipelines (and Gemini) were removed in
+wave 2.
 
 | Pipeline / feature | Used by | Models |
 | --- | --- | --- |
-| **Realtime** (WebRTC, full duplex) | nool-apps AI Assessor (the production voice test path) | `gpt-realtime-2.1-mini` (speech-to-speech), `gpt-4o-mini-transcribe` (transcript), `gpt-5-mini` (Bloom report, strict schema, scores computed in code) |
-| **Chained** (one recorded clip per turn) | Core's legacy WS stream (`school.voice_pipeline`, default `chained`), playground | `whisper-1` STT, `gpt-4o-mini` LLM, Edge-TTS |
-| **Multimodal** (audio straight into the LLM) | Core's legacy WS stream, playground | `gemini-3.5-flash-lite`, Edge-TTS |
-| **Cascaded** (prototype, cost/latency comparison) | playground only | `gpt-4o-mini-transcribe` STT, `gpt-4.1-mini` LLM, `gpt-4o-mini-tts` TTS |
-| **Homework insight** (`POST /api/v1/homework-insight`) | Core, student Homework screen | `gpt-4o-mini` (deterministic fallback paragraph on failure) |
+| **Realtime** (WebRTC, full duplex) | nool-apps AI Assessor - the production voice test | `gpt-realtime-2.1-mini` (speech-to-speech, voice `marin`), `gpt-4o-mini-transcribe` (server-side transcript) |
+| **Grader** (`src/services/evaluation/grader.py`) | realtime `.../finish` (and cascaded) | `gpt-5-mini`, strict JSON schema, per-question rubric; every aggregate computed in code |
+| **Cascaded** (prototype, cost/latency comparison) | dev playground only | `gpt-4o-mini-transcribe` STT, `gpt-4.1-mini` LLM, `gpt-4o-mini-tts` TTS |
+| **Homework insight** (`POST /api/v1/homework-insight`) | Core, student Homework screen | `gpt-4o-mini` (Core shows a placeholder paragraph on failure) |
 
-A dev-only browser test page for the pipelines lives at
-`/api/v1/colearner/playground`, served only when `PLAYGROUND_ENABLED` is on
-(set in `compose.override.yml`, never in production); with it on, requests
-without a token are also let through.
+A dev-only browser page at `/api/v1/colearner/playground` drives the
+Realtime and Cascaded pipelines without the app. It is served only when
+`PLAYGROUND_ENABLED` is on (set in `compose.override.yml`, never in
+production); with it on, requests without a token are also let through.
+Real model calls are made and billed.
+
+**Grader accuracy gate** - `services/colearner/evals/`: a labelled set of
+transcripts (`grader_set.json`) and `grader_eval.py`, which grades them with
+the real grader and fails (exit 1) if verdict accuracy is under 95% or more
+than 1 in 30 wrong answers are marked correct. Run it after any change to
+the grader prompt, schema or model - locally (see `evals/README.md`, about
+$0.09 per run) or via the manual "Grader eval" GitHub Actions workflow. It
+is not part of the normal test suite (it spends API credit).
 
 ### Generation Service
 
-Stateless LLM question writer; only Core calls it, it has no database.
-`POST /v1/homework/gap-fill` writes questions for the Homework slots the
-question bank couldn't fill: `gpt-5.1` writes, `gpt-5-mini` verifies, failed
-slots are regenerated once. See `services/generation/README.md`.
+Stateless LLM writer; only Core calls it, it has no database. See
+`services/generation/README.md`.
+
+- `POST /v1/voice-test/prep` - rewords the dataset questions Core picked
+  for a voice test into simple spoken Indian classroom English and writes
+  each one's rubric (`expected_points`, `misconceptions`, two `hints`):
+  `gpt-5.1` rewords, code checks plus `gpt-5-mini` verify, one regenerate,
+  then the original wording.
+- `POST /v1/homework/gap-fill` - writes questions for the Homework slots the
+  question bank couldn't fill: `gpt-5.1` writes, `gpt-5-mini` verifies,
+  failed slots are regenerated once.
 
 ### KG Service
 
 Curriculum and grounded generation over the `nool-kg` textbook graph
 (FalkorDB behind nool-kg's REST API, `NOOL_KG_BASE_URL`). Serves the
 curriculum tree that the admin catalog sync imports, question paper
-generation and replacement candidates, and voice test reference content
-(`textbook_context` + `reference_questions`) - all generation with
-`gpt-5.1` using Structured Outputs. See `services/kg/README.md`.
+generation and replacement candidates, and a voice test's
+`textbook_context` (grounding text only - voice test questions come from
+datasets, `reference_questions` is always `[]`). Generation uses `gpt-5.1`
+with Structured Outputs. See `services/kg/README.md`.
 
 ### Where each AI step runs
 
 | Step | Path | Model(s) | Fallback |
 | --- | --- | --- | --- |
+| Voice test textbook context (on test create, background) | Core -> kg | `gpt-5.1` | session runs ungrounded (generic syllabus instruction) |
+| Voice test questions (on test create, background) | Core picks one dataset question per Bloom level -> generation `/v1/voice-test/prep` | `gpt-5.1` reword + `gpt-5-mini` verify | dataset text as-is, no rubric; no question found -> Milo improvises from the textbook context |
 | Voice test conversation | app -> Core -> colearner realtime | `gpt-realtime-2.1-mini` + `gpt-4o-mini-transcribe` | none - the call fails with 503 |
-| Voice test scoring (Bloom report) | colearner | `gpt-5-mini` (strict schema; averages computed in code) | - |
-| Voice test reference content (on test create, background) | Core -> kg | `gpt-5.1` | session uses colearner's generic defaults |
+| Voice test grading | colearner, on `.../finish` | `gpt-5-mini` (rubric per question; scores computed in code) | none - the session is stored with `needs_review` and no score |
 | Homework questions | Core: question bank -> generation gap-fill -> relaxed bank -> kg -> deterministic generator | `gpt-5.1` + `gpt-5-mini` verify (generation), `gpt-5.1` (kg) | `DeterministicContentGenerator`, last resort only |
 | Homework insight | Core -> colearner | `gpt-4o-mini` | fixed placeholder paragraph |
 | Question paper questions / replacements | Core -> kg | `gpt-5.1` | none - errors surface to the teacher |
@@ -113,36 +132,69 @@ failed) - it is not the primary AI anywhere.
 
 ### A voice test, end to end
 
-1. Teacher creates a Voice Test (`POST /api/v1/tests`); Core asks kg, in
-   the background, for `textbook_context` and `reference_questions` and
-   stores them on the test.
-2. Student opens it in nool-apps: `POST /api/v1/ai-assessor/sessions`
-   creates an `ai_assessor_sessions` row.
-3. The app creates a WebRTC peer connection (mic track + data channel) and
-   sends its SDP offer to `POST /api/v1/ai-assessor/sessions/{id}/realtime`.
-   Core builds the colearner `SessionConfig` (grade, subject, chapter, Bloom
-   levels, time limit, grounding) and forwards it with the student's own
-   Firebase token to colearner `POST /api/v1/colearner/realtime/calls`.
-4. Colearner creates the OpenAI Realtime call with the instructions and
-   tools server-side (the app never sees the key or the prompt), returns the
-   SDP answer, and attaches a sideband WebSocket to the same call to record
-   the transcript itself.
-5. Audio flows directly app <-> OpenAI. Server VAD detects turn ends; the
-   student can interrupt. The model calls `end_session` after the last
-   question (or on `[TIME_UP]`), speaks a closing summary, and colearner
-   hangs up after a 30 s grace if the client doesn't.
-6. The app calls `POST /api/v1/ai-assessor/sessions/{id}/finish`; Core calls
-   colearner's `.../realtime/calls/{call_id}/finish`, which builds the Bloom
-   report from the server-side transcript (`gpt-5-mini`). Core scores it
-   and records the test result, XP and the automatic follow-up Homework.
+1. **Create** - the teacher creates a Voice Test (`POST /api/v1/tests`,
+   DRAFT) for a chapter (optionally a topic) and a set of Bloom levels, then
+   schedules it (`POST /tests/{id}/schedule`).
+2. **Prep** (background task after create, `services/voice_test_prep.py`) -
+   Core asks kg for the chapter's `textbook_context`, then picks one
+   question per Bloom level of the test (normally 5) from the QA datasets
+   the teacher may use, text-only (MCQ/true-false only if nothing else fits
+   a level), and sends them to generation `/v1/voice-test/prep`. Each
+   becomes a `voice_test_questions` row: order, Bloom level, topic/subtopic,
+   concepts, original/reworded/spoken text, expected points,
+   misconceptions, hints. Every student of the test gets the same questions.
+3. **Review** (optional) - the teacher sees them in nool-apps
+   (`GET /tests/{id}/questions`), can edit or approve one
+   (`PATCH .../questions/{qid}`) or swap it for another dataset question of
+   the same level (`POST .../swap`). Questions freeze once any student has
+   completed the test.
+4. **Live session** - the student opens the test:
+   `POST /api/v1/ai-assessor/sessions` creates an `ai_assessor_sessions`
+   row; the app creates a WebRTC peer connection (mic + data channel) and
+   sends its SDP offer to `POST /ai-assessor/sessions/{id}/realtime`. Core
+   builds the colearner `SessionConfig` (grade, subject, chapter, time
+   limit, `textbook_context` and the test's `questions`) and forwards it
+   with the student's own Firebase token to colearner
+   `POST /api/v1/colearner/realtime/calls`. Colearner creates the OpenAI
+   Realtime call with instructions and tools server-side (the app never
+   sees the key or prompt), returns the SDP answer, and attaches a sideband
+   WebSocket to record the transcript itself. Audio flows app <-> OpenAI
+   directly; server VAD detects turn ends and the student can interrupt.
+   Milo asks exactly the prepared questions, in order, through tools -
+   `ask_question`, `give_hint` (max 2 per question, from the rubric),
+   `give_explanation`, `end_session` - so colearner knows which question
+   each student turn answers (first answer vs. follow-up / hint request).
+   After `end_session` or the time limit the model gets a 30 s grace, then
+   colearner hangs up.
+5. **Grading** - the app calls `POST /ai-assessor/sessions/{id}/finish`;
+   Core calls colearner `.../realtime/calls/{call_id}/finish`, which grades
+   the server-side transcript against each question's rubric with
+   `gpt-5-mini` and returns the report (per answer: score, points covered,
+   misconception, reason, student response, hints used), the answers and a
+   question-tagged transcript. A grading failure comes back as
+   `grading_error`.
+6. **Results** - Core stores the payload in `ai_assessor_session_records`
+   and records `StudentTestResult` (mastery), per-Bloom
+   (`StudentTestResultBloomScore`) and per-topic
+   (`student_test_result_topic_scores`) scores, XP on the first completion,
+   and schedules the automatic follow-up Homework (`homework_autogen.py`).
+   On `grading_error` nothing is scored: the record is flagged
+   `needs_review`, the attempt counts (no retake) and the teacher sees it
+   at `GET /tests/{id}/reviews`.
 
 ### Known limitations
 
-- **Colearner state is in process memory** (`session_store.py`, the
-  realtime call registry) - lost on restart, invisible to a second replica.
-  Colearner must run as a **single replica**; Core's own WS fan-out
-  (`src/services/realtime.py`) has the same single-instance constraint.
-- Colearner reports are written to a container-local `reports/` directory.
+- **Colearner call state is in process memory** (`session_store.py`, the
+  realtime call registry in `realtime_service.py`) - lost on restart,
+  invisible to a second replica. Colearner must run as a **single
+  replica**; Core's own WS fan-out (`src/services/realtime.py`) has the
+  same single-instance constraint.
+- **Prep race**: a session started before the background prep finished
+  (~10-60 s after create) gets no questions and Milo improvises from the
+  textbook context (`ai_assessor.py`'s `_colearner_config`). Handled by
+  work item W3-09.
+- Colearner transcript/report files are written to a container-local `reports/`
+  directory.
 - Voice tests and question papers have no non-LLM fallback: no
   `OPENAI_API_KEY` (or kg / nool-kg down) means they fail.
 
