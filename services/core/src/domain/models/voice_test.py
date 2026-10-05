@@ -29,6 +29,16 @@ class AssignmentTargetMode(str, Enum):
     SPECIFIC_STUDENTS = "SPECIFIC_STUDENTS"
 
 
+class VoiceTestPrepStatus(str, Enum):
+    """Question prep (services/voice_test_prep.py): PENDING while it runs -
+    no session may open yet; READY or FAILED (the co-learner improvises
+    from textbook_context) once done."""
+
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class VoiceTest(IdMixin, TimestampMixin, Base):
     __tablename__ = "voice_tests"
 
@@ -56,6 +66,9 @@ class VoiceTest(IdMixin, TimestampMixin, Base):
     # rather than failing the session.
     reference_questions: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     textbook_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prep_status: Mapped[VoiceTestPrepStatus] = mapped_column(
+        SAEnum(VoiceTestPrepStatus, name="voice_test_prep_status"), default=VoiceTestPrepStatus.READY
+    )
 
 
 class VoiceTestBloomLevel(Base):
