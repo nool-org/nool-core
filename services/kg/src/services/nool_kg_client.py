@@ -13,17 +13,26 @@ concepts; see generator.py for the corresponding prompt/schema changes.
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 import httpx
 
+from shared.logging import get_logger
+
+logger = get_logger(__name__)
+
 _client: httpx.AsyncClient | None = None
 
+_RETRIES = 2
+_BACKOFF_SECONDS = 0.5
 
-def init_client(base_url: str) -> httpx.AsyncClient:
+
+def init_client(base_url: str, api_key: str | None = None) -> httpx.AsyncClient:
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
+        headers = {"X-API-Key": api_key} if api_key else None
+        _client = httpx.AsyncClient(base_url=base_url, timeout=30.0, headers=headers)
     return _client
 
 
@@ -41,12 +50,43 @@ async def dispose_client() -> None:
 
 
 async def check_connection() -> bool:
-    """Used by /ready. Never raises - a failed check just means "not ready"."""
+    """Used by /ready. Never raises - a failed check just means "not ready".
+    No retries here: /ready should answer fast."""
     try:
         response = await get_client().get("/")
-        return response.status_code < 500
+        return response.is_success
     except httpx.HTTPError:
         return False
+
+
+async def _get(path: str, **kwargs) -> httpx.Response:
+    """GET with up to _RETRIES retries (exponential backoff) on transport
+    errors/timeouts and 5xx. Every call is a read, so retrying is safe. The
+    last 5xx response is returned as-is for the caller to handle."""
+    for attempt in range(_RETRIES + 1):
+        try:
+            response = await get_client().get(path, **kwargs)
+            if response.status_code < 500 or attempt == _RETRIES:
+                return response
+            reason = f"HTTP {response.status_code}"
+        except httpx.TransportError as exc:
+            if attempt == _RETRIES:
+                raise
+            reason = type(exc).__name__
+        logger.warning("nool_kg_retry %s", path, extra={"reason": reason})
+        await asyncio.sleep(_BACKOFF_SECONDS * 2**attempt)
+    raise AssertionError("unreachable")
+
+
+def _json_or(response: httpx.Response, default):
+    """Body of a 200 response, else `default` - logged, so a real nool-kg
+    error never silently turns into an empty result."""
+    if response.status_code == 200:
+        return response.json()
+    logger.warning(
+        "nool_kg_unexpected_status %s", response.request.url.path, extra={"status": response.status_code}
+    )
+    return default
 
 
 async def list_subjects() -> list[str]:
@@ -59,7 +99,7 @@ async def list_subjects() -> list[str]:
     board+grade+subject combination must never reach the chapters/topics
     endpoints at all.
     """
-    response = await get_client().get("/api/subjects")
+    response = await _get("/api/subjects")
     response.raise_for_status()
     return response.json()
 
@@ -76,7 +116,6 @@ async def list_curriculum_subjects() -> list[dict]:
     is what a picker should actually offer, not the raw graph names).
     Returns [{"name": <bare subject>, "grade": <int>, "chapter_count": <int>}, ...].
     """
-    client = get_client()
     candidates = []
     for graph in await list_subjects():
         match = _GRAPH_NAME_PATTERN.match(graph)
@@ -85,8 +124,7 @@ async def list_curriculum_subjects() -> list[dict]:
 
     results = []
     for graph, subject, grade in candidates:
-        chapters_response = await client.get(f"/api/subjects/{graph}/chapters")
-        chapters = chapters_response.json() if chapters_response.status_code == 200 else []
+        chapters = _json_or(await _get(f"/api/subjects/{graph}/chapters"), [])
         if chapters:
             results.append({"name": subject, "grade": grade, "chapter_count": len(chapters)})
     return results
@@ -118,9 +156,8 @@ async def get_curriculum_tree(*, board: str = "CBSE", grade: int = 10, subject: 
     graph = graph_name_for(board=board, grade=grade, subject=subject)
     if graph not in await list_subjects():
         return None
-    client = get_client()
 
-    chapters_response = await client.get(f"/api/subjects/{graph}/chapters")
+    chapters_response = await _get(f"/api/subjects/{graph}/chapters")
     chapters_response.raise_for_status()
     chapters = chapters_response.json()
     if not chapters:
@@ -130,18 +167,13 @@ async def get_curriculum_tree(*, board: str = "CBSE", grade: int = 10, subject: 
     # title - nool-kg's /subtopics endpoint identifies the parent by title
     # text (topic_title), not id, and only ever needs fetching once here
     # rather than per-topic.
-    subtopics_response = await client.get(f"/api/subjects/{graph}/subtopics")
     subtopics_by_topic_title: dict[str, list[dict]] = {}
-    if subtopics_response.status_code == 200:
-        for s in subtopics_response.json():
-            subtopics_by_topic_title.setdefault(s["topic_title"], []).append(s)
+    for s in _json_or(await _get(f"/api/subjects/{graph}/subtopics"), []):
+        subtopics_by_topic_title.setdefault(s["topic_title"], []).append(s)
 
     tree_chapters = []
     for chapter in chapters:
-        topics_response = await client.get(
-            f"/api/subjects/{graph}/chapters/{chapter['id']}/topics"
-        )
-        topics = topics_response.json() if topics_response.status_code == 200 else []
+        topics = _json_or(await _get(f"/api/subjects/{graph}/chapters/{chapter['id']}/topics"), [])
         tree_chapters.append(
             {
                 "ref": chapter["id"],
@@ -179,28 +211,24 @@ async def get_concept_context_for_scope(
     graph = graph_name_for(board=board, grade=grade, subject=subject)
     if graph not in await list_subjects():
         return []
-    client = get_client()
 
-    chapters_response = await client.get(f"/api/subjects/{graph}/chapters")
-    if chapters_response.status_code != 200:
-        return []
-    chapters = {c["number"]: c for c in chapters_response.json() if c["number"] in chapter_numbers}
+    chapters = {
+        c["number"]: c
+        for c in _json_or(await _get(f"/api/subjects/{graph}/chapters"), [])
+        if c["number"] in chapter_numbers
+    }
 
     # Core's synced topic names can differ in case from nool-kg's titles
     # (e.g. "1.2 TYPES OF CHEMICAL REACTIONS" vs "1.2 Types of Chemical Reactions").
     wanted = {name.strip().casefold() for name in topic_names or []}
     context: list[dict] = []
     for chapter_number, chapter in chapters.items():
-        topics_response = await client.get(f"/api/subjects/{graph}/chapters/{chapter['id']}/topics")
-        if topics_response.status_code != 200:
-            continue
-        for topic in topics_response.json():
+        for topic in _json_or(await _get(f"/api/subjects/{graph}/chapters/{chapter['id']}/topics"), []):
             if wanted and topic["title"].strip().casefold() not in wanted:
                 continue
-            content_response = await client.get(
-                f"/api/subjects/{graph}/content", params={"title_or_id": topic["id"]}
+            content = _json_or(
+                await _get(f"/api/subjects/{graph}/content", params={"title_or_id": topic["id"]}), {}
             )
-            content = content_response.json() if content_response.status_code == 200 else {}
             context.append(
                 {
                     "chapter_number": chapter_number,

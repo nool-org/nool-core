@@ -18,7 +18,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        init_client(settings.nool_kg_base_url)
+        init_client(settings.nool_kg_base_url, settings.nool_kg_api_key)
         logger.info("startup_complete")
         yield
         await dispose_client()

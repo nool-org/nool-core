@@ -28,8 +28,11 @@ async def generate(body: GenerateQuestionsIn) -> GenerateQuestionsOut:
         board=body.board,
         grade=body.grade,
     )
-    questions = generate_questions(
+    questions = await generate_questions(
         api_key=settings.openai_api_key,
+        board=body.board,
+        grade=body.grade,
+        subject=body.subject,
         concept_context=context,
         bloom_distribution=body.bloom_distribution,
         difficulty_distribution=body.difficulty_distribution,
@@ -58,8 +61,11 @@ async def replacement_candidates(body: ReplacementCandidatesIn) -> GenerateQuest
         board=body.board,
         grade=body.grade,
     )
-    questions = generate_questions(
+    questions = await generate_questions(
         api_key=settings.openai_api_key,
+        board=body.board,
+        grade=body.grade,
+        subject=body.subject,
         concept_context=context,
         bloom_distribution={body.bloom_level: body.count},
         difficulty_distribution={body.difficulty: body.count},
