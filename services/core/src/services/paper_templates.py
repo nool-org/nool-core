@@ -49,7 +49,7 @@ def blueprint_view(blueprint: dict) -> dict:
     }
 
 
-def validate_blueprint(data: dict) -> TemplateBlueprint:
+def validate_blueprint(data: dict, changed: set[str] | None = None) -> TemplateBlueprint:
     """C15's rules, each a 422 with a message the teacher can act on."""
     try:
         # by alias, so a message names the field as the client sent it (examType)
@@ -74,10 +74,11 @@ def validate_blueprint(data: dict) -> TemplateBlueprint:
         raise ValidationError(f"The sections add up to {section_marks} marks but totalMarks is {bp.total_marks}.")
     if bp.duration_minutes is not None and bp.duration_minutes < 1:
         raise ValidationError("durationMinutes must be at least 1.")
-    if bp.bloom_targets and sum(t.percent for t in bp.bloom_targets) != 100:
+    # on an edit, a distribution copied from an older paper is only re-checked when it is changed
+    if (changed is None or "bloom_targets" in changed) and bp.bloom_targets and sum(t.percent for t in bp.bloom_targets) != 100:
         raise ValidationError("bloomTargets percents must add up to 100.")
     mix = bp.difficulty_mix
-    if mix is not None and mix.easy + mix.medium + mix.hard != 100:
+    if (changed is None or "difficulty_mix" in changed) and mix is not None and mix.easy + mix.medium + mix.hard != 100:
         raise ValidationError("difficultyMix must add up to 100.")
     return bp
 

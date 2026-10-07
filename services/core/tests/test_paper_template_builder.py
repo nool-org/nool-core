@@ -319,3 +319,70 @@ def test_routes_are_registered():
     assert "post" in spec["paths"][base + "/{template_id}/duplicate"]
     params = {p["name"] for p in spec["paths"][base]["get"]["parameters"]}
     assert {"scope", "board", "grade", "examType", "q"} <= params
+
+
+async def test_over_http_camel_case_query_and_body(schema):
+    """Through the ASGI app in this test's own loop (not TestClient), so the
+    examType query alias and the camelCase wire shape are exercised."""
+    import httpx
+
+    from src.api.deps import get_current_app_user, get_db_session
+    from src.main import create_app
+
+    db = schema
+    s = await _seed(db)
+    app = create_app()
+
+    async def _session():
+        yield db
+
+    app.dependency_overrides[get_db_session] = _session
+    app.dependency_overrides[get_current_app_user] = lambda: s["owner"]
+    base = "/api/v1/question-paper-templates"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(base, json={
+            "name": "100%_quiz", "examType": "Unit Test", "board": "CBSE", "grade": 10,
+            "subjectId": str(s["subject"].id), "language": "English", "totalMarks": 10, "durationMinutes": 30,
+            "sections": [{"name": "A", "questionCount": 10, "marksEach": 1, "questionTypes": ["MCQ"]}]})
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert (body["examType"], body["totalMarks"], body["scope"], body["canEdit"]) == (
+            "Unit Test", 10, "personal", True)
+
+        listed = (await client.get(base, params={"scope": "personal", "examType": "Unit Test"})).json()
+        assert body["id"] in [t["id"] for t in listed["items"]] and listed["total"] == len(listed["items"])
+        other = (await client.get(base, params={"scope": "personal", "examType": "Pre-Board"})).json()
+        assert body["id"] not in [t["id"] for t in other["items"]]
+
+        # % and _ in a search are literal, not wildcards
+        hit = (await client.get(base, params={"scope": "personal", "q": "100%_"})).json()
+        assert [t["id"] for t in hit["items"]] == [body["id"]]
+        miss = (await client.get(base, params={"scope": "personal", "q": "1%z"})).json()
+        assert miss["items"] == []
+
+        bad = await client.patch(f"{base}/{body['id']}", json={"totalMarks": 12})
+        assert bad.status_code == 422 and "totalMarks" in bad.text
+
+
+async def test_patch_keeps_an_old_uneven_distribution_unless_it_changes(schema):
+    from src.domain.models.paper_template import QuestionPaperTemplate
+
+    db = schema
+    s = await _seed(db)
+    out = await _create(db, s)
+    row = await db.get(QuestionPaperTemplate, uuid.UUID(out.id))
+    # as saved from an older paper whose distributions did not add up to 100
+    row.blueprint = {**row.blueprint, "bloom_targets": [{"level": "REMEMBER", "percent": 90}],
+                     "difficulty_mix": {"easy": 30, "medium": 30, "hard": 30}}
+    await db.flush()
+
+    edited = await paper_templates.update_template(out.id, UpdatePaperTemplateIn(duration_minutes=50),
+                                                   user=s["owner"], session=db)
+    assert edited.duration_minutes == 50 and [t.percent for t in edited.bloom_targets] == [90]
+
+    with pytest.raises(ValidationError, match="bloomTargets"):
+        await paper_templates.update_template(out.id, UpdatePaperTemplateIn.model_validate(
+            {"bloomTargets": [{"level": "APPLY", "percent": 80}]}), user=s["owner"], session=db)
+    with pytest.raises(ValidationError, match="difficultyMix"):
+        await paper_templates.update_template(out.id, UpdatePaperTemplateIn.model_validate(
+            {"difficultyMix": {"easy": 10, "medium": 10, "hard": 10}}), user=s["owner"], session=db)

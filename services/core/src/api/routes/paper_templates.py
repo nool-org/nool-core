@@ -87,6 +87,10 @@ def _get_starter(template_id: str) -> tuple[str, TemplateBlueprint]:
     return STARTERS[template_id]
 
 
+def _escape_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _check_name(name: str | None) -> str:
     if name is None or not name.strip():
         raise ValidationError("name is required.")
@@ -198,7 +202,7 @@ async def list_templates(
         if exam_type:
             query = query.where(QuestionPaperTemplate.exam_type == exam_type)
         if q:
-            query = query.where(QuestionPaperTemplate.name.ilike(f"%{q}%"))
+            query = query.where(QuestionPaperTemplate.name.ilike(f"%{_escape_like(q)}%", escape="\\"))
         rows = (await session.execute(query.order_by(QuestionPaperTemplate.created_at.desc()))).scalars().all()
         items = [_out(t, user) for t in rows]
     if scope in (None, "starter"):
@@ -243,7 +247,8 @@ async def update_template(
         template.scope = changes["scope"]
     blueprint_changes = {k: v for k, v in changes.items() if k in _BLUEPRINT_FIELDS}
     if blueprint_changes:
-        bp = validate_blueprint({**blueprint_view(template.blueprint), **blueprint_changes})
+        bp = validate_blueprint({**blueprint_view(template.blueprint), **blueprint_changes},
+                                set(blueprint_changes))
         await _check_subject(session, user, bp)
         template.blueprint = blueprint_json(bp, template.blueprint)
         _sync_columns(template, bp)
