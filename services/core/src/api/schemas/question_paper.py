@@ -1,4 +1,9 @@
-from src.domain.models import BloomLevel, PaperDifficultyLevel, QuestionPaperStatus
+from datetime import datetime
+from typing import Annotated, Literal
+
+from pydantic import Field
+
+from src.domain.models import BloomLevel, PaperDifficultyLevel, QuestionPaperStatus, QuestionType
 
 from .bloom import BloomTarget
 from .common import CamelModel
@@ -21,6 +26,19 @@ class PaperRules(CamelModel):
 class PaperDifficultyTarget(CamelModel):
     level: PaperDifficultyLevel
     value: int
+
+
+class BloomTargetPercent(CamelModel):
+    level: BloomLevel
+    percent: int
+
+
+class DifficultyMix(CamelModel):
+    """Percents (of marks) per difficulty."""
+
+    easy: int = 0
+    medium: int = 0
+    hard: int = 0
 
 
 class PaperValidationOut(CamelModel):
@@ -54,6 +72,10 @@ class QuestionPaperOut(CamelModel):
     custom_header_text: str | None = None
     logo_data_uri: str | None = None
     instructions: list[str] | None = None
+    # C9: same rows as bloomDistribution/difficultyDistribution, in the
+    # Paper Copilot's shape.
+    bloom_targets: list[BloomTargetPercent] | None = None
+    difficulty_mix: DifficultyMix | None = None
 
 
 class CreateQuestionPaperIn(CamelModel):
@@ -75,6 +97,12 @@ class CreateQuestionPaperIn(CamelModel):
     custom_header_text: str | None = None
     logo_data_uri: str | None = None
     instructions: list[str] | None = None
+    # C9 - win over bloomDistribution/difficultyDistribution when both are sent.
+    bloom_targets: list[BloomTargetPercent] | None = None
+    difficulty_mix: DifficultyMix | None = None
+
+
+QuestionSourceName = Literal["bank", "ai", "edited"]
 
 
 class QuestionPaperQuestionOut(CamelModel):
@@ -84,6 +112,15 @@ class QuestionPaperQuestionOut(CamelModel):
     bloom_level: BloomLevel
     marks: int
     text: str
+    question_type: QuestionType | None = None
+    difficulty: PaperDifficultyLevel | None = None
+    chapter_id: str | None = None
+    topic_id: str | None = None
+    section_name: str | None = None
+    options: list[str] | None = None
+    answer: str | None = None
+    source: QuestionSourceName = "ai"
+    dataset_question_id: str | None = None
 
 
 class UpdateQuestionPaperQuestionIn(CamelModel):
@@ -97,3 +134,146 @@ class QuestionPaperQuestionCandidateOut(CamelModel):
 
 class ReorderQuestionsIn(CamelModel):
     ordered_question_ids: list[str]
+
+
+# ---- C11 structured ops ------------------------------------------------------
+
+class NewQuestionIn(CamelModel):
+    text: str = Field(min_length=1)
+    question_type: QuestionType
+    marks: int
+    bloom_level: BloomLevel
+    difficulty: PaperDifficultyLevel
+    chapter_id: str
+    topic_id: str | None = None
+    options: list[str] | None = None
+    answer: str | None = None
+    source: Literal["bank", "ai"]
+    dataset_question_id: str | None = None
+
+
+class QuestionChangesIn(CamelModel):
+    text: str | None = Field(default=None, min_length=1)
+    marks: int | None = None
+    options: list[str] | None = None
+    answer: str | None = None
+    bloom_level: BloomLevel | None = None
+    difficulty: PaperDifficultyLevel | None = None
+    question_type: QuestionType | None = None
+
+
+class ReplaceOp(CamelModel):
+    op: Literal["replace"]
+    question_id: str
+    new_question: NewQuestionIn
+
+
+class AddOp(CamelModel):
+    op: Literal["add"]
+    section_name: str | None = None
+    position: int | None = None  # 1-based position in the whole paper
+    new_question: NewQuestionIn
+
+
+class RemoveOp(CamelModel):
+    op: Literal["remove"]
+    question_id: str
+
+
+class EditOp(CamelModel):
+    op: Literal["edit"]
+    question_id: str
+    changes: QuestionChangesIn
+
+
+class ReorderOp(CamelModel):
+    op: Literal["reorder"]
+    ordered_question_ids: list[str]
+
+
+PaperOp = Annotated[ReplaceOp | AddOp | RemoveOp | EditOp | ReorderOp, Field(discriminator="op")]
+ActionOrigin = Literal["chat", "quick_action", "manual", "explain"]
+
+
+class PaperActionsIn(CamelModel):
+    ops: list[PaperOp] = Field(min_length=1, max_length=100)
+    summary: str = Field(min_length=1, max_length=500)
+    origin: ActionOrigin
+
+
+# ---- C10 rules check ---------------------------------------------------------
+
+class MarksTargetOut(CamelModel):
+    target: int | None
+    actual: int
+
+
+class SectionCheckOut(CamelModel):
+    name: str
+    target_marks: int
+    actual_marks: int
+    target_count: int
+    actual_count: int
+    ok: bool
+
+
+class BloomMixOut(CamelModel):
+    level: BloomLevel
+    target_percent: int | None
+    actual_percent: int
+
+
+class ChapterCoverageOut(CamelModel):
+    chapter_id: str
+    name: str
+    question_count: int
+    marks: int
+
+
+class RepeatOut(CamelModel):
+    question_id: str
+    matched_in: Literal["paper", "homework", "voice_test"]
+    matched_title: str
+    matched_at: datetime
+
+
+class RulesIssueOut(CamelModel):
+    code: str
+    severity: Literal["error", "warning"]
+    message: str
+    question_id: str | None = None
+
+
+class RulesCheckOut(CamelModel):
+    ok: bool
+    total_marks: MarksTargetOut
+    sections: list[SectionCheckOut]
+    bloom_mix: list[BloomMixOut]
+    chapters: list[ChapterCoverageOut]
+    difficulty: DifficultyMix
+    estimated_minutes: int
+    duration_minutes: int | None
+    repeats: list[RepeatOut]
+    issues: list[RulesIssueOut]
+
+
+# ---- versions ----------------------------------------------------------------
+
+class PaperActionsOut(CamelModel):
+    version_id: str
+    version_number: int
+    questions: list[QuestionPaperQuestionOut]
+    rules_check: RulesCheckOut
+
+
+class PaperVersionOut(CamelModel):
+    id: str
+    number: int
+    summary: str
+    origin: str
+    created_at: datetime
+    created_by: str
+
+
+class PaperVersionsOut(CamelModel):
+    items: list[PaperVersionOut]

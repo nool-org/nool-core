@@ -31,6 +31,8 @@ from src.api.routes import (
     profile,
     progress,
     question_paper,
+    paper_rules,
+    paper_versions,
     ready,
     realtime,
     roster,
@@ -91,6 +93,8 @@ def create_app() -> FastAPI:
     app.include_router(test_result.router)
     app.include_router(homework.router)
     app.include_router(question_paper.router)
+    app.include_router(paper_rules.router)
+    app.include_router(paper_versions.router)
     app.include_router(teacher_dashboard.router)
     app.include_router(assistant.router)
     # Student
