@@ -145,3 +145,23 @@ async def test_homework_slots_are_sent_without_the_mcq_fields():
     llm = FakeLLM([_Drafts(questions=[question(0)]), _Drafts(questions=[question(1)])], [_Verdicts(verdicts=ok(0, 1))])
     await fill_gaps(llm, REQUEST, generation_model="gen", verify_model="ver")
     assert all('"misconceptions"' not in c[2] and '"concept"' not in c[2] for c in llm.calls[:2])
+
+
+@pytest.mark.asyncio
+async def test_spoken_style_asks_for_one_short_question():
+    systems = []
+
+    class Recording(FakeLLM):
+        async def __call__(self, *, model, effort, system, user, output_type):
+            systems.append((output_type.__name__, system))
+            return await super().__call__(model=model, effort=effort, system=system, user=user, output_type=output_type)
+
+    spoken = REQUEST.model_copy(update={"style": "spoken"})
+    llm = Recording([_Drafts(questions=[question(0)]), _Drafts(questions=[question(1)])], [_Verdicts(verdicts=ok(0, 1))])
+    await fill_gaps(llm, spoken, generation_model="gen", verify_model="ver")
+    assert all("ASKED ALOUD" in s for name, s in systems if name == "_Drafts")
+
+    llm = Recording([_Drafts(questions=[question(0)]), _Drafts(questions=[question(1)])], [_Verdicts(verdicts=ok(0, 1))])
+    systems.clear()
+    await fill_gaps(llm, REQUEST, generation_model="gen", verify_model="ver")
+    assert not any("ASKED ALOUD" in s for _, s in systems)  # homework (written) is unchanged

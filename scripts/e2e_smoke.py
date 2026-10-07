@@ -157,16 +157,18 @@ def s_questions():
     issues = []
     for q in items:
         n = f"Q{q['order']} {q['bloomLevel']}"
-        if not q["datasetQuestionId"]:
-            issues.append(f"{n} not from the dataset")
+        # no datasetQuestionId = written by generation because the bank had no speakable
+        # question at that level (voice_test_prep._write_for_levels) - allowed, but noted
         if not (q["rewordedText"].strip() and q["spokenText"].strip()):
             issues.append(f"{n} empty text")
-        elif q["rewordedText"].strip() == q["originalText"].strip():
+        elif q["datasetQuestionId"] and q["rewordedText"].strip() == q["originalText"].strip():
             issues.append(f"{n} not reworded")
         if not q["expectedPoints"]:
             issues.append(f"{n} no rubric points")
     assert not issues, "; ".join(issues)
-    return "; ".join(f"{q['bloomLevel']}: {q['spokenText'][:60]}" for q in items)
+    written = sum(1 for q in items if not q["datasetQuestionId"])
+    return f"{len(items) - written} from the bank, {written} written; " + "; ".join(
+        f"{q['bloomLevel']}: {q['spokenText'][:60]}" for q in items)
 
 
 def s_assigned():

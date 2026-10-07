@@ -15,6 +15,7 @@ stems, {tex} markup, broken encoding - are never picked (logged).
 import logging
 import re
 import uuid
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,6 +105,9 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
                            extra={"test_id": str(test.id), "bloom_level": level.value})
             continue
         picked.append(question)
+    if missing := [level for level in levels if level not in {q.bloom_level for q in picked}]:
+        picked += await _write_for_levels(session, test, missing, examples=picked)
+        picked.sort(key=lambda q: order.index(q.bloom_level))
     if not picked:
         logger.warning("voice_test_prep_no_questions", extra={"test_id": str(test.id)})
         return False
@@ -158,6 +162,11 @@ async def swap_question(
     for key, value in _fields(replacement, prepped).items():
         setattr(question, key, value)
     return True
+
+
+def _key(question) -> str:
+    """Candidate id sent to generation: the dataset row id, or a stable key for a written question."""
+    return str(question.id) if question.id else f"written-{question.bloom_level.value}"
 
 
 def _uid(question: DatasetQuestion) -> str:
@@ -268,7 +277,7 @@ async def _prep(test: VoiceTest, ctx: dict, questions: list[DatasetQuestion]) ->
         "grade": ctx["grade"], "subject": ctx["subject"], "chapter": ctx["chapter"].name, "board": ctx["board"],
         "levels": [q.bloom_level.value for q in questions],
         "candidates": [{
-            "id": str(q.id), "text": q.text, "answer": q.answer, "bloom_level": q.bloom_level.value,
+            "id": _key(q), "text": q.text, "answer": q.answer, "bloom_level": q.bloom_level.value,
             "topic_id": str(q.topic_id) if q.topic_id else None,
             "subtopic_id": str(q.subtopic_id) if q.subtopic_id else None,
             "concepts": list(q.concepts or []), "difficulty": q.difficulty.value if q.difficulty else None,
@@ -281,17 +290,80 @@ async def _prep(test: VoiceTest, ctx: dict, questions: list[DatasetQuestion]) ->
         logger.warning("voice_test_prep_generation_unavailable",
                        extra={"test_id": str(test.id), "reason": str(exc)})
         return [None] * len(questions)
-    prepped = [by_id.get(str(q.id)) for q in questions]
-    if missing := [str(q.id) for q, p in zip(questions, prepped) if p is None]:
+    prepped = [by_id.get(_key(q)) for q in questions]
+    if missing := [_key(q) for q, p in zip(questions, prepped) if p is None]:
         logger.warning("voice_test_prep_question_not_reworded",
                        extra={"test_id": str(test.id), "dataset_question_ids": missing})
     return prepped
+
+
+@dataclass
+class WrittenQuestion:
+    """A question the generation service wrote for a Bloom level the bank had
+    no speakable question for. Same attributes _prep/_fields read off a
+    DatasetQuestion; it has no dataset row (id None)."""
+    text: str
+    answer: str
+    bloom_level: BloomLevel
+    topic_id: uuid.UUID | None = None
+    subtopic_id: uuid.UUID | None = None
+    concepts: list = field(default_factory=list)
+    difficulty: None = None
+    question_type: None = None
+    id: None = None
+    external_uid: None = None
+
+
+async def _write_for_levels(session: AsyncSession, test: VoiceTest, levels: list[BloomLevel],
+                            examples: list) -> list[WrittenQuestion]:
+    """Levels with no speakable bank question get one written by the
+    generation service, grounded in the chapter's textbook sections (the same
+    grounding homework gap-fill uses). Never fakes one: none written -> the
+    level is skipped as before."""
+    from src.services.homework_builder import _sections  # shared textbook grounding
+
+    if not generation_client.is_configured():
+        return []
+    chapter_name, sections = await _sections(session, test, test.topic_id)
+    if not sections:
+        return []
+    subject = await session.get(Subject, test.subject_id)
+    school_class = await session.get(SchoolClass, test.class_id)
+    payload = {
+        "subject": subject.name if subject else "Science",
+        "grade": school_class.grade if school_class else 10,
+        "chapter": chapter_name,
+        "sections": sections,
+        "slots": [{"bloom_level": level.value, "difficulty": "MEDIUM"} for level in levels],
+        "examples": [{"text": q.text, "answer": (q.answer or "")[:400], "bloom_level": q.bloom_level.value,
+                      "difficulty": None} for q in examples[:4]],
+        "avoid": [q.text for q in examples],
+        "style": "spoken",  # short, single question - it is asked aloud
+    }
+    try:
+        result = await generation_client.gap_fill(payload)
+    except Exception as exc:  # unavailable or unusable - the level is skipped, as before
+        logger.warning("voice_test_prep_write_failed", extra={"test_id": str(test.id), "reason": str(exc)})
+        return []
+    written = []
+    for q in result.get("questions") or []:
+        if q.get("options") or not isinstance(q.get("slot_index"), int) or q["slot_index"] >= len(levels):
+            continue
+        candidate = WrittenQuestion(text=q["text"], answer=q.get("answer") or "",
+                                    bloom_level=levels[q["slot_index"]], topic_id=test.topic_id)
+        if _unspeakable(candidate) is None:
+            written.append(candidate)
+    logger.info("voice_test_prep_wrote_questions", extra={
+        "test_id": str(test.id), "levels": [lvl.value for lvl in levels], "written": len(written)})
+    return written
 
 
 REWORD_RETRIES = 2
 
 
 def _reworded(question: DatasetQuestion, prepped: dict | None) -> bool:
+    if question.id is None:  # a WrittenQuestion is already written to be spoken - only its rubric is needed
+        return prepped is not None
     text = ((prepped or {}).get("reworded_text") or "").strip()
     return bool(text) and text != (question.text or "").strip()
 

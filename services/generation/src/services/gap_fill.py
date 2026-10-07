@@ -63,6 +63,14 @@ class GapFillRequest(BaseModel):
     slots: list[Slot] = Field(min_length=1, max_length=30)  # each slot = one parallel LLM call
     examples: list[Example] = Field(default_factory=list, description="bank questions to match in style, never to copy")
     avoid: list[str] = Field(default_factory=list, description="question texts already in this homework")
+    # "spoken": the question is read aloud in a voice test (core's voice-test prep), so it must be short
+    style: Literal["written", "spoken"] = "written"
+
+
+SPOKEN_RULES = """
+- These questions are ASKED ALOUD in a voice test and answered by speaking: one single question, at most
+  35 words, no sub-parts, no lists, no dialogue or story set-up, nothing to write, draw or calculate at length.
+  An EVALUATE question asks the student to judge or justify in one or two spoken sentences."""
 
 
 class Question(BaseModel):
@@ -169,6 +177,8 @@ class GapFillWorkflow(Workflow):
     async def generate(self, ctx: Context, ev: GenerateEvent) -> VerifyEvent:
         request: GapFillRequest = await ctx.store.get("request")
         system = GENERATE_SYSTEM.format(grade=request.grade, subject=request.subject)
+        if request.style == "spoken":
+            system += SPOKEN_RULES
         # a retry must not repeat what an earlier attempt already got accepted
         avoid = request.avoid + [q.text for q in (await ctx.store.get("accepted")).values()]
 

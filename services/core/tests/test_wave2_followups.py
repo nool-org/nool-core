@@ -273,3 +273,34 @@ def _pick_in_order(*questions):
     async def pick(session, test, dataset_ids, level, exclude):
         return next((q for q in questions if voice_test_prep._uid(q) not in exclude), None)
     return pick
+
+
+async def test_prep_writes_a_question_for_a_level_the_bank_cant_speak(schema, monkeypatch):
+    db = schema
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+    s = await _seed(db, levels=(B.REMEMBER, B.EVALUATE))
+    remember = await _question(db, s, B.REMEMBER, "Define refraction of light.")
+    await _question(db, s, B.EVALUATE, "Read the following text carefully and answer the questions that follow.")
+
+    from src.services import homework_builder
+    sent = {}
+
+    async def sections(session, test, topic_id=None):
+        return "Light", [{"title": "Refraction", "text": "Light bends when it enters glass from air."}]
+
+    async def gap_fill(payload):
+        sent.update(payload)
+        return {"questions": [{"slot_index": 0, "text": "Is it fair to say a lens is useless without refraction? Why?",
+                               "answer": "No lens can focus light without refraction."}]}
+    monkeypatch.setattr(homework_builder, "_sections", sections)
+    monkeypatch.setattr(voice_test_prep.generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(voice_test_prep.generation_client, "gap_fill", gap_fill)
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    qs = await _questions(db, s["test"])
+    assert [q.bloom_level for q in qs] == [B.REMEMBER, B.EVALUATE]
+    assert qs[0].dataset_question_id == remember.id
+    assert qs[1].dataset_question_id is None and "lens" in qs[1].original_text
+    assert sent["slots"] == [{"bloom_level": "EVALUATE", "difficulty": "MEDIUM"}]
