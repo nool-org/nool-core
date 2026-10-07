@@ -108,8 +108,27 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
         logger.warning("voice_test_prep_no_questions", extra={"test_id": str(test.id)})
         return False
 
-    for number, (question, prepped) in enumerate(zip(picked, await _prep(test, ctx, picked)), start=1):
-        session.add(VoiceTestQuestion(voice_test_id=test.id, order=number, **_fields(question, prepped)))
+    prepped = await _prep(test, ctx, picked)
+    # A question generation could not reword safely is swapped for another of
+    # the same level (up to REWORD_RETRIES rounds) before keeping dataset text.
+    tried = {_uid(q) for q in picked}
+    for _ in range(REWORD_RETRIES):
+        redo = [i for i, (q, p) in enumerate(zip(picked, prepped)) if not _reworded(q, p)]
+        swaps = {}
+        for i in redo:
+            alt = await _pick(session, test, dataset_ids, picked[i].bloom_level, tried | unusable)
+            if alt is not None:
+                tried.add(_uid(alt))
+                swaps[i] = alt
+        if not swaps:
+            break
+        logger.info("voice_test_prep_retry_unreworded", extra={"test_id": str(test.id), "retried": len(swaps)})
+        for i, p in zip(swaps, await _prep(test, ctx, list(swaps.values()))):
+            if _reworded(swaps[i], p):
+                picked[i], prepped[i] = swaps[i], p
+
+    for number, (question, p) in enumerate(zip(picked, prepped), start=1):
+        session.add(VoiceTestQuestion(voice_test_id=test.id, order=number, **_fields(question, p)))
     await session.commit()
     return True
 
@@ -185,6 +204,14 @@ async def _dataset_ids(session: AsyncSession, teacher: User, test: VoiceTest, gr
 _LISTED_OPTIONS = re.compile(r"(?:^|\s)\(?[aA][.)]\s+\S.*(?:^|\s)\(?[bB][.)]\s+\S", re.S)
 
 
+_BLANKS = re.compile(r"_{3,}|fill in the blanks?", re.I)
+_DRAWING = re.compile(r"\b(draw|diagram|sketch|label|figure|graph|plot)\b", re.I)
+_PASSAGE = re.compile(r"read the (following|passage|text)|questions? that follows?|\btable\b|case[- ]based", re.I)
+_PARTS = re.compile(r"(?:^|\s)\(?(?:i{1,3}|iv|[a-d])[.)]\s")  # (i) ... (ii) ... / a. ... b. ...
+_OR_JOINED = re.compile(r"\s(?:OR|Or)\s")  # "State X. OR How is Y ..."
+MAX_SPOKEN_WORDS = 45  # longer than this is too much to hold in mind when heard once
+
+
 def _unspeakable(question: DatasetQuestion) -> str | None:
     """Why a dataset question can't be asked aloud, or None when it can."""
     text = question.text or ""
@@ -194,6 +221,16 @@ def _unspeakable(question: DatasetQuestion) -> str | None:
         return "tex"
     if "\ufffd" in text:  # stray encoding characters
         return "encoding"
+    if _BLANKS.search(text):
+        return "blanks"
+    if _DRAWING.search(text):
+        return "drawing"
+    if _PASSAGE.search(text):
+        return "passage"
+    if len(_PARTS.findall(text)) >= 2 or _OR_JOINED.search(text):
+        return "multipart"
+    if len(text.split()) > MAX_SPOKEN_WORDS:
+        return "too_long"
     return None
 
 
@@ -249,6 +286,14 @@ async def _prep(test: VoiceTest, ctx: dict, questions: list[DatasetQuestion]) ->
         logger.warning("voice_test_prep_question_not_reworded",
                        extra={"test_id": str(test.id), "dataset_question_ids": missing})
     return prepped
+
+
+REWORD_RETRIES = 2
+
+
+def _reworded(question: DatasetQuestion, prepped: dict | None) -> bool:
+    text = ((prepped or {}).get("reworded_text") or "").strip()
+    return bool(text) and text != (question.text or "").strip()
 
 
 def _strings(value) -> list[str]:

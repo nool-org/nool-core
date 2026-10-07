@@ -186,7 +186,8 @@ def _problems(original: str, draft: _Rewording) -> str | None:
     text = draft.reworded_text.strip()
     if not text or not draft.spoken_text.strip():
         return "reworded_text or spoken_text is empty"
-    long = [s for s in re.split(r"(?<=[.?!])\s+", text) if len(s.split()) > MAX_SENTENCE_WORDS]
+    # a line break ends a sentence too (rewordings put each sub-question / clause on its own line)
+    long = [s for s in re.split(r"(?<=[.?!])\s+|\n+", text) if len(s.split()) > MAX_SENTENCE_WORDS]
     if long:
         return f"sentence longer than {MAX_SENTENCE_WORDS} words, split it: {long[0]!r}"
     missing = (set(_NUMBER.findall(original)) - set(_NUMBER.findall(text))) | (_units(original) - _units(text))
@@ -328,7 +329,8 @@ class VoicePrepWorkflow(Workflow):
         if failed and ev.attempt < self.max_attempts:
             return GenerateEvent(indexes=failed, attempt=ev.attempt + 1, feedback=feedback)
         if failed:
-            logger.info("voice_prep_fallback_to_original", extra={"items": failed})
+            logger.info("voice_prep_fallback_to_original",
+                        extra={"items": failed, "reasons": {i: feedback.get(i, "")[:200] for i in failed}})
         return StopEvent(result=PrepResult(questions=[
             _result(i, c, accepted.get(i), last_draft.get(i)) for i, c in enumerate(picked)]))
 

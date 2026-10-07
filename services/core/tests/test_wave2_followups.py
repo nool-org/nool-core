@@ -228,3 +228,48 @@ async def test_an_attempt_waiting_for_review_is_not_pending(schema):
     assert (await student_dashboard.get_student_dashboard(user=student, session=db)).subject_today == []
     # still reachable directly (e.g. from Results)
     assert (await assigned_test.get_my_test(str(s["test"].id), user=student, session=db)).id == str(s["test"].id)
+
+
+# ------------------------------------------------- spoken-question filter
+def test_unspeakable_rejects_questions_that_dont_work_aloud():
+    def q(text, qtype=QuestionType.SHORT_ANSWER):
+        return type("Q", (), {"text": text, "question_type": qtype})()
+
+    assert voice_test_prep._unspeakable(q("The change in path of light is called ______ of light.")) == "blanks"
+    assert voice_test_prep._unspeakable(q("Fill in the blanks: light travels fastest in ...")) == "blanks"
+    assert voice_test_prep._unspeakable(q("Draw the ray diagram for an object at 2F.")) == "drawing"
+    assert voice_test_prep._unspeakable(q("Read the following text carefully and answer.")) == "passage"
+    assert voice_test_prep._unspeakable(q("Study the table below and find the focal length.")) == "passage"
+    assert voice_test_prep._unspeakable(q("(i) What is refraction? (ii) State its laws.")) == "multipart"
+    assert voice_test_prep._unspeakable(q("State the laws of refraction. OR How is refractive index defined?")) == "multipart"
+    assert voice_test_prep._unspeakable(q(" ".join(["word"] * 50) + "?")) == "too_long"
+    assert voice_test_prep._unspeakable(q("Why does a pencil look bent in a glass of water?")) is None
+
+
+async def test_prep_swaps_a_question_generation_could_not_reword(schema, monkeypatch):
+    db = schema
+    _fake_kg(monkeypatch)
+    s = await _seed(db, levels=(B.REMEMBER,))
+    stuck = await _question(db, s, B.REMEMBER, "Define refraction of light.")
+    good = await _question(db, s, B.REMEMBER, "Define refractive index.")
+
+    async def prep(payload):  # rewords everything except `stuck` (falls back to its text)
+        return {"questions": [{
+            "dataset_question_id": c["id"], "bloom_level": c["bloom_level"],
+            "reworded_text": c["text"] if c["id"] == str(stuck.id) else f"In simple words: {c['text']}",
+            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1", "h2"],
+        } for c in payload["candidates"]]}
+    monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", prep)
+    monkeypatch.setattr(voice_test_prep, "_pick", _pick_in_order(stuck, good))
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    [q] = await _questions(db, s["test"])
+    assert q.dataset_question_id == good.id and q.reworded_text.startswith("In simple words")
+
+
+def _pick_in_order(*questions):
+    """_pick stand-in: the first not-yet-excluded question, in the given order."""
+    async def pick(session, test, dataset_ids, level, exclude):
+        return next((q for q in questions if voice_test_prep._uid(q) not in exclude), None)
+    return pick

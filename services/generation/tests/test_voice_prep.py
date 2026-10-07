@@ -136,3 +136,9 @@ def test_words_after_numbers_are_not_units():
 
 def test_marks_at_the_end_need_not_be_kept():
     assert _problems("Which process is better and why? (2)", rewording("Which method is better? Why?")) is None
+
+
+def test_a_line_break_ends_a_sentence():
+    orig = Q_APPLY["text"]
+    two_lines = "A heater on a plug point runs on 220 V and takes 5 A of current\nWhat is its resistance in ohms?"
+    assert _problems(orig, rewording(two_lines)) is None
