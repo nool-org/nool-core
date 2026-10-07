@@ -9,7 +9,9 @@ from src.api.schemas.bloom import BloomTarget
 from src.api.schemas.common import ListEnvelope
 from src.api.schemas.dataset import DatasetShare
 from src.api.schemas.question_paper import (
+    BloomTargetPercent,
     CreateQuestionPaperIn,
+    DifficultyMix,
     PaperDifficultyTarget,
     PaperRules,
     PaperSection,
@@ -26,6 +28,7 @@ from src.domain.models import (
     DatasetQuestion,
     DatasetType,
     Feature,
+    PaperDifficultyLevel,
     QuestionPaper,
     QuestionPaperBloomDistribution,
     QuestionPaperChapter,
@@ -36,6 +39,7 @@ from src.domain.models import (
     QuestionPaperStatus,
     QuestionPaperTopic,
     QuestionPaperValidation,
+    QuestionType,
     Role,
     School,
     SchoolClass,
@@ -44,12 +48,15 @@ from src.domain.models import (
     Topic,
     User,
 )
+from src.domain.models.question_paper import QuestionSource
 from src.repositories.dataset_access import ensure_datasets_visible
 from src.services.subject_grades import ensure_subjects_enabled_for_school, ensure_subjects_fit_grade
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import kg_client
 from src.services.bloom_defaults import resolve_bloom_targets
+from src.services.paper_actions import create_version, load_questions, question_out
+from src.services.paper_repeats import normalize
 
 router = APIRouter(prefix="/api/v1", tags=["question-papers"])
 
@@ -89,6 +96,8 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
         select(QuestionPaperValidation).where(QuestionPaperValidation.paper_id == paper.id)
     )
     validation = validation_row.scalar_one_or_none()
+    bloom_rows = bloom_dist.scalars().all()
+    difficulty_rows = {d.level: d.value for d in difficulty_dist.scalars().all()}
 
     return QuestionPaperOut(
         id=str(paper.id),
@@ -109,12 +118,14 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
             PaperSection(label=s.label, question_count=s.question_count, marks_each=s.marks_each)
             for s in sections.scalars().all()
         ],
-        bloom_distribution=[
-            BloomTarget(level=d.bloom_level, value=d.value) for d in bloom_dist.scalars().all()
-        ],
-        difficulty_distribution=[
-            PaperDifficultyTarget(level=d.level, value=d.value) for d in difficulty_dist.scalars().all()
-        ],
+        bloom_distribution=[BloomTarget(level=d.bloom_level, value=d.value) for d in bloom_rows],
+        difficulty_distribution=[PaperDifficultyTarget(level=k, value=v) for k, v in difficulty_rows.items()],
+        bloom_targets=[BloomTargetPercent(level=d.bloom_level, percent=d.value) for d in bloom_rows] or None,
+        difficulty_mix=DifficultyMix(
+            easy=difficulty_rows.get(PaperDifficultyLevel.EASY, 0),
+            medium=difficulty_rows.get(PaperDifficultyLevel.MEDIUM, 0),
+            hard=difficulty_rows.get(PaperDifficultyLevel.HARD, 0),
+        ) if difficulty_rows else None,
         question_types=paper.question_types or [],
         rules=PaperRules(
             allow_internal_choice=paper.allow_internal_choice,
@@ -186,11 +197,21 @@ async def _apply_body(session: AsyncSession, paper: QuestionPaper, body: CreateQ
             )
         )
     school = await session.get(School, paper.school_id)
-    for target in resolve_bloom_targets(school, body.bloom_distribution):
+    bloom = (
+        [BloomTarget(level=t.level, value=t.percent) for t in body.bloom_targets]
+        if body.bloom_targets else body.bloom_distribution
+    )
+    for target in resolve_bloom_targets(school, bloom):
         session.add(
             QuestionPaperBloomDistribution(paper_id=paper.id, bloom_level=target.level, value=target.value)
         )
-    for target in body.difficulty_distribution or []:
+    difficulty = body.difficulty_distribution or []
+    if body.difficulty_mix is not None:
+        mix = body.difficulty_mix
+        difficulty = [PaperDifficultyTarget(level=level, value=value) for level, value in (
+            (PaperDifficultyLevel.EASY, mix.easy), (PaperDifficultyLevel.MEDIUM, mix.medium),
+            (PaperDifficultyLevel.HARD, mix.hard))]
+    for target in difficulty:
         session.add(
             QuestionPaperDifficultyDistribution(paper_id=paper.id, level=target.level, value=target.value)
         )
@@ -452,6 +473,7 @@ async def _dataset_reference_questions(session: AsyncSession, paper: QuestionPap
             seen.add(key)
             references.append(
                 {
+                    "id": q.id,
                     "text": q.text,
                     "answer": q.answer,
                     "options": q.options,
@@ -511,8 +533,10 @@ async def generate_paper(
     requested_chapter_numbers = {c["number"] for c in chapter_refs}
 
     questions: list[dict] = []
+    references: list[dict] = []
     if chapter_refs:
         subject_name, board, grade = await _paper_kg_identity(session, paper)
+        references = await _dataset_reference_questions(session, paper)
         questions = await kg_client.generate_paper_questions(
             subject=subject_name,
             board=board,
@@ -523,7 +547,7 @@ async def generate_paper(
             difficulty_distribution=difficulty_distribution,
             question_types=paper.question_types or [],
             total_questions=target_count,
-            reference_questions=await _dataset_reference_questions(session, paper),
+            reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
         )
 
     existing = await session.execute(
@@ -534,10 +558,27 @@ async def generate_paper(
     await session.flush()
 
     marks_sequence = _assign_marks(paper, sections, len(questions))
+    section_sequence = [s.label for s in sections for _ in range(s.question_count)]
+    chapters_by_number = {c.order_index: c for c in (await session.execute(
+        select(Chapter).where(Chapter.subject_id == paper.subject_id, Chapter.order_index.is_not(None))
+    )).scalars().all()}
+    topics = (await session.execute(
+        select(Topic).where(Topic.chapter_id.in_([c.id for c in chapters_by_number.values()]))
+    )).scalars().all() if chapters_by_number else []
+    bank_by_text = {normalize(r["text"]): r["id"] for r in references}
     for order, (q, marks) in enumerate(zip(questions, marks_sequence), start=1):
+        chapter = chapters_by_number.get(q.get("chapter_number"))
+        topic = next((t for t in topics if chapter and t.chapter_id == chapter.id and t.name == q.get("topic")), None)
+        bank_id = bank_by_text.get(normalize(q["text"]))
         session.add(
             QuestionPaperQuestion(
-                paper_id=paper.id, order=order, bloom_level=q["bloom_level"], marks=marks, text=q["text"]
+                paper_id=paper.id, order=order, bloom_level=q["bloom_level"], marks=marks, text=q["text"],
+                question_type=_enum_or_none(QuestionType, q.get("question_type")),
+                difficulty=_enum_or_none(PaperDifficultyLevel, q.get("difficulty")),
+                chapter_id=chapter.id if chapter else None, topic_id=topic.id if topic else None,
+                section_name=section_sequence[order - 1] if order <= len(section_sequence) else None,
+                options=q.get("options"), answer=q.get("answer"),
+                source=QuestionSource.BANK.value if bank_id else QuestionSource.AI.value, dataset_question_id=bank_id,
             )
         )
 
@@ -579,23 +620,22 @@ async def generate_paper(
     validation.issues = issues
 
     paper.status = QuestionPaperStatus.REVIEW if questions else QuestionPaperStatus.VALIDATION_FAILED
+    if questions:
+        await create_version(session, paper, created_by=user.id, summary="Generated paper", origin="generate")
     await session.commit()
     await session.refresh(paper)
     return await _serialize(session, paper)
 
 
+def _enum_or_none(enum, value):
+    try:
+        return enum(value) if value else None
+    except ValueError:
+        return None
+
+
 async def _paper_questions_out(session: AsyncSession, paper_id: str) -> ListEnvelope[QuestionPaperQuestionOut]:
-    result = await session.execute(
-        select(QuestionPaperQuestion)
-        .where(QuestionPaperQuestion.paper_id == paper_id)
-        .order_by(QuestionPaperQuestion.order)
-    )
-    items = [
-        QuestionPaperQuestionOut(
-            id=str(q.id), paper_id=paper_id, order=q.order, bloom_level=q.bloom_level, marks=q.marks, text=q.text
-        )
-        for q in result.scalars().all()
-    ]
+    items = [question_out(q) for q in await load_questions(session, paper_id)]
     return ListEnvelope(items=items, total=len(items))
 
 
@@ -631,6 +671,9 @@ async def update_paper_question(
     if question is None:
         raise NotFoundError(f'No question "{question_id}" on this paper.')
     question.text = body.text
+    question.source = QuestionSource.EDITED.value
+    await create_version(session, paper, created_by=user.id, summary=f"Edited question {question.order}",
+                         origin="manual")
     await session.commit()
     return await _paper_questions_out(session, paper_id)
 
