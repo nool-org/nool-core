@@ -1,9 +1,12 @@
-"""Question paper templates (C14): save a paper's blueprint, list it
-school-wide, use it to start a DRAFT paper, delete authz, and the migration.
+"""Question paper templates (C14): save a paper's blueprint, list it,
+use it to start a DRAFT paper, delete authz, and the migrations. The C15
+builder (designed templates, scopes, starters, PATCH/duplicate) is in
+test_paper_template_builder.py.
 
 Real rows against the dev Postgres via db_session. Until the dev DB has
-this item's migration, the `schema` fixture creates the table inside the
-test's own transaction (no foreign keys - see test_voice_test_questions.py).
+these migrations, the `schema` fixture creates the table / applies
+d7f2b4a6c8e1 inside the test's own transaction (no foreign keys - see
+test_voice_test_questions.py) - rolled back with it.
 """
 
 import asyncio
@@ -30,6 +33,7 @@ from src.domain.models.paper_template import QuestionPaperTemplate
 
 TABLE = QuestionPaperTemplate.__table__
 REVISION = "c5e7a9d1f3b2"
+SCOPE_REVISION = "d7f2b4a6c8e1"
 
 
 async def _ddl(db, work, attempts=5):
@@ -49,8 +53,11 @@ async def _ddl(db, work, attempts=5):
 
 
 def _create_table(conn):
-    if not inspect(conn).has_table(TABLE.name):
+    insp = inspect(conn)
+    if not insp.has_table(TABLE.name):
         conn.execute(CreateTable(TABLE, include_foreign_key_constraints=[]))
+    elif "scope" not in {c["name"] for c in insp.get_columns(TABLE.name)}:
+        _run(_migration_module(SCOPE_REVISION, "paper_template_scope").upgrade)(conn)
 
 
 @pytest_asyncio.fixture
@@ -59,40 +66,68 @@ async def schema(db_session):
     return db_session
 
 
-def _migration_module():
+def _migration_module(revision=REVISION, slug="question_paper_templates"):
     here = Path(__file__).resolve()
     for root in (here.parents[1], *here.parents[2:4]):
-        path = root / "database" / "migrations" / "versions" / f"{REVISION}_question_paper_templates.py"
+        path = root / "database" / "migrations" / "versions" / f"{revision}_{slug}.py"
         if path.is_file():
-            spec = importlib.util.spec_from_file_location("w5_04_migration", path)
+            spec = importlib.util.spec_from_file_location(f"migration_{revision}", path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
     pytest.skip("database/ not available in this environment")
 
 
-async def test_migration_upgrade_and_downgrade(db_session):
+def _run(step):
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
-    module = _migration_module()
-    assert module.down_revision == "c5e1a7d3f9b2"  # chained after W5-03 at merge
+    def work(conn):
+        with Operations.context(MigrationContext.configure(conn)):
+            step()
+    return work
 
-    def run(step):
-        def work(conn):
-            with Operations.context(MigrationContext.configure(conn)):
-                step()
-        return work
+
+async def test_migration_upgrade_and_downgrade(db_session):
+    module, scope_module = _migration_module(), _migration_module(SCOPE_REVISION, "paper_template_scope")
+    assert module.down_revision == "c5e1a7d3f9b2"  # chained after W5-03 at merge
+    assert scope_module.down_revision == REVISION
 
     def columns(sync_session):
         insp = inspect(sync_session.connection())
-        return {c["name"] for c in insp.get_columns(TABLE.name)} if insp.has_table(TABLE.name) else None
+        if not insp.has_table(TABLE.name):
+            return None
+        return {c["name"]: c["nullable"] for c in insp.get_columns(TABLE.name)}
 
     if await db_session.run_sync(columns) is None:  # not applied to this DB yet
-        await _ddl(db_session, run(module.upgrade))  # rolled back with the test's transaction
-    assert await db_session.run_sync(columns) == {c.name for c in TABLE.columns}
-    await _ddl(db_session, run(module.downgrade))
+        await _ddl(db_session, _run(module.upgrade))  # rolled back with the test's transaction
+    if "scope" not in await db_session.run_sync(columns):
+        await _ddl(db_session, _run(scope_module.upgrade))
+    cols = await db_session.run_sync(columns)
+    assert set(cols) == {c.name for c in TABLE.columns}
+    assert cols["subject_id"] is True and cols["scope"] is False
+
+    await _ddl(db_session, _run(scope_module.downgrade))
+    cols = await db_session.run_sync(columns)
+    assert set(cols) == {c.name for c in TABLE.columns} - {"scope"} and cols["subject_id"] is False
+    await _ddl(db_session, _run(module.downgrade))
     assert await db_session.run_sync(columns) is None
+
+
+async def test_scope_migration_keeps_existing_templates_school_wide(schema):
+    """Rows saved before scopes were shared with the school - the upgrade
+    backfills "school"; new rows default to "personal"."""
+    db = schema
+    s = await _seed(db)
+    out = await _template(db, s)
+    await _ddl(db, lambda conn: conn.execute(text("ALTER TABLE question_paper_templates DROP COLUMN scope")))
+    await _ddl(db, _run(_migration_module(SCOPE_REVISION, "paper_template_scope").upgrade))
+    assert (await db.execute(text("SELECT scope FROM question_paper_templates WHERE id = :id"),
+                             {"id": uuid.UUID(out.id)})).scalar_one() == "school"
+    default = (await db.execute(text(
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_name = 'question_paper_templates' AND column_name = 'scope'"))).scalar_one()
+    assert "personal" in default
 
 
 # ------------------------------------------------------------------ seed
@@ -159,15 +194,17 @@ async def test_create_needs_a_paper_the_teacher_teaches(schema):
                                               user=s["outsider"], session=db)
 
 
-async def test_list_is_scoped_to_the_school(schema):
+async def test_saved_from_a_paper_is_personal(schema):
     db = schema
     s = await _seed(db)
     out = await _template(db, s)
+    assert (out.scope, out.can_edit, out.can_delete, out.is_starter) == ("personal", True, True, False)
 
-    for viewer in (s["colleague"], s["admin"]):
-        listed = await paper_templates.list_templates(user=viewer, session=db)
-        assert [t.id for t in listed.items] == [out.id]
-    assert (await paper_templates.list_templates(user=s["outsider"], session=db)).items == []
+    mine = await paper_templates.list_templates(user=s["owner"], session=db, scope="personal")
+    assert [t.id for t in mine.items] == [out.id]
+    for viewer in (s["colleague"], s["admin"], s["outsider"]):
+        assert (await paper_templates.list_templates(user=viewer, session=db, scope="personal")).items == []
+        assert (await paper_templates.list_templates(user=viewer, session=db, scope="school")).items == []
 
 
 async def test_use_creates_a_draft_with_the_blueprint(schema):
@@ -176,8 +213,8 @@ async def test_use_creates_a_draft_with_the_blueprint(schema):
     out = await _template(db, s)
 
     used = await paper_templates.use_template(out.id, UsePaperTemplateIn(name="Unit Test 2"),
-                                              user=s["colleague"], session=db)
-    paper = await question_paper.get_paper(used.paper_id, user=s["colleague"], session=db)
+                                              user=s["owner"], session=db)
+    paper = await question_paper.get_paper(used.paper_id, user=s["owner"], session=db)
     src = s["paper"]
     assert paper.id != src.id and paper.name == "Unit Test 2" and paper.status == QuestionPaperStatus.DRAFT
     for field in ("exam_type", "board", "grade", "language", "subject_id", "chapter_ids", "topic_ids",
@@ -188,8 +225,8 @@ async def test_use_creates_a_draft_with_the_blueprint(schema):
     # new chapters drop the template's topics (they belong to the old chapter)
     used = await paper_templates.use_template(
         out.id, UsePaperTemplateIn(name="Magnetism test", chapter_ids=[str(s["ch2"].id)]),
-        user=s["colleague"], session=db)
-    paper = await question_paper.get_paper(used.paper_id, user=s["colleague"], session=db)
+        user=s["owner"], session=db)
+    paper = await question_paper.get_paper(used.paper_id, user=s["owner"], session=db)
     assert (paper.chapter_ids, paper.topic_ids, paper.total_marks) == ([str(s["ch2"].id)], [], 20)
 
 
@@ -197,20 +234,28 @@ async def test_use_is_school_scoped(schema):
     db = schema
     s = await _seed(db)
     out = await _template(db, s)
-    with pytest.raises(NotFoundError):
-        await paper_templates.use_template(out.id, UsePaperTemplateIn(name="x"), user=s["outsider"], session=db)
+    for other in (s["outsider"], s["colleague"]):  # personal: only its creator sees it
+        with pytest.raises(NotFoundError):
+            await paper_templates.use_template(out.id, UsePaperTemplateIn(name="x"), user=other, session=db)
 
 
 async def test_delete_only_by_creator_or_school_admin(schema):
     db = schema
     s = await _seed(db)
     first, second = await _template(db, s, "one"), await _template(db, s, "two")
+    row = await db.get(QuestionPaperTemplate, uuid.UUID(second.id))
+    row.scope = "school"  # a school-wide one (as pre-scope rows are)
+    await db.flush()
 
+    for other in (s["colleague"], s["admin"], s["outsider"]):  # can't even see a personal one
+        with pytest.raises(NotFoundError):
+            await paper_templates.delete_template(first.id, user=other, session=db)
     with pytest.raises(ForbiddenError):
-        await paper_templates.delete_template(first.id, user=s["colleague"], session=db)
-    with pytest.raises(NotFoundError):
-        await paper_templates.delete_template(first.id, user=s["outsider"], session=db)
+        await paper_templates.delete_template(second.id, user=s["colleague"], session=db)
+    listed = await paper_templates.list_templates(user=s["colleague"], session=db, scope="school")
+    assert [(t.id, t.can_delete) for t in listed.items] == [(second.id, False)]
 
     assert (await paper_templates.delete_template(first.id, user=s["owner"], session=db)).status_code == 204
     await paper_templates.delete_template(second.id, user=s["admin"], session=db)
-    assert (await paper_templates.list_templates(user=s["owner"], session=db)).items == []
+    for scope in ("personal", "school"):
+        assert (await paper_templates.list_templates(user=s["owner"], session=db, scope=scope)).items == []
