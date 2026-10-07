@@ -23,6 +23,7 @@ from src.domain.models import (
 )
 from src.domain.models.paper_answer_key import QuestionPaperParallel
 from src.domain.models.question_paper import PaperDifficultyLevel
+from src.repositories.dataset_access import visible_datasets
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import paper_answer_key_client as client
@@ -164,6 +165,9 @@ async def create_parallel(session: AsyncSession, original: QuestionPaper, user: 
         select(QuestionPaperDatasetShare.dataset_id).join(Dataset, Dataset.id == QuestionPaperDatasetShare.dataset_id)
         .where(QuestionPaperDatasetShare.paper_id == original.id, Dataset.type == DatasetType.QA))).scalars().all())
     chapter_ids = await _scope_chapter_ids(session, original)
+    if not dataset_ids:  # no bank picked on the paper: every QA bank the teacher can see for it
+        dataset_ids = [d.id for d in await visible_datasets(session, user, subject_id=original.subject_id,
+                                                            grade=original.grade) if d.type == DatasetType.QA]
 
     taken = [q.text for q in originals]
     picked: dict[int, dict] = {}
@@ -181,7 +185,11 @@ async def create_parallel(session: AsyncSession, original: QuestionPaper, user: 
             raise client.GenerationServiceUnavailableError(
                 f"The question bank has no different question for {len(open_slots)} slot(s) and question "
                 "generation isn't available right now.")
-        await _generate(session, original, open_slots, chapter_ids=chapter_ids, taken=taken, picked=picked)
+        for _ in range(2):  # one retry: the model sometimes skips a slot or repeats a taken question
+            await _generate(session, original, [(i, q) for i, q in open_slots if i not in picked],
+                            chapter_ids=chapter_ids, taken=taken, picked=picked)
+            if len(picked) == len(originals):
+                break
         missing = len(originals) - len(picked)
         if missing:
             raise ConflictError(f"Couldn't find a different question for {missing} of {len(originals)} slot(s) - "

@@ -127,3 +127,14 @@ async def test_oversized_request_is_rejected_before_any_model_call(api, fake):
         })
     assert response.status_code == 422
     assert client.calls == []
+
+
+def test_slots_replace_the_distributions_in_the_prompt():
+    slots = [{"section": "A", "marks": 1, "bloom_level": "REMEMBER", "difficulty": "EASY", "question_type": "mcq"},
+             {"section": "B", "marks": 5, "bloom_level": "APPLY", "difficulty": "HARD", "question_type": "long_answer"}]
+    msg = generator._build_user_message(
+        concept_context=CONTEXT, bloom_distribution={"REMEMBER": 25}, difficulty_distribution={},
+        question_types=[], total_questions=2, slots=slots)
+    assert "exactly 2 questions, IN THIS ORDER" in msg
+    assert json.dumps(slots) in msg
+    assert "level: count" not in msg

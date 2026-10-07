@@ -84,3 +84,20 @@ commit;
 ```
 
 None of these foreign keys cascade. A smoke run never finishes a session, so it leaves no `student_test_results`, `mcq_tests` or `homework` rows. If one of these deletes fails on a foreign key, someone took the test by hand, and you need to delete those rows first.
+
+## Full validation: `e2e_full.py`
+
+`scripts/e2e_full.py` goes further. It calls every GET route in core's OpenAPI as the role that owns it, with ids taken from list responses, and flags any 5xx or unexpected 4xx. It then drives these flows:
+
+- **Question paper:** generate, copilot chat, apply the proposal, versions and restore, answer key, Set B, save as template, finalize.
+- **Templates:** use a starter and generate from it; design, edit, duplicate and delete a template; validation (422) and authz (403).
+- **Homework:** create, generate and assign; the student answers and completes it.
+- **MCQ:** an attempt.
+
+Run it exactly like the smoke test, with two more users:
+
+```bash
+... -e ADMIN_EMAIL=admin@nool.dev -e SCHOOL_ADMIN_EMAIL=keerthana@nool.dev nool-core-core python /s/e2e_full.py
+```
+
+It makes live model calls, about $0.30 a run. It leaves papers named "E2E ..." and one homework, and lists their ids at the end.

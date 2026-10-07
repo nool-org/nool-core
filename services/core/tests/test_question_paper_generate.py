@@ -119,3 +119,42 @@ async def test_generate_paper_prefers_its_shared_datasets_board_over_its_own(
 
     assert captured["board"] == "CBSE"
     assert captured["grade"] == 8
+
+
+@pytest.mark.asyncio
+async def test_generate_takes_about_a_quarter_from_the_visible_bank_and_kg_writes_the_rest(db_session, monkeypatch):
+    """No bank picked on the paper: the teacher's visible QA banks are used,
+    BANK_SHARE of the slots are copied from them and only the rest go to kg."""
+    from src.domain.models import BloomLevel, DatasetQuestion, PaperDifficultyLevel, QuestionType
+
+    teacher, seeded = await _seed_paper_ready_to_generate(db_session)
+    bank = Dataset(name="PYQ", question_count=0, description="", subject_id=seeded["subject"].id,
+                   board="CBSE", grade=8, type=DatasetType.QA)
+    db_session.add(bank)
+    await db_session.flush()
+    db_session.add(SchoolDataset(school_id=teacher.school_id, dataset_id=bank.id, enabled=True))
+    for level in BloomLevel:
+        for difficulty in PaperDifficultyLevel:
+            db_session.add(DatasetQuestion(
+                dataset_id=bank.id, chapter_id=seeded["chapter_id"], bloom_level=level, difficulty=difficulty,
+                question_type=QuestionType.MCQ, text=f"Bank {level.value} {difficulty.value} {uuid.uuid4()}?",
+                options=["a", "b", "c", "d"], answer="a", created_by=teacher.id))
+    await db_session.flush()
+    captured: dict = {}
+
+    async def fake_generate_paper_questions(**kwargs):
+        captured.update(kwargs)
+        return [{"text": f"AI question {i} about algebra?", "answer": "x", "bloom_level": s["bloom_level"],
+                 "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": ""}
+                for i, s in enumerate(kwargs["slots"])]
+
+    monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions",
+                        fake_generate_paper_questions)
+
+    await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
+
+    questions = (await question_paper.list_paper_questions(seeded["paper_id"], user=teacher, session=db_session)).items
+    from_bank = [q for q in questions if q.source == "bank"]
+    assert len(questions) == 10 and len(from_bank) == round(10 * question_paper.BANK_SHARE)
+    assert captured["total_questions"] == len(captured["slots"]) == 10 - len(from_bank)
+    assert all(q.dataset_question_id and q.question_type == "MCQ" for q in from_bank)

@@ -1,3 +1,6 @@
+import difflib
+from types import SimpleNamespace
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +26,7 @@ from src.api.schemas.question_paper import (
     UpdateQuestionPaperQuestionIn,
 )
 from src.domain.models import (
+    BloomLevel,
     Chapter,
     Dataset,
     DatasetQuestion,
@@ -49,7 +53,7 @@ from src.domain.models import (
     User,
 )
 from src.domain.models.question_paper import QuestionSource
-from src.repositories.dataset_access import ensure_datasets_visible
+from src.repositories.dataset_access import ensure_datasets_visible, visible_datasets
 from src.services.subject_grades import ensure_subjects_enabled_for_school, ensure_subjects_fit_grade
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
@@ -421,9 +425,57 @@ async def _paper_kg_identity(session: AsyncSession, paper: QuestionPaper) -> tup
 
 
 _REFERENCE_POOL_SIZE = 40
+BANK_SHARE = 0.25  # of a generated paper's questions taken straight from the question bank
 
 
-async def _dataset_reference_questions(session: AsyncSession, paper: QuestionPaper) -> list[dict]:
+async def _bank_shares(session: AsyncSession, paper: QuestionPaper, user: User) -> list[tuple]:
+    """(dataset_id, percent) of the paper's QA banks - the ones picked on it,
+    else every QA bank the teacher can see for its subject + grade."""
+    shares = (
+        await session.execute(
+            select(QuestionPaperDatasetShare.dataset_id, QuestionPaperDatasetShare.percent)
+            .join(Dataset, Dataset.id == QuestionPaperDatasetShare.dataset_id)
+            .where(QuestionPaperDatasetShare.paper_id == paper.id, Dataset.type == DatasetType.QA)
+        )
+    ).all()
+    if shares:
+        return list(shares)
+    return [(d.id, 1) for d in await visible_datasets(session, user, subject_id=paper.subject_id, grade=paper.grade)
+            if d.type == DatasetType.QA]
+
+
+async def _bank_slots(session: AsyncSession, paper: QuestionPaper, user: User, slots: list[dict]) -> dict[int, dict]:
+    """About BANK_SHARE of the slots filled straight from the question bank
+    (same bloom/type/difficulty/marks), spread across the paper."""
+    from src.services.paper_parallel import _bank_pick, _scope_chapter_ids  # paper_parallel imports this module
+
+    dataset_ids = [d for d, _ in await _bank_shares(session, paper, user)]
+    chapter_ids = await _scope_chapter_ids(session, paper)
+    if not dataset_ids or not chapter_ids or len(slots) < 2:
+        return {}
+    quota, step = max(1, round(len(slots) * BANK_SHARE)), max(1, round(1 / BANK_SHARE))
+    order = [i for start in range(step) for i in range(start, len(slots), step)]  # 0,4,8,..,1,5,9,..
+    picked: dict[int, dict] = {}
+    taken: list[str] = []
+    for i in order:
+        if len(picked) == quota:
+            break
+        slot = slots[i]
+        want = SimpleNamespace(bloom_level=BloomLevel(slot["bloom_level"]), marks=slot["marks"],
+                               question_type=_question_type(slot["question_type"]), difficulty=slot["difficulty"])
+        bank = await _bank_pick(session, want, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken)
+        if bank is None:
+            continue
+        taken.append(bank.text)
+        picked[i] = {"text": bank.text, "answer": bank.answer, "options": bank.options, "bank_id": bank.id,
+                     "bloom_level": slot["bloom_level"], "difficulty": slot["difficulty"],
+                     "question_type": (bank.question_type.value if bank.question_type else slot["question_type"]),
+                     "chapter_id": bank.chapter_id, "topic_id": bank.topic_id,
+                     "chapter_number": (await session.get(Chapter, bank.chapter_id)).order_index}
+    return picked
+
+
+async def _dataset_reference_questions(session: AsyncSession, paper: QuestionPaper, user: User) -> list[dict]:
     """Question-bank grounding for generation: a fresh random sample of the
     paper's QA-dataset questions on its selected topics (or, with no topics
     picked, its chapters), split across datasets by their share percent.
@@ -445,13 +497,7 @@ async def _dataset_reference_questions(session: AsyncSession, paper: QuestionPap
         return []
     in_scope = DatasetQuestion.topic_id.in_(topic_ids) if topic_ids else DatasetQuestion.chapter_id.in_(chapter_ids)
 
-    shares = (
-        await session.execute(
-            select(QuestionPaperDatasetShare.dataset_id, QuestionPaperDatasetShare.percent)
-            .join(Dataset, Dataset.id == QuestionPaperDatasetShare.dataset_id)
-            .where(QuestionPaperDatasetShare.paper_id == paper.id, Dataset.type == DatasetType.QA)
-        )
-    ).all()
+    shares = await _bank_shares(session, paper, user)
     total_percent = sum(p for _, p in shares) or 1
 
     seen: set[str] = set()
@@ -502,6 +548,61 @@ def _assign_marks(paper: QuestionPaper, sections: list[QuestionPaperSection], qu
     return marks_sequence[:question_count]
 
 
+_DEFAULT_BLOOM = {"REMEMBER": 20, "UNDERSTAND": 30, "APPLY": 30, "ANALYZE": 20}
+_DEFAULT_DIFFICULTY = {"EASY": 30, "MEDIUM": 50, "HARD": 20}
+_BLOOM_ORDER = [level.value for level in BloomLevel]
+_DIFFICULTY_ORDER = ["EASY", "MEDIUM", "HARD"]
+
+
+def _kg_question_types(question_types: list[str]) -> list[str]:
+    """Paper question types (enum values or CBSE labels like "Short Answer II")
+    -> the kg generator's four."""
+    out: list[str] = []
+    for t in question_types:
+        u = t.upper()
+        kind = ("mcq" if "MCQ" in u or "ASSERTION" in u or "TRUE" in u
+                else "long_answer" if "LONG" in u
+                else "numerical" if "NUMERICAL" in u
+                else "short_answer")
+        if kind not in out:
+            out.append(kind)
+    return out or ["mcq", "short_answer", "long_answer"]
+
+
+def _by_marks(marks: list[int], percents: dict[str, int], order: list[str]) -> list[str]:
+    """One level per slot so each level's share of MARKS tracks its percent:
+    biggest slots first, each to the level furthest below its target."""
+    total, scale = sum(marks), sum(percents.values())
+    deficit = {level: percents.get(level, 0) * total / scale for level in order if percents.get(level, 0) > 0}
+    out = [""] * len(marks)
+    for i in sorted(range(len(marks)), key=lambda i: -marks[i]):
+        level = max(deficit, key=lambda lv: deficit[lv])  # ties: earliest in order
+        out[i] = level
+        deficit[level] -= marks[i]
+    return out
+
+
+def _plan_slots(marks: list[int], labels: list[str | None], bloom: dict[str, int],
+                difficulty: dict[str, int], question_types: list[str]) -> list[dict]:
+    """The paper as an ordered list of question slots for the kg generator."""
+    types = _kg_question_types(question_types)
+    levels = _by_marks(marks, bloom if sum(bloom.values()) else _DEFAULT_BLOOM, _BLOOM_ORDER)
+    diffs = _by_marks(marks, difficulty if sum(difficulty.values()) else _DEFAULT_DIFFICULTY, _DIFFICULTY_ORDER)
+
+    def kind(m: int) -> str:
+        want = ["mcq", "short_answer"] if m == 1 else ["long_answer", "short_answer"] if m >= 4 else ["short_answer", "numerical"]
+        return next((t for t in want if t in types), types[0])
+
+    return [{"section": label, "marks": m, "bloom_level": b, "difficulty": d, "question_type": kind(m)}
+            for m, label, b, d in zip(marks, labels, levels, diffs)]
+
+
+def _question_type(value: str | None) -> QuestionType | None:
+    if not value:
+        return None
+    return _enum_or_none(QuestionType, "SHORT_ANSWER" if value.upper() == "NUMERICAL" else value.upper())
+
+
 @router.post("/question-papers/{paper_id}/generate")
 async def generate_paper(
     paper_id: str,
@@ -532,12 +633,18 @@ async def generate_paper(
     chapter_refs, topic_names = await _resolve_kg_scope(session, paper)
     requested_chapter_numbers = {c["number"] for c in chapter_refs}
 
+    plan_marks = _assign_marks(paper, sections, target_count)
+    slots = _plan_slots(plan_marks, [s.label for s in sections for _ in range(s.question_count)] or [None] * target_count,
+                        bloom_distribution, difficulty_distribution, paper.question_types or [])
+
     questions: list[dict] = []
     references: list[dict] = []
     if chapter_refs:
         subject_name, board, grade = await _paper_kg_identity(session, paper)
-        references = await _dataset_reference_questions(session, paper)
-        questions = await kg_client.generate_paper_questions(
+        references = await _dataset_reference_questions(session, paper, user)
+        from_bank = await _bank_slots(session, paper, user, slots)
+        open_slots = [slot for i, slot in enumerate(slots) if i not in from_bank]
+        generated = iter(await kg_client.generate_paper_questions(
             subject=subject_name,
             board=board,
             grade=grade,
@@ -546,9 +653,11 @@ async def generate_paper(
             bloom_distribution=bloom_distribution,
             difficulty_distribution=difficulty_distribution,
             question_types=paper.question_types or [],
-            total_questions=target_count,
+            total_questions=len(open_slots),
             reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
-        )
+            slots=open_slots,
+        ) if open_slots else [])
+        questions = [q for q in (from_bank.get(i) or next(generated, None) for i in range(len(slots))) if q]
 
     existing = await session.execute(
         select(QuestionPaperQuestion).where(QuestionPaperQuestion.paper_id == paper.id)
@@ -567,13 +676,18 @@ async def generate_paper(
     )).scalars().all() if chapters_by_number else []
     bank_by_text = {normalize(r["text"]): r["id"] for r in references}
     for order, (q, marks) in enumerate(zip(questions, marks_sequence), start=1):
-        chapter = chapters_by_number.get(q.get("chapter_number"))
-        topic = next((t for t in topics if chapter and t.chapter_id == chapter.id and t.name == q.get("topic")), None)
-        bank_id = bank_by_text.get(normalize(q["text"]))
+        chapter = (next((c for c in chapters_by_number.values() if c.id == q["chapter_id"]), None)
+                   if q.get("chapter_id") else chapters_by_number.get(q.get("chapter_number")))
+        topic = (next((t for t in topics if t.id == q["topic_id"]), None) if q.get("topic_id") else
+                 next((t for t in topics if chapter and t.chapter_id == chapter.id and t.name == q.get("topic")), None))
+        # the kg prompt allows "minimal edits" to a reused bank question, so match closely, not exactly
+        close = difflib.get_close_matches(normalize(q["text"]), list(bank_by_text), n=1, cutoff=0.8)
+        bank_id = q.get("bank_id") or (bank_by_text[close[0]] if close else None)
         session.add(
             QuestionPaperQuestion(
                 paper_id=paper.id, order=order, bloom_level=q["bloom_level"], marks=marks, text=q["text"],
-                question_type=_enum_or_none(QuestionType, q.get("question_type")),
+                question_type=_question_type(q.get("question_type"))
+                or (_question_type(slots[order - 1]["question_type"]) if order <= len(slots) else None),
                 difficulty=_enum_or_none(PaperDifficultyLevel, q.get("difficulty")),
                 chapter_id=chapter.id if chapter else None, topic_id=topic.id if topic else None,
                 section_name=section_sequence[order - 1] if order <= len(section_sequence) else None,

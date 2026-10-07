@@ -223,7 +223,7 @@ async def _generated_paper(db, monkeypatch, s, kg_questions=None, references=())
              "difficulty": "MEDIUM", "question_type": "LONG_ANSWER", "chapter_number": 12, "topic": "x"},
         ]
 
-    async def fake_refs(session, paper):
+    async def fake_refs(session, paper, user):
         return list(references)
 
     monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions", fake_generate)

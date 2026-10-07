@@ -32,7 +32,7 @@ _UNIT_25 = [
     _section("Section C", 2, 5, "Long Answer"),
 ]
 _PATTERNS = {
-    "unit-test": ("Unit test", "Unit Test", 25, 45, _UNIT_25, _bloom(25, 35, 30, 10, 0, 0),
+    "unit-test": ("Unit test", "Unit Test", 25, 60, _UNIT_25, _bloom(25, 35, 30, 10, 0, 0),
                   {"easy": 40, "medium": 45, "hard": 15}),
     "half-yearly": ("Half-yearly", "Half-Yearly", 80, 180, _CBSE_80, _bloom(20, 30, 30, 15, 5, 0),
                     {"easy": 30, "medium": 50, "hard": 20}),

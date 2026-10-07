@@ -164,7 +164,7 @@ async def test_starters_are_valid_read_only_constants(schema):
     assert (half.total_marks, half.duration_minutes, [x.name[-1] for x in half.sections]) == (
         80, 180, list("ABCDE"))
     unit = await paper_templates.get_template("starter:cbse-10-unit-test", user=s["owner"], session=db)
-    assert (unit.total_marks, unit.duration_minutes) == (25, 45)
+    assert (unit.total_marks, unit.duration_minutes) == (25, 60)
 
     with pytest.raises(ForbiddenError):
         await paper_templates.update_template(STARTER, UpdatePaperTemplateIn(name="x"),

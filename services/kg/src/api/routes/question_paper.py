@@ -39,6 +39,7 @@ async def generate(body: GenerateQuestionsIn) -> GenerateQuestionsOut:
         question_types=body.question_types,
         total_questions=body.total_questions,
         reference_questions=body.reference_questions,
+        slots=[slot.model_dump() for slot in body.slots],
     )
     return GenerateQuestionsOut(questions=[GeneratedQuestionOut(**q) for q in questions])
 

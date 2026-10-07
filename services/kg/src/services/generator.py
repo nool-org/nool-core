@@ -97,6 +97,16 @@ style). Use them as grounding for scope, style, difficulty and marking:
 Question-bank sample:"""
 
 
+# slot mode: core already copied its bank questions into the paper, so the
+# sample is only for style - every slot here gets a NEW question
+BANK_STYLE_GUIDANCE = """
+Question-bank sample on these topics (previous-year / sample-paper style) -
+match its scope, style, difficulty and marking, but write NEW questions: a
+different fact, scenario, numbers or angle, never a copy or paraphrase.
+
+Question-bank sample:"""
+
+
 def _build_user_message(
     *,
     concept_context: list[dict],
@@ -105,7 +115,18 @@ def _build_user_message(
     question_types: list[str],
     total_questions: int,
     reference_questions: list[dict] | None = None,
+    slots: list[dict] | None = None,
 ) -> str:
+    if slots:
+        return "\n".join([
+            f"Generate exactly {len(slots)} questions, IN THIS ORDER, one per slot below. Each question "
+            "must match its slot's bloom_level, difficulty and question_type, and its length and depth "
+            "must suit its marks (1 mark = one quick fact or MCQ; 5 marks = a multi-step answer).",
+            json.dumps(slots),
+            "\nAvailable topics/subtopics (grounding context):",
+            json.dumps(concept_context, indent=2),
+            *([BANK_STYLE_GUIDANCE, json.dumps(reference_questions, indent=2)] if reference_questions else []),
+        ])
     parts = [
         f"Generate exactly {total_questions} questions.",
         f"Bloom level distribution (level: count): {json.dumps(bloom_distribution)}",
@@ -183,6 +204,7 @@ async def generate_questions(
     question_types: list[str],
     total_questions: int,
     reference_questions: list[dict] | None = None,
+    slots: list[dict] | None = None,
 ) -> list[dict]:
     if not concept_context and not reference_questions:
         return []
@@ -201,6 +223,7 @@ async def generate_questions(
                     question_types=question_types,
                     total_questions=total_questions,
                     reference_questions=reference_questions,
+                    slots=slots,
                 ),
             },
         ],

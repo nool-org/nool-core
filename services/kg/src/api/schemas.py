@@ -66,6 +66,14 @@ class GenerateQuestionsOut(BaseModel):
     questions: list[GeneratedQuestionOut]
 
 
+class PaperSlot(BaseModel):
+    section: ShortText | None = None
+    marks: int = Field(ge=1, le=20)
+    bloom_level: ShortText
+    difficulty: ShortText
+    question_type: ShortText
+
+
 class GenerateQuestionsIn(BaseModel):
     subject: ShortText = "Science"
     board: ShortText = "CBSE"
@@ -80,6 +88,9 @@ class GenerateQuestionsIn(BaseModel):
     # see generator.py's REFERENCE_GUIDANCE for how they're used.
     # Core sends at most 40 (its _REFERENCE_POOL_SIZE).
     reference_questions: list[dict] = Field(default=[], max_length=100)
+    # One entry per question, in paper order - when given, the questions are
+    # written slot by slot (marks-aware) instead of from the distributions.
+    slots: list[PaperSlot] = Field(default=[], max_length=100)
 
 
 class ReplacementCandidatesIn(BaseModel):
