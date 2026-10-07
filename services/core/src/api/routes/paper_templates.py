@@ -20,11 +20,12 @@ from src.services.paper_templates import blueprint_body, snapshot_blueprint
 router = APIRouter(prefix="/api/v1", tags=["question-paper-templates"])
 
 
-def _out(t: QuestionPaperTemplate) -> PaperTemplateOut:
+def _out(t: QuestionPaperTemplate, user: User | None = None) -> PaperTemplateOut:
     return PaperTemplateOut(
         id=str(t.id), name=t.name, exam_type=t.exam_type, board=t.board, grade=t.grade,
         subject_id=str(t.subject_id), total_marks=t.total_marks, duration_minutes=t.duration_minutes,
         created_by=str(t.created_by), created_at=t.created_at,
+        can_delete=user is not None and (user.role == Role.SCHOOL_ADMIN or t.created_by == user.id),
     )
 
 
@@ -54,7 +55,7 @@ async def create_template(
     session.add(template)
     await session.commit()
     await session.refresh(template)
-    return _out(template)
+    return _out(template, user)
 
 
 @router.get("/question-paper-templates")
@@ -67,7 +68,7 @@ async def list_templates(
         select(QuestionPaperTemplate).where(QuestionPaperTemplate.school_id == user.school_id)
         .order_by(QuestionPaperTemplate.created_at.desc())
     )).scalars().all()
-    return ListEnvelope(items=[_out(t) for t in rows], total=len(rows))
+    return ListEnvelope(items=[_out(t, user) for t in rows], total=len(rows))
 
 
 @router.post("/question-paper-templates/{template_id}/use", status_code=201,

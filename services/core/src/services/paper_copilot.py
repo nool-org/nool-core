@@ -2,14 +2,13 @@
 proposals (C11 ops), and explain-this-question. Nothing here changes the
 paper's questions - the app accepts proposals through /actions (W5-01).
 
-The rules check (C10) and its preview belong to W5-01's
-src.services.paper_rules; until that module is on this branch both
-adapters below return None.
+The rules check (C10) comes from paper_rules.rules_check and the preview
+from paper_actions.preview_ops (W5-01); proposal ops are converted to
+paper_actions' op models at that boundary (same camelCase wire shape).
 """
 
 import base64
 import binascii
-import inspect
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -20,10 +19,12 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import AppError, ConflictError, ValidationError
+from src.api.schemas.question_paper import PaperOp as ActionOp
 from src.api.schemas.paper_copilot import (
     AfterSummary, EditOp, ExplainOut, NewQuestion, PaperChatIn, PaperChatMessageOut, PaperChatOut, PaperOp,
     Proposal, QuestionSummary, ReorderOp, ReplaceOp,
 )
+from src.services import paper_actions, paper_rules
 from src.domain.models import (
     BloomLevel, Chapter, Dataset, DatasetQuestion, DatasetType, QuestionPaper, QuestionPaperChapter,
     QuestionPaperDatasetShare, QuestionPaperQuestion, QuestionPaperSection, QuestionPaperStatus, QuestionPaperTopic,
@@ -60,6 +61,7 @@ _BLOOM_TESTS = {
     B.CREATE: "put ideas together to design or propose something new",
 }
 _OPS = TypeAdapter(PaperOp)
+_ACTION_OPS = TypeAdapter(list[ActionOp])
 
 
 def _val(v):
@@ -67,36 +69,30 @@ def _val(v):
 
 
 # ------------------------------------------------------------- W5-01 adapters
-async def _maybe_await(value):
-    return await value if inspect.isawaitable(value) else value
-
-
 def _jsonable(rc):
     return rc.model_dump(mode="json", by_alias=True) if hasattr(rc, "model_dump") else rc
 
 
 async def _rules_check(session: AsyncSession, paper: QuestionPaper) -> dict | None:
-    try:
-        from src.services.paper_rules import rules_check  # W5-01
-    except ImportError:
-        return None
-    return _jsonable(await _maybe_await(rules_check(session, paper)))
+    return _jsonable(await paper_rules.rules_check(session, paper))
 
 
 async def _preview_rules_check(session: AsyncSession, paper: QuestionPaper, ops: list) -> dict | None:
-    """C10 as if `ops` were applied - W5-01's preview, when present."""
+    """C10 as if `ops` were applied (nothing is kept). A preview that can't
+    be computed never blocks the chat reply."""
     try:
-        from src.services.paper_rules import preview_rules_check  # W5-01
-    except ImportError:
+        action_ops = _ACTION_OPS.validate_python(
+            [op.model_dump(mode="json", by_alias=True, exclude_none=True) for op in ops])
+        return _jsonable(await paper_actions.preview_ops(session, paper, action_ops))
+    except Exception:  # noqa: BLE001 - preview is best-effort
+        logger.warning("paper_copilot_preview_failed", exc_info=True)
         return None
-    return _jsonable(await _maybe_await(preview_rules_check(session, paper, ops)))
 
 
 # ------------------------------------------------------------- context
 async def _questions(session: AsyncSession, paper: QuestionPaper) -> list[QuestionPaperQuestion]:
-    return list((await session.execute(
-        select(QuestionPaperQuestion).where(QuestionPaperQuestion.paper_id == paper.id)
-        .order_by(QuestionPaperQuestion.order))).scalars().all())
+    # through paper_actions so the deferred copilot columns are loaded too
+    return await paper_actions.load_questions(session, paper.id)
 
 
 async def _chapters(session: AsyncSession, paper: QuestionPaper, questions) -> dict[str, str]:

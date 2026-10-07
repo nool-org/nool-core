@@ -1,7 +1,7 @@
 """paper_chat_messages (Paper Copilot chat history)
 
 Revision ID: c5e2a7d1f3b8
-Revises: b4d8e2f6a1c9
+Revises: c1f5a9e3b7d2
 Create Date: 2026-10-07 12:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'c5e2a7d1f3b8'
-down_revision: Union[str, None] = 'b4d8e2f6a1c9'
+down_revision: Union[str, None] = 'c1f5a9e3b7d2'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 INSIGHTS_MODEL = "gpt-5-mini"
 # Per attempt; 2 retries stay under core's 30s wait on this call.
-_TIMEOUT_SECONDS = 9.0
+_TIMEOUT_SECONDS = 15.0  # single attempt: 3 x 9 s retries made insights take ~29 s
 
 _client: Optional[AsyncOpenAI] = None
 
@@ -70,7 +70,7 @@ def _get_client() -> Optional[AsyncOpenAI]:
     global _client
     key = get_settings().openai_api_key
     if _client is None and key:
-        _client = AsyncOpenAI(api_key=key, timeout=_TIMEOUT_SECONDS, max_retries=2)
+        _client = AsyncOpenAI(api_key=key, timeout=_TIMEOUT_SECONDS, max_retries=0)
     return _client
 
 

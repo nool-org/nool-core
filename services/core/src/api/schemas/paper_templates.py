@@ -18,6 +18,7 @@ class PaperTemplateOut(CamelModel):
     total_marks: int | None
     duration_minutes: int | None
     created_by: str
+    can_delete: bool = False  # the caller created it, or is a school admin
     created_at: datetime
 
 

@@ -11,6 +11,8 @@ from difflib import SequenceMatcher
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.services import paper_actions
+
 from shared.errors import ConflictError
 from src.api.routes import question_paper as qp_routes
 from src.api.schemas.paper_answer_key import ParallelOut
@@ -150,8 +152,7 @@ async def _generate(session, paper, slots: list[tuple[int, QuestionPaperQuestion
 
 
 async def create_parallel(session: AsyncSession, original: QuestionPaper, user: User, name: str | None) -> ParallelOut:
-    originals = list((await session.execute(select(QuestionPaperQuestion).where(
-        QuestionPaperQuestion.paper_id == original.id).order_by(QuestionPaperQuestion.order))).scalars().all())
+    originals = await paper_actions.load_questions(session, original.id)  # incl. deferred copilot columns
     if not originals:
         raise ConflictError("This paper has no questions yet - generate it before making a Set B.")
     plan = await get_active_plan(session, user.school_id)

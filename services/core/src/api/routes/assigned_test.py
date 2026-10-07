@@ -10,6 +10,7 @@ from src.api.schemas.common import ListEnvelope
 from src.domain.models import (
     AiAssessorSession,
     AiAssessorSessionRecord,
+    Chapter,
     Role,
     StudentTestResult,
     TestStatus,
@@ -38,6 +39,7 @@ def taken_test_ids(student_id):
 async def _serialize(session: AsyncSession, test: VoiceTest) -> AssignedTestOut:
     subject_result = await session.execute(select(Subject).where(Subject.id == test.subject_id))
     subject = subject_result.scalar_one_or_none()
+    chapter = await session.get(Chapter, test.chapter_id)
     bloom_result = await session.execute(
         select(VoiceTestBloomLevel.bloom_level).where(VoiceTestBloomLevel.test_id == test.id)
     )
@@ -46,7 +48,8 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> AssignedTestOut:
         subject_id=str(test.subject_id),
         subject_label=subject.name if subject else "",
         chapter_id=str(test.chapter_id),
-        title=subject.name if subject else "Test",
+        # the chapter tells a student's several "Science" tests apart
+        title=(chapter.name if chapter else None) or (subject.name if subject else "Test"),
         meta=f"{test.duration_minutes} min",
         in_progress=False,
         bloom_levels=[row[0] for row in bloom_result.all()],

@@ -8,7 +8,11 @@ is never regenerated unless the caller asks to overwrite.
 """
 
 from sqlalchemy import select
+from sqlalchemy.orm import undefer_group
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.services import paper_actions
+from src.services.paper_actions import COPILOT_COLUMNS
 
 from shared.errors import NotFoundError, ValidationError
 from src.api.schemas.paper_answer_key import (
@@ -31,9 +35,8 @@ def marks_match(points: list[dict], marks: float) -> bool:
 
 
 async def _questions(session: AsyncSession, paper_id) -> list[QuestionPaperQuestion]:
-    return list((await session.execute(
-        select(QuestionPaperQuestion).where(QuestionPaperQuestion.paper_id == paper_id)
-        .order_by(QuestionPaperQuestion.order))).scalars().all())
+    # through paper_actions so the deferred copilot columns (type, answer, ...) are loaded
+    return await paper_actions.load_questions(session, paper_id)
 
 
 async def _keys(session: AsyncSession, questions) -> dict:
@@ -106,7 +109,7 @@ async def generate_answer_key(session: AsyncSession, paper: QuestionPaper, *, re
 
 async def update_answer_key(session: AsyncSession, paper: QuestionPaper, question_id: str,
                             body: UpdateAnswerKeyIn, user: User) -> AnswerKeyItemOut:
-    q = (await session.execute(select(QuestionPaperQuestion).where(
+    q = (await session.execute(select(QuestionPaperQuestion).options(undefer_group(COPILOT_COLUMNS)).where(
         QuestionPaperQuestion.id == question_id, QuestionPaperQuestion.paper_id == paper.id))).scalar_one_or_none()
     if q is None:
         raise NotFoundError(f'No question "{question_id}" on this paper.')

@@ -8,7 +8,7 @@ from src.api.schemas.teacher_dashboard import (
     TeacherDashboardOut,
     TeacherHeadlineTest,
 )
-from src.domain.models import Role, SchoolClass, TeacherClassAssignment, User, VoiceTest
+from src.domain.models import Chapter, Role, SchoolClass, TeacherClassAssignment, User, VoiceTest
 from src.repositories.roster_repository import student_count
 
 router = APIRouter(prefix="/api/v1", tags=["teacher-dashboard"])
@@ -51,10 +51,12 @@ async def get_teacher_dashboard(
         )
         test = test_result.scalar_one_or_none()
         if test is not None:
+            chapter = await session.get(Chapter, test.chapter_id)
             headline_test = TeacherHeadlineTest(
                 id=str(test.id),
-                title="Test",
-                meta=f"{test.status.value} · {test.completed_count}/{test.assigned_count} complete",
+                title=chapter.name if chapter else "Voice test",
+                meta=f"{test.status.value.replace('_', ' ').capitalize()} · "
+                     f"{test.completed_count}/{test.assigned_count} complete",
                 status=test.status,
             )
 

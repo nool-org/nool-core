@@ -151,3 +151,8 @@ __all__ = [
     "VoiceTestQuestionStatus",
     "VoiceTestTargetStudent",
 ]
+
+# Paper Copilot (wave 5) - exported so Alembic metadata sees every table
+from .paper_answer_key import QuestionPaperAnswerKey, QuestionPaperParallel  # noqa: E402,F401
+from .paper_chat import PaperChatMessage  # noqa: E402,F401
+from .paper_template import QuestionPaperTemplate  # noqa: E402,F401

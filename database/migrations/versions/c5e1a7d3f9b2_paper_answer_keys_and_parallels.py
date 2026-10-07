@@ -1,7 +1,7 @@
 """question_paper_answer_keys + question_paper_parallels (answer key, Set B)
 
 Revision ID: c5e1a7d3f9b2
-Revises: b4d8e2f6a1c9
+Revises: c5e2a7d1f3b8
 Create Date: 2026-10-07 12:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'c5e1a7d3f9b2'
-down_revision: Union[str, None] = 'b4d8e2f6a1c9'
+down_revision: Union[str, None] = 'c5e2a7d1f3b8'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

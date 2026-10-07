@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.common import ListEnvelope
 from src.api.schemas.practice_bank import PracticeBankEntryOut
-from src.domain.models import BloomLevel, PracticeBankEntry, Role, User
+from src.domain.models import BloomLevel, PracticeBankEntry, Role, Subject, User
 
 router = APIRouter(prefix="/api/v1", tags=["practice-bank"])
 
@@ -35,11 +35,17 @@ async def list_my_practice_bank(
     stmt = stmt.order_by(PracticeBankEntry.archived_at.desc())
 
     result = await session.execute(stmt)
+    entries = result.scalars().all()
+    subject_ids = {e.subject_id for e in entries if e.subject_id}
+    subjects = {s.id: s for s in (await session.execute(
+        select(Subject).where(Subject.id.in_(subject_ids)))).scalars().all()} if subject_ids else {}
     items = [
         PracticeBankEntryOut(
             id=str(e.id),
             source_homework_id=str(e.source_homework_id),
             subject_id=str(e.subject_id) if e.subject_id else None,
+            subject_name=subjects[e.subject_id].name if e.subject_id in subjects else None,
+            subject_grade=subjects[e.subject_id].grade if e.subject_id in subjects else None,
             chapter_id=str(e.chapter_id) if e.chapter_id else None,
             topic_id=str(e.topic_id) if e.topic_id else None,
             bloom_level=e.bloom_level,
@@ -47,6 +53,6 @@ async def list_my_practice_bank(
             answer=e.answer,
             archived_at=e.archived_at,
         )
-        for e in result.scalars().all()
+        for e in entries
     ]
     return ListEnvelope(items=items, total=len(items))
