@@ -47,6 +47,7 @@ from src.api.routes import (
 )
 from src.api.routes import test_reviews
 from src.api.routes import paper_copilot
+from src.api.routes import paper_answer_key, paper_parallel
 from src.config.settings import get_settings
 from src.repositories.database import dispose_engine, init_engine
 
@@ -97,6 +98,8 @@ def create_app() -> FastAPI:
     app.include_router(paper_rules.router)
     app.include_router(paper_versions.router)
     app.include_router(paper_copilot.router)
+    app.include_router(paper_answer_key.router)
+    app.include_router(paper_parallel.router)
     app.include_router(teacher_dashboard.router)
     app.include_router(assistant.router)
     # Student
