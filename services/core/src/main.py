@@ -44,6 +44,7 @@ from src.api.routes import (
     voice_test,
 )
 from src.api.routes import test_reviews
+from src.api.routes import paper_templates
 from src.config.settings import get_settings
 from src.repositories.database import dispose_engine, init_engine
 
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(test_result.router)
     app.include_router(homework.router)
     app.include_router(question_paper.router)
+    app.include_router(paper_templates.router)
     app.include_router(teacher_dashboard.router)
     app.include_router(assistant.router)
     # Student
