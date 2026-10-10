@@ -56,6 +56,10 @@ class McqAttemptOut(CamelModel):
     per_bloom: dict[str, int]
     growth: list[GrowthOut]
     correct_answers: list[McqAnswer]
+    # overall mastery at the voice test vs now (guess-corrected), and XP this attempt earned
+    mastery_before: int | None = None
+    mastery_after: int | None = None
+    xp_awarded: int = 0
 
 
 class StudentGrowthOut(CamelModel):

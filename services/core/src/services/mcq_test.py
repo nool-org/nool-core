@@ -377,5 +377,7 @@ async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str,
         "score_percent": score,
         "per_bloom": per_bloom,
         "growth": growth,
+        "mastery_before": before.mastery,
+        "mastery_after": corrected(score),
         "correct_answers": [{"question_id": str(q.id), "option_index": q.correct_index} for q in questions],
     }, correct

@@ -322,7 +322,9 @@ async def test_attempt_marks_scores_growth_and_awards_xp_once(schema, monkeypatc
     assert concept["power"].after_corrected == 100 and concept["power"].delta == 10
     assert {(a.question_id, a.option_index) for a in out.correct_answers} == {(str(r.id), r.correct_index) for r in rows}
     wire = out.model_dump(by_alias=True)
-    assert set(wire) == {"scorePercent", "perBloom", "growth", "correctAnswers"}
+    assert set(wire) == {"scorePercent", "perBloom", "growth", "correctAnswers",
+                         "masteryBefore", "masteryAfter", "xpAwarded"}
+    assert out.xp_awarded == 9 * service.XP_PER_CORRECT and out.mastery_after is not None
     assert set(wire["growth"][0]) == {"key", "kind", "before", "afterCorrected", "delta"}
 
     xp = (await db.execute(select(StudentGamification.xp).where(StudentGamification.student_id == s["student"].id))).scalar_one()

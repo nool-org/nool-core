@@ -90,9 +90,10 @@ async def submit_my_mcq_attempt(
     mcq = await _own(session, mcq_test_id, user)
     result, correct = await mcq_test.submit_attempt(
         session, mcq, {a.question_id: a.option_index for a in body.answers})
-    await apply_xp(session, user.id, correct * mcq_test.XP_PER_CORRECT)
+    xp = correct * mcq_test.XP_PER_CORRECT
+    await apply_xp(session, user.id, xp)
     await session.commit()
-    return McqAttemptOut.model_validate(result)
+    return McqAttemptOut.model_validate({**result, "xp_awarded": xp})
 
 
 @router.get("/tests/{test_id}/growth")
