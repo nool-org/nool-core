@@ -115,6 +115,8 @@ class QuestionPaperSection(IdMixin, Base):
     label: Mapped[str] = mapped_column(String)
     question_count: Mapped[int] = mapped_column(Integer)
     marks_each: Mapped[int] = mapped_column(Integer)
+    # e.g. ["MCQ", "Assertion-Reason"]; null = the paper's own question_types
+    question_types: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
 
 class QuestionPaperBloomDistribution(Base):

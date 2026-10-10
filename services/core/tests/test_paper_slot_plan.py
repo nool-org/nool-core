@@ -39,3 +39,9 @@ def test_question_type_mapping():
     assert _question_type("mcq") is QuestionType.MCQ
     assert _question_type("numerical") is QuestionType.SHORT_ANSWER
     assert _question_type(None) is None
+
+
+def test_a_sections_own_types_override_the_papers():
+    slots = _plan_slots([2, 2], ["A", "B"], {}, {}, ["MCQ", "Short Answer I"],
+                        [["Long Answer"], None])
+    assert [s["question_type"] for s in slots] == ["long_answer", "short_answer"]

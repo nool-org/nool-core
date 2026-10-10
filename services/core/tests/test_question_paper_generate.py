@@ -158,3 +158,39 @@ async def test_generate_takes_about_a_quarter_from_the_visible_bank_and_kg_write
     assert len(questions) == 10 and len(from_bank) == round(10 * question_paper.BANK_SHARE)
     assert captured["total_questions"] == len(captured["slots"]) == 10 - len(from_bank)
     assert all(q.dataset_question_id and q.question_type == "MCQ" for q in from_bank)
+
+
+@pytest.mark.asyncio
+async def test_section_question_types_are_saved_returned_and_used_for_generation(db_session, monkeypatch):
+    from src.api.schemas.question_paper import PaperSection
+
+    teacher, seeded = await _seed_paper_ready_to_generate(db_session)
+    paper = await question_paper.create_paper(
+        CreateQuestionPaperIn(
+            name="Sectioned", exam_type="UNIT_TEST", board="CBSE", grade=8, language="English",
+            subject_id=str(seeded["subject"].id), chapter_ids=[str(seeded["chapter_id"])],
+            question_types=["MCQ", "Short Answer I"], total_marks=4,
+            sections=[PaperSection(label="A", question_count=2, marks_each=1, question_types=["Short Answer I"]),
+                      PaperSection(label="B", question_count=1, marks_each=2)],
+        ),
+        user=teacher, session=db_session,
+    )
+    out = await question_paper.get_paper(paper.id, user=teacher, session=db_session)
+    assert [s.question_types for s in out.sections] == [["Short Answer I"], None]
+
+    captured: dict = {}
+
+    async def fake_generate_paper_questions(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions",
+                        fake_generate_paper_questions)
+    monkeypatch.setattr(question_paper, "_bank_slots", lambda *a, **k: _no_bank())
+    await question_paper.generate_paper(paper.id, user=teacher, session=db_session)
+    # section A asked for short answers even for its 1-mark slots; B falls back to the paper's types
+    assert [s["question_type"] for s in captured["slots"]] == ["short_answer", "short_answer", "short_answer"]
+
+
+async def _no_bank():
+    return {}

@@ -14,6 +14,7 @@ class PaperSection(CamelModel):
     label: str
     question_count: int
     marks_each: int
+    question_types: list[str] | None = None  # None = the paper's own questionTypes
 
 
 class PaperRules(CamelModel):

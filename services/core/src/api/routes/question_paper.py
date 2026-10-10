@@ -119,7 +119,8 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
         total_marks=paper.total_marks,
         duration_minutes=paper.duration_minutes,
         sections=[
-            PaperSection(label=s.label, question_count=s.question_count, marks_each=s.marks_each)
+            PaperSection(label=s.label, question_count=s.question_count, marks_each=s.marks_each,
+                         question_types=s.question_types)
             for s in sections.scalars().all()
         ],
         bloom_distribution=[BloomTarget(level=d.bloom_level, value=d.value) for d in bloom_rows],
@@ -198,6 +199,7 @@ async def _apply_body(session: AsyncSession, paper: QuestionPaper, body: CreateQ
                 label=section.label,
                 question_count=section.question_count,
                 marks_each=section.marks_each,
+                question_types=section.question_types or None,
             )
         )
     school = await session.get(School, paper.school_id)
@@ -583,18 +585,22 @@ def _by_marks(marks: list[int], percents: dict[str, int], order: list[str]) -> l
 
 
 def _plan_slots(marks: list[int], labels: list[str | None], bloom: dict[str, int],
-                difficulty: dict[str, int], question_types: list[str]) -> list[dict]:
-    """The paper as an ordered list of question slots for the kg generator."""
-    types = _kg_question_types(question_types)
+                difficulty: dict[str, int], question_types: list[str],
+                slot_types: list[list[str] | None] | None = None) -> list[dict]:
+    """The paper as an ordered list of question slots for the kg generator.
+    `slot_types` (per slot, from its section) overrides the paper's types."""
+    paper_types = _kg_question_types(question_types)
     levels = _by_marks(marks, bloom if sum(bloom.values()) else _DEFAULT_BLOOM, _BLOOM_ORDER)
     diffs = _by_marks(marks, difficulty if sum(difficulty.values()) else _DEFAULT_DIFFICULTY, _DIFFICULTY_ORDER)
 
-    def kind(m: int) -> str:
+    def kind(m: int, own: list[str] | None) -> str:
+        types = _kg_question_types(own) if own else paper_types
         want = ["mcq", "short_answer"] if m == 1 else ["long_answer", "short_answer"] if m >= 4 else ["short_answer", "numerical"]
         return next((t for t in want if t in types), types[0])
 
-    return [{"section": label, "marks": m, "bloom_level": b, "difficulty": d, "question_type": kind(m)}
-            for m, label, b, d in zip(marks, labels, levels, diffs)]
+    own_types = slot_types or [None] * len(marks)
+    return [{"section": label, "marks": m, "bloom_level": b, "difficulty": d, "question_type": kind(m, own)}
+            for m, label, b, d, own in zip(marks, labels, levels, diffs, own_types)]
 
 
 def _question_type(value: str | None) -> QuestionType | None:
@@ -635,7 +641,8 @@ async def generate_paper(
 
     plan_marks = _assign_marks(paper, sections, target_count)
     slots = _plan_slots(plan_marks, [s.label for s in sections for _ in range(s.question_count)] or [None] * target_count,
-                        bloom_distribution, difficulty_distribution, paper.question_types or [])
+                        bloom_distribution, difficulty_distribution, paper.question_types or [],
+                        [s.question_types for s in sections for _ in range(s.question_count)] or None)
 
     questions: list[dict] = []
     references: list[dict] = []
