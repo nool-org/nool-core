@@ -17,6 +17,7 @@ you lag" to "did it improve".
 
 import logging
 import random
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -69,6 +70,18 @@ def status(mcq: McqTest) -> str:
     if mcq.completed_at is not None:
         return "completed"
     return "available" if mcq.unlocked_at is not None else "locked"
+
+
+_INLINE_OPTION = re.compile(r"^\s*\(?[a-dA-D][.)]\s+\S")
+
+
+def strip_inline_options(text: str) -> str:
+    """Bank questions sometimes carry their choices in the stem ("a. -20 cm").
+    The options are shown as buttons, so drop those trailing lines."""
+    lines = text.rstrip().split("\n")
+    while lines and _INLINE_OPTION.match(lines[-1]):
+        lines.pop()
+    return "\n".join(lines).rstrip() or text
 
 
 # ------------------------------------------------------------------ unlock
@@ -310,7 +323,7 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     logger.info("mcq_questions_built", extra={"mcq_test_id": str(mcq.id), **counts})
 
     rows = [McqTestQuestion(mcq_test_id=mcq.id, order=order, bloom_level=d.bloom_level, concept=d.concept,
-                            text=d.text, options=d.options, correct_index=d.correct_index,
+                            text=strip_inline_options(d.text), options=d.options, correct_index=d.correct_index,
                             source_question_id=d.source_question_id)
             for order, d in enumerate((drafts[i] for i in sorted(drafts)), start=1)]
     session.add_all(rows)
