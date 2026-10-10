@@ -75,6 +75,7 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> VoiceTestOut:
         assigned_count=test.assigned_count,
         completed_count=test.completed_count,
         created_at=test.created_at,
+        due_at=test.due_at,
     )
 
 

@@ -23,6 +23,7 @@ class VoiceTestOut(CamelModel):
     assigned_count: int
     completed_count: int
     created_at: datetime
+    due_at: datetime | None = None  # end of the completion window (set once scheduled)
 
 
 class CreateTestIn(CamelModel):
