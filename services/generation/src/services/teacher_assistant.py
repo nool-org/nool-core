@@ -43,7 +43,7 @@ class SummaryRequest(BaseModel):
 
 
 class SummaryResult(BaseModel):
-    bullets: list[str] = Field(description="2-3 bullets, each under 18 words, most important first")
+    bullets: list[str] = Field(description="2-3 bullets, each under 12 words, most important first")
 
 
 async def reply(llm: StructuredLLM, body: ReplyRequest, *, model: str) -> ReplyResult:
@@ -55,7 +55,7 @@ async def reply(llm: StructuredLLM, body: ReplyRequest, *, model: str) -> ReplyR
 
 async def summary(llm: StructuredLLM, body: SummaryRequest, *, model: str) -> SummaryResult:
     system = RULES + """
-Write the teacher's dashboard summary: 2-3 bullets, most important first - what needs their
+Write the teacher's dashboard summary: 2-3 bullets of at most 12 words each, most important first - what needs their
 action today (reviews waiting, a test whose deadline passed with students not finished, low
 homework completion), then the clearest learning signal (the weakest thinking level or a
 student who needs help). No greetings, no filler."""
