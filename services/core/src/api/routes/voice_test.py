@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends
@@ -234,6 +235,7 @@ async def schedule_test(
     if test.status != TestStatus.DRAFT:
         raise ConflictError("Test isn't in a schedulable state.")
     test.status = TestStatus.SCHEDULED
+    test.scheduled_at = datetime.now(timezone.utc)
     await session.commit()
     chapter = await session.get(Chapter, test.chapter_id)
     student_ids = (await session.execute(

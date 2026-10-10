@@ -80,6 +80,7 @@ async def get_student_dashboard(
             VoiceTestTargetStudent.student_id == user.id,
             VoiceTest.id.not_in(taken_test_ids(user.id)),
             VoiceTest.status != TestStatus.DRAFT,  # same rule as assigned_test.py
+            VoiceTest.still_open(),
         )
         .order_by(VoiceTest.created_at)
     )

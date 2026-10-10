@@ -103,3 +103,29 @@ def test_no_cap_below_limit(monkeypatch):
     ws = FakeWS([_done(MESSAGE) for _ in range(rs.MAX_REPLIES - 1)] + [{"type": "response.created"}])
     call, _ = _run_sideband(monkeypatch, ws)
     assert "response.cancel" not in [m["type"] for m in ws.sent] and not call.forcing_end
+
+
+def test_asking_to_exit_early_is_refused_and_the_test_continues(monkeypatch):
+    # end_session after only the "ready" turn: refused, the model told to carry on
+    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 0.05)
+    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    ws = FakeWS([
+        {"type": "conversation.item.created",
+         "item": {"id": "u1", "type": "message", "role": "user", "content": [{"type": "input_audio"}]}},
+        {"type": "response.done", "response": {"output": [
+            {"type": "function_call", "name": "end_session", "call_id": "c1", "arguments": "{}"}]}},
+    ])
+    call, hangups = _run_sideband(monkeypatch, ws, SessionConfig(num_questions=5))
+    assert not call.state.is_completed and not call.closing_sent
+    instructions = [m["response"].get("instructions") for m in ws.sent
+                    if m.get("type") == "response.create" and "response" in m]
+    assert rs.END_REFUSED_INSTRUCTIONS in instructions
+
+
+def test_may_end_only_when_really_over():
+    call = rs.RealtimeCall(call_id="c", owner_ref="u", state=session_store.create_session(SessionConfig(num_questions=3)))
+    assert not rs._may_end(call)
+    call.spoken_turns = 4  # "ready" + 3 answers
+    assert rs._may_end(call)
+    call.spoken_turns, call.time_up = 1, True
+    assert rs._may_end(call)

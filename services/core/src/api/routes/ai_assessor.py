@@ -71,6 +71,8 @@ async def open_session(
         )).first()
         if targeted is None:
             raise NotFoundError("This test isn't assigned to you.")
+        if await db.scalar(select(VoiceTest.id).where(VoiceTest.id == body.test_id, VoiceTest.still_open())) is None:
+            raise ConflictError("This test's deadline has passed, so it can't be taken any more.")
         prep_status = await db.scalar(select(VoiceTest.prep_status).where(VoiceTest.id == body.test_id))
         if prep_status == VoiceTestPrepStatus.PENDING:
             raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.")

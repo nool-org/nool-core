@@ -1,7 +1,8 @@
 import uuid
+from datetime import datetime, timedelta
 from enum import Enum
 
-from sqlalchemy import ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -69,6 +70,18 @@ class VoiceTest(IdMixin, TimestampMixin, Base):
     prep_status: Mapped[VoiceTestPrepStatus] = mapped_column(
         SAEnum(VoiceTestPrepStatus, name="voice_test_prep_status"), default=VoiceTestPrepStatus.READY
     )
+    # When the teacher scheduled it; students have completion_window_hours from here
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def due_at(self) -> datetime | None:
+        return self.scheduled_at + timedelta(hours=self.completion_window_hours) if self.scheduled_at else None
+
+    @classmethod
+    def still_open(cls):
+        """SQL filter: not past its deadline (never-scheduled rows have none)."""
+        return (cls.scheduled_at.is_(None)) | (
+            cls.scheduled_at + func.make_interval(0, 0, 0, 0, cls.completion_window_hours) > func.now())
 
 
 class VoiceTestBloomLevel(Base):

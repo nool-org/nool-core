@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from src.domain.models import BloomLevel
 
 from .common import CamelModel
@@ -20,3 +22,4 @@ class AssignedTestOut(CamelModel):
     in_progress: bool
     bloom_levels: list[BloomLevel]
     duration_minutes: int
+    due_at: datetime | None = None  # deadline; the test leaves the list once it passes

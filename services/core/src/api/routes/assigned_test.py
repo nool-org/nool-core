@@ -54,6 +54,7 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> AssignedTestOut:
         in_progress=False,
         bloom_levels=[row[0] for row in bloom_result.all()],
         duration_minutes=test.duration_minutes,
+        due_at=test.due_at,
     )
 
 
@@ -79,6 +80,7 @@ async def list_my_tests(
             VoiceTestTargetStudent.student_id == user.id,
             VoiceTest.id.not_in(taken_test_ids(user.id)),
             VoiceTest.status != TestStatus.DRAFT,  # a teacher's unpublished draft
+            VoiceTest.still_open(),  # past its deadline = gone, can't be taken
         )
     )
     items = [await _serialize(session, t) for t in result.scalars().all()]

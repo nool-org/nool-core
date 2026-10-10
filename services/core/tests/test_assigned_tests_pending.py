@@ -122,3 +122,35 @@ async def test_dashboard_pending_tests_excludes_a_completed_test(db_session):
     # Only one row for this subject - the completed Test's row is gone,
     # not just relabeled (both tests share the same subject/label).
     assert titles.count(subject.name) == 1
+
+
+async def test_an_expired_test_leaves_the_list_and_cannot_be_started(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    import pytest
+
+    from shared.errors import ConflictError
+    from src.api.routes import ai_assessor
+    from src.api.schemas.ai_assessor import OpenSessionIn
+
+    school = School(name=f"School-{uuid.uuid4()}", board="CBSE", city="Bengaluru", contact_email="a@b.com")
+    subject = Subject(name=f"Subject-{uuid.uuid4()}")
+    db_session.add_all([school, subject])
+    await db_session.flush()
+    student = await _seed_student(db_session, school.id)
+    now = datetime.now(timezone.utc)
+    open_test = await _seed_targeted_test(db_session, school_id=school.id, subject=subject)
+    expired = await _seed_targeted_test(db_session, school_id=school.id, subject=subject)
+    open_test.scheduled_at = now - timedelta(hours=47)  # 48 h window: 1 h left
+    expired.scheduled_at = now - timedelta(hours=49)
+    db_session.add_all([VoiceTestTargetStudent(test_id=t.id, student_id=student.id) for t in (open_test, expired)])
+    await db_session.flush()
+
+    items = (await assigned_test.list_my_tests(user=student, session=db_session)).items
+    assert [i.id for i in items] == [str(open_test.id)]
+    assert abs((items[0].due_at - (now + timedelta(hours=1))).total_seconds()) < 5
+
+    with pytest.raises(ConflictError, match="deadline"):
+        await ai_assessor.open_session(
+            OpenSessionIn(test_id=str(expired.id), context_label="x", bloom_levels=[], duration_seconds=600),
+            app_user=student, db=db_session)

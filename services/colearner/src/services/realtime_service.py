@@ -116,6 +116,7 @@ LIVE VOICE SESSION RULES (this is a real-time spoken call):
 - If the student explicitly asks for a hint or a tip, give ONE short guiding nudge on the current question (never the answer, never whether they were right), and stay on that question.
 - Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.
 - If you receive "[TIME_UP]", call end_session.
+- If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
 """
 
 CLOSING_INSTRUCTIONS = (
@@ -142,6 +143,8 @@ class RealtimeCall:
     # end_session forced instead (see _record) - it can't be trusted to stop.
     forcing_end: bool = False
     forced_end_sent: bool = False
+    # [TIME_UP] was sent - ending now is allowed even with questions left
+    time_up: bool = False
     # Spoken co-learner replies so far (response.done with a message), capped at MAX_REPLIES.
     replies: int = 0
     # Reply cap hit: hang up once the closing goodbye has finished playing.
@@ -198,6 +201,7 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
 - Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.
 - If you receive "[TIME_UP]", call end_session.
+- If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
 """
 
 
@@ -288,6 +292,7 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
                 # Time's up: let the co-learner wrap up in its own voice,
                 # then hang up after a short grace period either way.
                 logger.info("realtime_call_time_limit call_id=%s", call.call_id)
+                call.time_up = True
                 await ws.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "[TIME_UP]"}]},
@@ -362,7 +367,20 @@ async def _record(call: RealtimeCall, ws) -> None:
             end = next((o for o in outputs if o.get("type") == "function_call" and o.get("name") == "end_session"), None)
             if call.state.config.questions and not end and not call.state.is_completed:
                 await _questions_done(call, ws, outputs)
-            if end and not call.state.is_completed:
+            if end and not call.state.is_completed and not _may_end(call):
+                # the student asked to stop early - the test can't be ended midway
+                logger.info("realtime_end_refused call_id=%s current=%s", call.call_id, call.current)
+                await ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "function_call_output", "call_id": end.get("call_id"),
+                             "output": json.dumps({"error": "The test can't end before every question is answered."})},
+                }))
+                await ws.send(json.dumps({
+                    "type": "response.create",
+                    "response": {"instructions": END_REFUSED_INSTRUCTIONS, "tool_choice": "none",
+                                 "max_output_tokens": MAX_REPLY_TOKENS},
+                }))
+            elif end and not call.state.is_completed:
                 call.state.is_completed = True
                 # The model tends to call end_session straight after a bare
                 # acknowledgement - so the closing summary is always its own,
@@ -392,6 +410,24 @@ async def _record(call: RealtimeCall, ws) -> None:
             return  # goodbye has finished playing
         elif kind == "error":
             logger.warning("realtime_event_error call_id=%s error=%s", call.call_id, event.get("error"))
+
+
+END_REFUSED_INSTRUCTIONS = (
+    "The student wants to stop, but the test can't be ended midway. In one or two short, kind sentences say that "
+    "you'll finish it together and it won't take long, then repeat the current question."
+)
+
+
+def _may_end(call: RealtimeCall) -> bool:
+    """end_session is honoured only when the test is really over: the final
+    answer is in (or the reply cap hit), or time is up - never because the
+    student asked to quit early."""
+    if call.forcing_end or call.time_up:
+        return True
+    questions = call.state.config.questions
+    if questions:
+        return call.current >= len(questions) and call.spoken_turns > len(questions)
+    return call.spoken_turns >= call.state.config.num_questions + 1
 
 
 def _progress(call: RealtimeCall, n: int) -> dict:
