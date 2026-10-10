@@ -17,6 +17,7 @@ from src.api.schemas.student_dashboard import (
     SubjectTodayOut,
 )
 from src.domain.models import (
+    Chapter,
     Role,
     StudentHomeworkProgress,
     StudentTestResult,
@@ -62,6 +63,17 @@ async def _learning_streak(session: AsyncSession, student_id) -> LearningStreakO
     )
 
 
+def _time_left(due_at: datetime | None) -> str | None:
+    """"5 h left" / "2 days left" / "40 min left" - the student-facing deadline."""
+    if due_at is None:
+        return None
+    minutes = int((due_at - datetime.now(timezone.utc)).total_seconds() // 60)
+    if minutes < 60:
+        return f"{max(minutes, 1)} min left"
+    hours = minutes // 60
+    return f"{hours} h left" if hours < 48 else f"{hours // 24} days left"
+
+
 @router.get("/me/dashboard")
 async def get_student_dashboard(
     user: User = Depends(require_role(Role.STUDENT)),
@@ -89,13 +101,16 @@ async def get_student_dashboard(
     first_per_subject: dict = {}
     for test, subject in pending_tests.all():
         first_per_subject.setdefault(subject.id, (test, subject))
+    chapter_names = dict((await session.execute(
+        select(Chapter.id, Chapter.name).where(Chapter.id.in_([t.chapter_id for t, _ in first_per_subject.values()]))
+    )).all()) if first_per_subject else {}
     subject_today = [
         SubjectTodayOut(
             subject_id=str(subject.id),
             subject_label=subject.name,
             kind=PendingActivityKind.TEST,
-            title=f"{subject.name}",
-            meta=f"{test.status.value.replace('_', ' ').title()}",
+            title=chapter_names.get(test.chapter_id) or subject.name,
+            meta=" · ".join(filter(None, ["Voice test", _time_left(test.due_at)])),
             progress_percent=0,
             for_you_title=f"Continue {subject.name}",
             for_you_meta="Recommended from your last session",
