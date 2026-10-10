@@ -88,12 +88,18 @@ def build_cards(qa: list[dict], questions: dict[int, VoiceTestQuestion]) -> list
 
 
 def template_words(per_bloom: list[dict], topics: list[dict], cards: list[dict], chapter: str | None) -> dict:
-    if per_bloom:
-        best = max(per_bloom, key=lambda b: b["percent"])["level"].value.title()
-        worst = min(per_bloom, key=lambda b: b["percent"])["level"].value.title()
-        headline = f"You are strongest at {best} and can grow most at {worst}."
-    else:
+    top = max(per_bloom, key=lambda b: b["percent"]) if per_bloom else None
+    low = min(per_bloom, key=lambda b: b["percent"]) if per_bloom else None
+    if top is None:
         headline = "Here is how your voice test went."
+    elif top["percent"] == 0:
+        headline = "A tough one - let's build it up together."
+    elif top["percent"] == low["percent"]:
+        # one level as both "strongest" and "grow most" read as nonsense
+        headline = f"You scored {top['percent']}% at every level."
+    else:
+        headline = (f"You are strongest at {top['level'].value.title()} "
+                    f"and can grow most at {low['level'].value.title()}.")
     refs = [t["name"] for t in sorted(topics, key=lambda t: t["percent"])] or [chapter or "your textbook chapter"]
     next_steps = [
         {"title": "Re-read the key idea and say it aloud in your own words", "reference": refs[0]},

@@ -310,3 +310,16 @@ async def test_colearner_words_parses_the_colearner_response(monkeypatch):
 
     words = await insights._colearner_words({"cards": []}, "tok")
     assert words["key_ideas"] == {2: "K"} and len(words["next_steps"]) == 3
+
+
+def test_template_headline_never_names_one_level_as_both_best_and_worst():
+    from src.domain.models import BloomLevel
+    from src.services.insights import template_words
+
+    def headline(*pcts):
+        levels = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND, BloomLevel.APPLY]
+        return template_words([{"level": lv, "percent": p} for lv, p in zip(levels, pcts)], [], [], None)["headline"]
+
+    assert headline(0, 0, 0) == "A tough one - let's build it up together."
+    assert headline(60, 60, 60) == "You scored 60% at every level."
+    assert headline(80, 40, 60) == "You are strongest at Remember and can grow most at Understand."
