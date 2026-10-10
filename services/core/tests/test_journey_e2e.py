@@ -359,7 +359,10 @@ async def test_step4_student_session_completion_auto_homework_and_practice_bank(
     with pytest.raises(NotFoundError):          # another student can't open s1's personal homework
         await student_homework.get_my_homework_questions(current.homework_id, user=s3, session=db)
 
-    await student_homework.confirm_completion(current.homework_id, user=s1, session=db)
+    tasks = BackgroundTasks()
+    confirmed = await student_homework.confirm_completion(current.homework_id, background_tasks=tasks, user=s1, session=db)
+    # homework done unlocks this test's MCQ check and starts building it, so the app can open it next
+    assert confirmed.mcq_test_id and [t.func.__name__ for t in tasks.tasks] == ["prebuild"]
     assert (await student_homework.get_current_homework(user=s1, session=db)).homework is None
     pb = await practice_bank.list_my_practice_bank(subject_id=None, chapter_id=None, bloom_level=None,
                                                    user=s1, session=db)
@@ -422,7 +425,7 @@ async def test_step5_teacher_results_then_homework_generate_review_assign(db_ses
     assert [q.answer for q in got][0] == "Edited"
     with pytest.raises(NotFoundError):
         await student_homework.get_my_homework(hw.id, user=s1, session=db)
-    await student_homework.confirm_completion(hw.id, user=s3, session=db)
+    await student_homework.confirm_completion(hw.id, background_tasks=BackgroundTasks(), user=s3, session=db)
     after = await homework.get_homework(hw.id, **kw)
     assert (after.completed_count, after.status) == (1, HomeworkStatus.IN_PROGRESS)
 

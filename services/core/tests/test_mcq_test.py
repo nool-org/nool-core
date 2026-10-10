@@ -243,10 +243,10 @@ async def test_questions_come_from_the_bank_and_never_reveal_answers(schema, mon
     assert [q.id for q in again.questions] == [q.id for q in out.questions]
 
 
-async def test_gaps_are_generated_as_mcqs_with_misconception_distractors(schema, monkeypatch):
+async def test_generation_designs_every_mcq_first_with_misconception_distractors(schema, monkeypatch):
     db = schema
     s = await _seed(db, taken_hours_ago=49)
-    await _mcq(db, s, B.REMEMBER, "current")  # the bank covers one slot only
+    await _mcq(db, s, B.REMEMBER, "current")  # a bank MCQ exists, but generation comes first
     calls = []
 
     async def fake(payload):
@@ -260,9 +260,9 @@ async def test_gaps_are_generated_as_mcqs_with_misconception_distractors(schema,
 
     item = await _open(db, s)
     out = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
-    assert len(out.questions) == 10 and sum(q.text.startswith("gen") for q in out.questions) == 9
+    assert len(out.questions) == 10 and sum(q.text.startswith("gen") for q in out.questions) == 10
     [payload] = calls
-    assert len(payload["slots"]) == 9 and all(sl["question_type"] == "mcq" for sl in payload["slots"])
+    assert len(payload["slots"]) == 10 and all(sl["question_type"] == "mcq" for sl in payload["slots"])
     current = next(sl for sl in payload["slots"] if sl["concept"] == "current")
     assert set(current["misconceptions"]) == {"current misconception 1", "current misconception 2"}
     assert payload["sections"][0]["text"].startswith("V = IR")

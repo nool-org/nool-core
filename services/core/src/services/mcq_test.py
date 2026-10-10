@@ -5,12 +5,12 @@ you lag" to "did it improve".
   the student lists their MCQ tests (sync_for_student). It unlocks once the
   student has confirmed that test's homework, or 48h after the voice test,
   whichever comes first.
-- Questions (built on first open, ensure_questions): 10 = 2 per Bloom level
-  of the voice test, on the student's weakest voice-test concepts plus up to
-  2 strong ones as a check. Bank MCQs from the test's chapter first (4
-  distinct options, answer among them); open slots generated through the
-  generation service (distractors from the voice test's misconceptions);
-  still-open slots take any unused bank MCQ of the chapter.
+- Questions (ensure_questions; prebuild() runs it as soon as homework is
+  confirmed): 10 = 2 per Bloom level of the voice test, on the student's
+  weakest voice-test concepts plus up to 2 strong ones as a check. Written by
+  the generation service first (distractors from the voice test's
+  misconceptions); slots it can't fill take a bank MCQ of the chapter on the
+  same level and concept, then any unused bank MCQ of the chapter.
 - Attempt (submit_attempt): marked here, one attempt only; growth math in
   services/growth.py.
 """
@@ -49,6 +49,7 @@ from src.domain.models import (
     VoiceTestQuestion,
 )
 from src.repositories.dataset_access import visible_datasets
+from src.repositories.database import get_session
 from src.services import generation_client, push
 from src.services.growth import corrected, growth_entries, percent
 from src.services.homework_builder import _sections, question_uid
@@ -286,16 +287,20 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
                       correct_index(q.options, q.answer), q.id)
 
     drafts: dict[int, _Draft] = {}
-    for i, (level, concept) in enumerate(slots):
-        q = take(lambda q: q.bloom_level == level and _has_concept(q, concept))
-        if q is not None:
-            drafts[i] = from_bank(q, concept)
-    counts = {"bank": len(drafts)}
+    # The generation service designs every question first - aimed at the student's own
+    # weak concepts, wrong options from their own voice-test misconceptions; the bank
+    # only fills slots it couldn't.
     # ponytail: holds this McqTest's row lock and a connection through the LLM call (~1 min);
-    # release before generating like homework_builder if opens pile up
-    await _generate(session, test=test, slots=slots, open_slots=[i for i in range(len(slots)) if i not in drafts],
+    # prebuild() runs it right after homework is confirmed so the student rarely waits
+    await _generate(session, test=test, slots=slots, open_slots=list(range(len(slots))),
                     scores=scores, drafts=drafts, seed=mcq.id)
-    counts["generated"] = len(drafts) - counts["bank"]
+    counts = {"generated": len(drafts)}
+    for i, (level, concept) in enumerate(slots):
+        if i not in drafts:
+            q = take(lambda q: q.bloom_level == level and _has_concept(q, concept))
+            if q is not None:
+                drafts[i] = from_bank(q, concept)
+    counts["bank"] = len(drafts) - counts["generated"]
     for i, (level, concept) in enumerate(slots):
         if i not in drafts:
             q = take(lambda q: q.bloom_level == level) or take(lambda q: True)
@@ -311,6 +316,22 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     session.add_all(rows)
     await session.flush()
     return rows
+
+
+async def prebuild(mcq_test_id: uuid.UUID, student_id: uuid.UUID) -> None:
+    """BackgroundTasks entrypoint after homework is confirmed: builds the MCQ
+    test's questions in its own session so the student finds them ready."""
+    async with get_session() as session:
+        mcq = await session.get(McqTest, mcq_test_id)
+        student = await session.get(User, student_id)
+        if mcq is None or student is None:
+            return
+        try:
+            await ensure_questions(session, mcq, student)
+            await session.commit()
+        except Exception:  # the open falls back to building on demand
+            logger.exception("mcq_prebuild_failed", extra={"mcq_test_id": str(mcq_test_id)})
+            await session.rollback()
 
 
 async def questions_of(session: AsyncSession, mcq_test_id: uuid.UUID) -> list[McqTestQuestion]:

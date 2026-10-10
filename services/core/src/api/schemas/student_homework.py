@@ -32,3 +32,5 @@ class HomeworkLearningContextOut(CamelModel):
 
 class HomeworkQaConfirmationOut(CamelModel):
     confirmed_at: datetime
+    # the MCQ check this homework unlocks (its questions are being built) - the app opens it next
+    mcq_test_id: str | None = None

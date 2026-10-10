@@ -10,6 +10,7 @@ transaction, so it's all rolled back - same pattern as
 test_voice_test_questions.py.
 """
 
+from fastapi import BackgroundTasks
 import asyncio
 import importlib.util
 import uuid
@@ -321,7 +322,7 @@ async def test_answer_is_saved_and_awards_xp_once_double_for_the_boss(schema):
     assert progress.status == StudentHomeworkStatus.IN_PROGRESS and not progress.qa_completed
 
     # confirm-completion still works once everything is answered
-    await student_homework.confirm_completion(str(hw.id), user=student, session=db)
+    await student_homework.confirm_completion(str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db)
     await db.refresh(progress)
     assert progress.status == StudentHomeworkStatus.COMPLETED
 

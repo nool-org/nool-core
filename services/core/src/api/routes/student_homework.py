@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, BackgroundTasks, Depends, Header
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import undefer
@@ -40,6 +40,7 @@ from src.domain.models import (
 from src.domain.models.homework import HomeworkAnswer
 from src.services.colearner_insight_client import ColearnerInsightUnavailableError, generate_homework_insight
 from src.services.practice_bank import archive_homework_questions
+from src.services import mcq_test
 
 router = APIRouter(prefix="/api/v1", tags=["homework-student"])
 logger = get_logger(__name__)
@@ -249,6 +250,7 @@ async def get_my_homework_questions(
 @router.post("/me/homework/{homework_id}/confirm-completion")
 async def confirm_completion(
     homework_id: str,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> HomeworkQaConfirmationOut:
@@ -289,8 +291,19 @@ async def confirm_completion(
 
         await archive_homework_questions(session, homework=hw, student_id=user.id)
 
+    # Homework done unlocks this test's MCQ check now; build its questions in
+    # the background so it's ready when the app opens it
+    mcq_id = None
+    if hw is not None and hw.test_id is not None:
+        mcq = next((m for m in await mcq_test.sync_for_student(session, user.id)
+                    if m.voice_test_id == hw.test_id), None)
+        if mcq is not None and mcq.completed_at is None:
+            mcq_id = mcq.id
+            background_tasks.add_task(mcq_test.prebuild, mcq.id, user.id)
+
     await session.commit()
-    return HomeworkQaConfirmationOut(confirmed_at=progress.confirmed_at)
+    return HomeworkQaConfirmationOut(confirmed_at=progress.confirmed_at,
+                                     mcq_test_id=str(mcq_id) if mcq_id else None)
 
 
 @router.post("/me/homework/{homework_id}/questions/{question_id}/answer")

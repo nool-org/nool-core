@@ -3,6 +3,7 @@ GET /me/practice-bank - real rows against the dev Postgres via db_session,
 same pattern as test_homework_confirm_completion.py.
 """
 
+from fastapi import BackgroundTasks
 import uuid
 
 from src.api.routes import practice_bank, student_homework
@@ -116,7 +117,7 @@ async def test_confirm_completion_archives_the_homeworks_questions(db_session):
     db_session.add(StudentHomeworkProgress(homework_id=hw.id, student_id=student.id))
     await db_session.flush()
 
-    await student_homework.confirm_completion(homework_id=str(hw.id), user=student, session=db_session)
+    await student_homework.confirm_completion(homework_id=str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db_session)
     await db_session.flush()
 
     rows = (

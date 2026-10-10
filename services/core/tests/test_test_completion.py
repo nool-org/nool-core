@@ -6,6 +6,7 @@ code). Real rows against the dev Postgres via db_session, same pattern as
 test_reporting.py/test_analytics.py.
 """
 
+from fastapi import BackgroundTasks
 import uuid
 
 from sqlalchemy import select
@@ -261,7 +262,7 @@ async def test_points_are_not_re_awarded_by_homework_confirmation(db_session):
     assert points_after_test.points == 4 * POINTS_PER_ANSWERED_QUESTION
 
     hw = (await db_session.execute(select(Homework).where(Homework.test_id == test.id))).scalar_one()
-    await student_homework.confirm_completion(homework_id=str(hw.id), user=student, session=db_session)
+    await student_homework.confirm_completion(homework_id=str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db_session)
     await db_session.flush()
 
     points_after_confirm = (

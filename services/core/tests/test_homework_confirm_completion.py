@@ -7,6 +7,7 @@ teacher's Homework list never reflected real progress. Real rows against
 the dev Postgres via db_session, same seed pattern as test_homework_assign.py.
 """
 
+from fastapi import BackgroundTasks
 import uuid
 
 from sqlalchemy import select
@@ -74,7 +75,7 @@ async def test_confirm_completion_flips_progress_status_and_bumps_homework_to_in
     student_a = await _seed_student_with_progress(db_session, hw)
     await _seed_student_with_progress(db_session, hw)  # student_b, still ASSIGNED
 
-    await student_homework.confirm_completion(homework_id=str(hw.id), user=student_a, session=db_session)
+    await student_homework.confirm_completion(homework_id=str(hw.id), background_tasks=BackgroundTasks(), user=student_a, session=db_session)
     await db_session.flush()
 
     progress = (
@@ -97,7 +98,7 @@ async def test_confirm_completion_by_every_assigned_student_completes_the_homewo
     hw = await _seed_homework(db_session, assigned_count=1)
     student = await _seed_student_with_progress(db_session, hw)
 
-    await student_homework.confirm_completion(homework_id=str(hw.id), user=student, session=db_session)
+    await student_homework.confirm_completion(homework_id=str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db_session)
     await db_session.flush()
     await db_session.refresh(hw)
 
@@ -109,9 +110,9 @@ async def test_confirm_completion_is_idempotent_on_replay(db_session):
     hw = await _seed_homework(db_session, assigned_count=1)
     student = await _seed_student_with_progress(db_session, hw)
 
-    await student_homework.confirm_completion(homework_id=str(hw.id), user=student, session=db_session)
+    await student_homework.confirm_completion(homework_id=str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db_session)
     await db_session.flush()
-    await student_homework.confirm_completion(homework_id=str(hw.id), user=student, session=db_session)
+    await student_homework.confirm_completion(homework_id=str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db_session)
     await db_session.flush()
     await db_session.refresh(hw)
 
@@ -127,7 +128,7 @@ async def test_get_current_homework_stops_returning_a_completed_homework(db_sess
     assert before.homework is not None
     assert before.homework.homework_id == str(hw.id)
 
-    await student_homework.confirm_completion(homework_id=str(hw.id), user=student, session=db_session)
+    await student_homework.confirm_completion(homework_id=str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db_session)
     await db_session.flush()
 
     after = await student_homework.get_current_homework(user=student, session=db_session)
