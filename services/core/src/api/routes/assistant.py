@@ -1,3 +1,6 @@
+import logging
+import time
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5,20 +8,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.errors import ValidationError
 
 from src.api.deps import get_db_session, require_feature, require_role
-from src.api.schemas.assistant import ChatMessageOut, SendMessageIn
+from src.api.schemas.assistant import ChatMessageOut, SendMessageIn, TeacherSummaryOut
 from src.api.schemas.common import ListEnvelope
 from src.domain.models import AssistantMessage, ChatRole, Feature, Role, User
+from src.services import generation_client
+from src.services.teacher_context import build_teacher_facts
 
 router = APIRouter(prefix="/api/v1", tags=["assistant"])
+logger = logging.getLogger(__name__)
 
 _GREETING = (
     "Hi, I'm your Nool assistant. Ask me about Voice Tests, Homework, Question Papers, "
     "or a class's progress."
 )
 
-# Deterministic keyword-matcher, not a real LLM integration - see
-# CLAUDE.md's "Current Goal" and nool-apps' own MockAssistantService,
-# which this mirrors exactly.
+# Fallback only (generation service down): fixed how-to answers by keyword.
+# Normal replies come from generation's teacher-assistant over teacher_context facts.
 _RULES: list[tuple[str, str]] = [
     ("voice test", "To create a Voice Test: Home → Create → Voice Test, then pick a class, subject, chapter, topic and Bloom levels, and schedule it."),
     ("homework", "Homework is generated from a Test's diagnostic gap once results are ready - open the Test's results and choose Generate Homework."),
@@ -82,9 +87,51 @@ async def send_message(
         raise ValidationError("text is empty after trimming.")
 
     await _ensure_greeting(session, user.id)
+    history = (await session.execute(
+        select(AssistantMessage).where(AssistantMessage.teacher_id == user.id)
+        .order_by(AssistantMessage.created_at.desc()).limit(12)
+    )).scalars().all()
     session.add(AssistantMessage(teacher_id=user.id, role=ChatRole.USER, text=text))
-    reply = AssistantMessage(teacher_id=user.id, role=ChatRole.ASSISTANT, text=_reply_for(text))
+    try:
+        # real answers, grounded in this teacher's own classes, tests and homework
+        answer = await generation_client.assistant_reply(
+            await build_teacher_facts(session, user),
+            [{"role": "teacher" if m.role == ChatRole.USER else "assistant", "text": m.text} for m in reversed(history)],
+            text,
+        )
+    except generation_client.GenerationServiceUnavailableError:
+        logger.warning("assistant_llm_unavailable")
+        answer = _reply_for(text)  # how-to answers still work without the model
+    reply = AssistantMessage(teacher_id=user.id, role=ChatRole.ASSISTANT, text=answer)
     session.add(reply)
     await session.commit()
     await session.refresh(reply)
     return ChatMessageOut(id=str(reply.id), role=reply.role, text=reply.text, created_at=reply.created_at)
+
+
+SUMMARY_TTL_SECONDS = 15 * 60
+# ponytail: per-process cache (core can run several replicas - each just regenerates); move to redis/DB if cost shows up
+_summaries: dict[str, tuple[float, list[str]]] = {}
+
+
+@router.get("/teacher/summary", summary="AI summary of what needs attention")
+async def teacher_summary(
+    refresh: bool = False,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.ASSISTANT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> TeacherSummaryOut:
+    """2-3 bullets for the teacher Home, from the same facts the assistant
+    uses. Cached 15 min per teacher; empty bullets when the model is down
+    (the Home simply hides the card)."""
+    key = str(user.id)
+    cached = _summaries.get(key)
+    if cached and not refresh and time.monotonic() - cached[0] < SUMMARY_TTL_SECONDS:
+        return TeacherSummaryOut(bullets=cached[1])
+    try:
+        bullets = await generation_client.teacher_summary(await build_teacher_facts(session, user))
+    except generation_client.GenerationServiceUnavailableError:
+        logger.warning("teacher_summary_llm_unavailable")
+        return TeacherSummaryOut(bullets=[])
+    _summaries[key] = (time.monotonic(), bullets)
+    return TeacherSummaryOut(bullets=bullets)

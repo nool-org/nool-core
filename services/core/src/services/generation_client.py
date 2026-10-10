@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # The service generates, verifies and may regenerate once - ~1 min typical.
 GAP_FILL_TIMEOUT_SECONDS = 180.0
 VOICE_TEST_PREP_TIMEOUT_SECONDS = 120.0
+ASSISTANT_TIMEOUT_SECONDS = 45.0
 
 
 class GenerationServiceUnavailableError(AppError):
@@ -45,6 +46,22 @@ async def prep_voice_test(payload: dict) -> dict:
     """POST /v1/voice-test/prep - {grade, subject, chapter, board, levels,
     candidates} -> {questions: [...]}, one reworded question per level."""
     return await _post("/v1/voice-test/prep", payload, VOICE_TEST_PREP_TIMEOUT_SECONDS)
+
+
+async def assistant_reply(facts: dict, history: list[dict], message: str) -> str:
+    """Teacher assistant chat turn, grounded in teacher_context facts."""
+    if not is_configured():
+        raise GenerationServiceUnavailableError("generation service is not configured")
+    body = await _post("/v1/teacher-assistant/reply", {"facts": facts, "history": history, "message": message},
+                       ASSISTANT_TIMEOUT_SECONDS)
+    return body["reply"]
+
+
+async def teacher_summary(facts: dict) -> list[str]:
+    if not is_configured():
+        raise GenerationServiceUnavailableError("generation service is not configured")
+    body = await _post("/v1/teacher-assistant/summary", {"facts": facts}, ASSISTANT_TIMEOUT_SECONDS)
+    return list(body.get("bullets") or [])
 
 
 async def _post(path: str, payload: dict, timeout: float) -> dict:

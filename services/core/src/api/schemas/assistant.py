@@ -14,3 +14,7 @@ class ChatMessageOut(CamelModel):
 
 class SendMessageIn(CamelModel):
     text: str
+
+
+class TeacherSummaryOut(CamelModel):
+    bullets: list[str]
