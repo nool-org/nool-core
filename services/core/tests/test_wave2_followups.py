@@ -303,7 +303,7 @@ async def test_prep_drops_a_question_no_alternative_can_replace(schema, monkeypa
 
 def _pick_in_order(*questions):
     """_pick stand-in: the first not-yet-excluded question, in the given order."""
-    async def pick(session, test, dataset_ids, level, exclude):
+    async def pick(session, test, dataset_ids, level, exclude, topic_id=None):
         return next((q for q in questions if voice_test_prep._uid(q) not in exclude), None)
     return pick
 

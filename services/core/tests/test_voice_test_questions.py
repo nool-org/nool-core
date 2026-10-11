@@ -45,7 +45,9 @@ from src.domain.models import (
     SchoolDataset,
     StudentTestResult,
     StudentTestResultBloomScore,
+    StudentProfile,
     StudentTestResultTopicScore,
+    StudentTopicMastery,
     Subject,
     TeacherClassAssignment,
     TestStatus,
@@ -126,7 +128,8 @@ async def _seed(db, levels=(B.REMEMBER, B.UNDERSTAND, B.APPLY)) -> dict:
     db.add(dataset)
     await db.flush()
     db.add(SchoolDataset(school_id=school.id, dataset_id=dataset.id, enabled=True))
-    test = VoiceTest(class_id=section.id, subject_id=subject.id, chapter_id=chapter.id, topic_id=topic.id,
+    # chapter-level, like every test the wizard creates now (no topic)
+    test = VoiceTest(class_id=section.id, subject_id=subject.id, chapter_id=chapter.id,
                      duration_minutes=10, completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS)
     db.add(test)
     await db.flush()
@@ -306,10 +309,90 @@ async def test_create_test_schedules_prep_in_the_background(db_session):
     tasks = Tasks()
     out = await voice_test.create_test(
         CreateTestIn(class_id=str(s["class"].id), subject_id=str(s["test"].subject_id), chapter_id=str(s["chapter"].id),
-                     topic_id=str(s["topic"].id), bloom_levels=[B.REMEMBER], duration_minutes=10,
+                     bloom_levels=[B.REMEMBER], duration_minutes=10,  # no topic: the test checks the chapter
                      completion_window_hours=48, target=AssignmentTarget(mode=AssignmentTargetMode.WHOLE_CLASS)),
         background_tasks=tasks, user=s["teacher"], session=db_session)
+    assert out.topic_id is None
     assert tasks.scheduled == [(voice_test_prep.prepare_in_background, (uuid.UUID(out.id), s["teacher"].id))]
+
+
+async def _class_mastery(db, s, by_topic: dict) -> None:
+    """One student of the test's class with daily-practice mastery per topic."""
+    student = User(firebase_uid=f"s-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com", display_name="S",
+                   role=Role.STUDENT, school_id=s["school"].id, status=UserStatus.ACTIVE)
+    db.add(student)
+    await db.flush()
+    db.add(StudentProfile(user_id=student.id, class_id=s["class"].id, roll_number=1))
+    db.add_all([StudentTopicMastery(student_id=student.id, topic_id=topic.id, chapter_id=s["chapter"].id,
+                                    mastery=mastery) for topic, mastery in by_topic.items()])
+    await db.flush()
+
+
+async def _both_topics_have_every_level(db, s, levels):
+    for topic in (s["topic"], s["other_topic"]):
+        for level in levels:
+            await _question(db, s, level, f"{level.value} question on {topic.name}", topic=topic)
+
+
+async def test_prep_spreads_the_levels_across_the_chapters_topics(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND, B.APPLY))
+    await _both_topics_have_every_level(db, s, (B.REMEMBER, B.UNDERSTAND, B.APPLY))
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    # no class data: textbook order, round-robin ("Ohm's law" before "Resistors in series")
+    assert [r.topic_id for r in await _questions(db, s["test"])] == [
+        s["topic"].id, s["other_topic"].id, s["topic"].id]
+
+
+async def test_prep_starts_with_the_topic_the_class_is_weakest_at(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND))
+    await _both_topics_have_every_level(db, s, (B.REMEMBER, B.UNDERSTAND))
+    await _class_mastery(db, s, {s["topic"]: 80, s["other_topic"]: 30})
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    assert [r.topic_id for r in await _questions(db, s["test"])] == [s["other_topic"].id, s["topic"].id]
+
+
+async def test_prep_falls_back_to_any_topic_when_the_next_one_has_no_question(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND))
+    await _question(db, s, B.REMEMBER, "Define electric current.")
+    await _question(db, s, B.UNDERSTAND, "Why does a wire heat up when current flows?")
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    assert [r.topic_id for r in await _questions(db, s["test"])] == [s["topic"].id, s["topic"].id]
+
+
+async def test_prep_grounds_in_the_whole_chapter_even_when_an_old_client_sent_a_topic(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND))
+    s["test"].topic_id = s["topic"].id  # stored as sent, ignored by prep
+    await _question(db, s, B.REMEMBER, "Define electric current.")
+    await _question(db, s, B.UNDERSTAND, "Why do resistors in series share the voltage?", topic=s["other_topic"])
+    sent = {}
+
+    async def fake_kg(**kwargs):
+        sent.update(kwargs)
+        return {"textbook_context": "Electricity, all of it", "reference_questions": []}
+    monkeypatch.setattr(voice_test_prep.kg_client, "generate_assessor_content", fake_kg)
+    _fake_generation(monkeypatch)
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    assert sent["topic_names"] == [] and sent["chapters"] == [{"number": 11, "name": "Electricity"}]
+    assert s["test"].textbook_context == "Electricity, all of it"
+    assert {r.topic_id for r in await _questions(db, s["test"])} == {s["topic"].id, s["other_topic"].id}
 
 
 # ---------------------------------------------------------------- review

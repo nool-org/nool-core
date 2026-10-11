@@ -1,5 +1,8 @@
 """Picks a Voice Test's questions once - one dataset question per Bloom
-level, the same for every student of the test - and has the generation
+level, the same for every student of the test, spread across the chapter's
+topics (each level from a different topic where it can, the class's weakest
+topics first - a test is the end-of-chapter check; test.topic_id, set only by
+older clients, is ignored) - and has the generation
 service reword each for speech and write its grading rubric. Runs as a
 background task after POST /tests (see voice_test.py's create_test); the
 teacher can then review/approve/swap them (voice_test.py's /questions).
@@ -18,7 +21,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import (
@@ -29,6 +32,8 @@ from src.domain.models import (
     QuestionType,
     School,
     SchoolClass,
+    StudentProfile,
+    StudentTopicMastery,
     Subject,
     Topic,
     User,
@@ -47,7 +52,7 @@ from src.services.question_selector import Slot, select_questions
 logger = logging.getLogger(__name__)
 
 # select_questions only takes a question one difficulty step off the slot's
-# within the test's topic - trying all three widens the pool to the chapter.
+# within the preferred topic - trying all three widens the pool to the chapter.
 _DIFFICULTIES = (PaperDifficultyLevel.MEDIUM, PaperDifficultyLevel.EASY, PaperDifficultyLevel.HARD)
 
 
@@ -98,9 +103,11 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
     dataset_ids = await _dataset_ids(session, teacher, test, ctx["grade"])
     unusable = await _unusable_uids(session, test, dataset_ids)
 
+    topic_ids = await _topics_to_check(session, test)
     picked: list[DatasetQuestion] = []
     for level in levels:
-        question = await _pick(session, test, dataset_ids, level, {_uid(q) for q in picked} | unusable)
+        question = await _pick_spread(session, test, dataset_ids, level, {_uid(q) for q in picked} | unusable,
+                                      topic_ids, [q.topic_id for q in picked])
         if question is None:
             logger.warning("voice_test_prep_no_question_for_level",
                            extra={"test_id": str(test.id), "bloom_level": level.value})
@@ -116,7 +123,8 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
         redo = [i for i, (q, p) in enumerate(zip(picked, prepped)) if not _reworded(q, p)]
         swaps = {}
         for i in redo:
-            alt = await _pick(session, test, dataset_ids, picked[i].bloom_level, tried | unusable)
+            alt = await _pick(session, test, dataset_ids, picked[i].bloom_level, tried | unusable,
+                              topic_id=picked[i].topic_id)  # same topic first - keeps the spread
             if alt is not None:
                 tried.add(_uid(alt))
                 swaps[i] = alt
@@ -165,7 +173,8 @@ async def swap_question(
     }
     dataset_ids = await _dataset_ids(session, teacher, test, ctx["grade"])
     unusable = await _unusable_uids(session, test, dataset_ids)
-    replacement = await _pick(session, test, dataset_ids, question.bloom_level, used | unusable)
+    replacement = await _pick(session, test, dataset_ids, question.bloom_level, used | unusable,
+                              topic_id=question.topic_id)
     if replacement is None:
         return False
     [prepped] = await _prep(test, ctx, [replacement])
@@ -216,9 +225,9 @@ async def _context(session: AsyncSession, test: VoiceTest) -> dict | None:
     school = await session.get(School, school_class.school_id) if school_class else None
     if chapter is None or subject is None or school_class is None or school is None:
         return None
-    topic = await session.get(Topic, test.topic_id) if test.topic_id else None
+    # topic_names stays empty: the textbook context covers the whole chapter (a test checks all of it)
     return {"chapter": chapter, "subject": subject.name, "grade": school_class.grade, "board": school.board,
-            "topic_names": [topic.name] if topic else []}
+            "topic_names": []}
 
 
 async def _fill_textbook_context(test: VoiceTest, ctx: dict) -> None:
@@ -305,10 +314,44 @@ async def _unusable_uids(session: AsyncSession, test: VoiceTest, dataset_ids: li
     return set(skipped)
 
 
-async def _pick(session, test, dataset_ids, level, exclude: set[str]) -> DatasetQuestion | None:
+def _textbook_order(topic: Topic) -> list:
+    """Natural sort on the name ("1.2 ..." before "1.10 ..."), the order the curriculum lists topics in."""
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part.lower())
+            for part in re.split(r"(\d+)", topic.name or "")]
+
+
+async def _topics_to_check(session: AsyncSession, test: VoiceTest) -> list[uuid.UUID]:
+    """The chapter's topics in the order levels take them: the ones the
+    class is weakest at first (average StudentTopicMastery of its students,
+    when daily practice has any), the rest in textbook order."""
+    topics = sorted((await session.execute(select(Topic).where(Topic.chapter_id == test.chapter_id))).scalars().all(),
+                    key=_textbook_order)
+    mastery = dict((await session.execute(
+        select(StudentTopicMastery.topic_id, func.avg(StudentTopicMastery.mastery))
+        .join(StudentProfile, StudentProfile.user_id == StudentTopicMastery.student_id)
+        .where(StudentProfile.class_id == test.class_id, StudentTopicMastery.chapter_id == test.chapter_id)
+        .group_by(StudentTopicMastery.topic_id)
+    )).all())
+    # stable: weakest measured topics first, unmeasured ones after, each group in textbook order
+    return [t.id for t in sorted(topics, key=lambda t: mastery.get(t.id, float("inf")))]
+
+
+async def _pick_spread(session, test, dataset_ids, level, exclude: set[str], topic_ids: list,
+                       used_topics: list) -> DatasetQuestion | None:
+    """`level`'s question from a topic no earlier level took (round-robin
+    over `topic_ids`, in their order), else from anywhere in the chapter."""
+    for topic_id in sorted(topic_ids, key=used_topics.count):  # stable: least-used topics first
+        question = await _pick(session, test, dataset_ids, level, exclude, topic_id=topic_id)
+        if question is not None and question.topic_id == topic_id:
+            return question
+    return await _pick(session, test, dataset_ids, level, exclude)
+
+
+async def _pick(session, test, dataset_ids, level, exclude: set[str], topic_id=None) -> DatasetQuestion | None:
+    """`topic_id` is a preference, not a filter: select_questions widens to the rest of the chapter."""
     for difficulty in _DIFFICULTIES:
         selection = await select_questions(
-            session, dataset_ids=dataset_ids, chapter_id=test.chapter_id, topic_id=test.topic_id,
+            session, dataset_ids=dataset_ids, chapter_id=test.chapter_id, topic_id=topic_id,
             slots=[Slot(level, difficulty)], exclude_uids=exclude, text_only=True,
         )
         if selection.by_slot and selection.by_slot[0] is not None:
@@ -372,7 +415,7 @@ async def _write_for_levels(session: AsyncSession, test: VoiceTest, levels: list
 
     if not generation_client.is_configured():
         return []
-    chapter_name, sections = await _sections(session, test, test.topic_id)
+    chapter_name, sections = await _sections(session, test)  # the whole chapter
     if not sections:
         return []
     subject = await session.get(Subject, test.subject_id)
@@ -398,7 +441,7 @@ async def _write_for_levels(session: AsyncSession, test: VoiceTest, levels: list
         if q.get("options") or not isinstance(q.get("slot_index"), int) or q["slot_index"] >= len(levels):
             continue
         candidate = WrittenQuestion(text=q["text"], answer=q.get("answer") or "",
-                                    bloom_level=levels[q["slot_index"]], topic_id=test.topic_id)
+                                    bloom_level=levels[q["slot_index"]])
         if _unspeakable(candidate) is None:
             written.append(candidate)
     logger.info("voice_test_prep_wrote_questions", extra={

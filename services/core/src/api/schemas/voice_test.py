@@ -14,7 +14,7 @@ class VoiceTestOut(CamelModel):
     class_id: str
     subject_id: str
     chapter_id: str
-    topic_id: str | None  # null only while status is DRAFT
+    topic_id: str | None  # null for a chapter-level test (every test since topics left the wizard)
     bloom_levels: list[BloomLevel]
     duration_minutes: int
     completion_window_hours: int
@@ -30,7 +30,8 @@ class CreateTestIn(CamelModel):
     class_id: str
     subject_id: str
     chapter_id: str
-    topic_id: str
+    # A test checks the whole chapter; an older client's topic is stored but prep ignores it.
+    topic_id: str | None = None
     bloom_levels: list[BloomLevel]
     duration_minutes: int
     completion_window_hours: int
