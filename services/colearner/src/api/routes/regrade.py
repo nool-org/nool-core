@@ -6,7 +6,7 @@ from shared.auth import AuthenticatedUser
 from src.api.deps import get_current_user
 from src.domain.schemas import SessionConfig
 from src.services.evaluation import grade_transcript
-from src.services.realtime_service import _transcript_text
+from src.services.realtime_service import _transcript_text, build_rubric
 from src.services.session_store import SessionState
 
 router = APIRouter(prefix="/api/v1", tags=["colearner-regrade"])
@@ -17,7 +17,7 @@ MAX_TURNS = 500
 class RegradeIn(BaseModel):
     """A finished session as Core stored it (contract C3 finish payload):
     the session config (its `questions` are the rubric), the transcript turns
-    and the per-question answers (for hints_used)."""
+    and the per-question answers (for hints_used and the version asked)."""
     config: SessionConfig
     transcript: list[dict] = Field(..., max_length=MAX_TURNS)
     answers: list[dict] = Field(default_factory=list, max_length=20)
@@ -30,11 +30,6 @@ async def regrade(body: RegradeIn, _user: AuthenticatedUser = Depends(get_curren
     turns = [{**t, "role": t.get("role"), "content": str(t.get("content") or t.get("text") or ""),
               "question_number": t.get("question_number")}
              for t in body.transcript if isinstance(t, dict)]
-    hints = {a.get("question_number"): a.get("hints_used") or 0 for a in body.answers if isinstance(a, dict)}
-    questions = body.config.questions or []
-    rubric = [
-        {"question_number": n, "bloom_level": q.bloom_level, "question": q.spoken_text,
-         "key_points": q.expected_points, "misconceptions": q.misconceptions, "hints_used": hints.get(n, 0)}
-        for n, q in enumerate(questions, 1)
-    ] or None
+    answers = {a.get("question_number"): a for a in body.answers if isinstance(a, dict)}
+    rubric = build_rubric(body.config.questions, answers)
     return await grade_transcript(SessionState("regrade", body.config), _transcript_text(turns), rubric=rubric)

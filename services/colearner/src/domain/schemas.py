@@ -12,15 +12,20 @@ ReferenceQuestion = Annotated[str, StringConstraints(max_length=500)]
 RubricText = Annotated[str, StringConstraints(max_length=500)]
 
 
-class LiveQuestion(BaseModel):
-    """One prepared voice-test question (contract C3) - the realtime co-learner asks exactly these."""
-    id: Union[int, Annotated[str, StringConstraints(max_length=64)]]
-    order: int = Field(..., ge=1, le=10)
-    bloom_level: ShortText
+class EasierVersion(BaseModel):
+    """A simpler wording of a question, with its own rubric - asked when the student is struggling."""
     spoken_text: str = Field(..., min_length=1, max_length=1_000)
     expected_points: List[RubricText] = Field(default_factory=list, max_length=6)
     misconceptions: List[RubricText] = Field(default_factory=list, max_length=6)
     hints: List[RubricText] = Field(default_factory=list, max_length=4)
+
+
+class LiveQuestion(EasierVersion):
+    """One prepared voice-test question (contract C3) - the realtime co-learner asks exactly these."""
+    id: Union[int, Annotated[str, StringConstraints(max_length=64)]]
+    order: int = Field(..., ge=1, le=10)
+    bloom_level: ShortText
+    easier: Optional[EasierVersion] = None
 
 
 class SessionConfig(BaseModel):
@@ -54,6 +59,12 @@ class SessionConfig(BaseModel):
     session_max_time_seconds: int = Field(
         default=300,
         description="Maximum session time limit in seconds (default 300s / 5 minutes)"
+    )
+    student_name: Optional[ShortText] = Field(default=None, description="Student's first name, for the greeting")
+    student_context: Optional[str] = Field(
+        default=None,
+        max_length=300,
+        description="One line about the student's last test, e.g. \"Last test: strong at Remember, found Apply hard.\""
     )
     questions: Optional[List[LiveQuestion]] = Field(
         default=None,

@@ -17,9 +17,10 @@ from src.services.session_store import SessionState
 logger = logging.getLogger(__name__)
 
 GRADER_MODEL = "gpt-5-mini"
-PROMPT_VERSION = "strict-v2"
+PROMPT_VERSION = "strict-v3"
 HINT_PENALTY = 10      # points per hint used
 HINT_PENALTY_MAX = 20  # per answer
+EASIER_MAX_SCORE = 70  # an answer to a question's easier version
 
 _client: Optional[AsyncOpenAI] = None
 
@@ -92,10 +93,12 @@ Rules:
 - Judge directions, conventions and definitions by the textbook for the stated grade: loose wording that makes the stated fact false (e.g. calling electron flow "electricity" or "current" and giving the wrong direction for it) is wrong.
 - A correct but shallow answer is substantively correct with a moderate score; a correct, well-reasoned answer scores high.
 - These are spoken answers: judge meaning, not wording, grammar or exact terms - a correct idea in everyday words counts.
-- Every student turn tagged with the same [Qn] is one answer: a reply to the Co-Learner's follow-up ("Can you tell me why?") or after a hint is judged together with the first reply. Ignore turns marked (repeat request) or (noise).
+- Students may mix English with Tamil, Hindi, Telugu, Kannada, Malayalam or another language (Tanglish, Hinglish): judge the meaning regardless of the language mix, never mark it down.
+- Every student turn tagged with the same [Qn] is one answer: a reply to the Co-Learner's follow-up ("Can you tell me why?", "How would you explain that to a friend?") or after a hint is judged together with the first reply. Ignore turns marked (repeat request) or (noise).
 - Partial credit, against the question's expected key points (or the textbook answer if no rubric): all key points stated correctly = 85-100; about half of them correct = 50-60 (partial, is_substantively_correct true only if the core idea is right); a little relevant but mostly missing = 20-40; none, off-topic or "I don't know" = 0-15. A confidently wrong central claim stays under 40 whatever else is covered.
 - Do NOT include the opening readiness exchange (e.g. "Are you ready to begin?") or closing small talk.
 - If a rubric is given, use its expected key points and known misconceptions for that question.
+- A rubric entry with version "easier" means the student was asked a simpler version of the question (its text is in the rubric): grade against that version, and score it at most 70.
 
 overall_feedback: 1-2 sentences on the student's engagement and conceptual understanding."""
 
@@ -128,14 +131,18 @@ def penalized_score(score: Any, hints: Any) -> int:
     return max(0, score - min(HINT_PENALTY * max(0, int(hints or 0)), HINT_PENALTY_MAX))
 
 
-def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str, num_questions: int) -> Dict[str, Any]:
+def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str, num_questions: int,
+                 rubric: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Turns the model's per-answer grades into the report core consumes, aggregates computed here."""
+    easier = {r.get("question_number") for r in rubric or [] if r.get("version") == "easier"}
     qa = []
     for a in graded.get("answers") or []:
+        raw = _clamp_score(a["score_percent"])
+        capped = min(raw, EASIER_MAX_SCORE) if a.get("question_number") in easier else raw
         qa.append({
             **a,
-            "raw_score_percent": _clamp_score(a["score_percent"]),
-            "score_percent": penalized_score(a["score_percent"], a.get("hints_used")),
+            "raw_score_percent": raw,
+            "score_percent": penalized_score(capped, a.get("hints_used")),
             "confidence": max(0.0, min(1.0, float(a.get("confidence") or 0))),
         })
     by_level: Dict[str, List[int]] = {}
@@ -179,7 +186,8 @@ async def grade_transcript(
 ) -> Dict[str, Any]:
     """Grades a full session transcript. Records the call's real cost on `session`.
 
-    rubric: optional [{question_number, key_points: [...], misconceptions: [...]}].
+    rubric: optional [{question_number, key_points: [...], misconceptions: [...], version?}] -
+    a "version": "easier" answer is capped at EASIER_MAX_SCORE.
     Never fakes success: on failure returns qa_transcripts [], `grading_error`, and
     session_summary.overall_mastery_percent = None (consumers must handle null).
     """
@@ -201,7 +209,7 @@ async def grade_transcript(
         msg = resp.choices[0].message
         if getattr(msg, "refusal", None):
             raise RuntimeError(f"grader refused: {msg.refusal}")
-        return build_report(json.loads(msg.content), *report_args)
+        return build_report(json.loads(msg.content), *report_args, rubric=rubric)
     except Exception as ex:
         logger.exception("Bloom grading failed for session %s", session.session_id)
         report = build_report({}, *report_args)

@@ -131,8 +131,9 @@ def test_tool_events_map_answers_and_hints(monkeypatch, short_call):
     assert "response.cancel" not in [m["type"] for m in ws.sent]
 
     p = call.progress
-    assert p[1] == {"first_item": "u1", "hints_used": 0, "explanation_requested": False}
-    assert p[2] == {"first_item": "u2c", "hints_used": 2, "explanation_requested": False}
+    fresh = {"explanation_requested": False, "version": "standard", "repeat_requests": 0, "silences": 0}
+    assert p[1] == {"first_item": "u1", "hints_used": 0, **fresh}
+    assert p[2] == {"first_item": "u2c", "hints_used": 2, **fresh}
     assert p[3]["first_item"] == "u3"
     # the probe's reply stays with Q1, graded together with the first answer
     assert call.item_question["u1b"] == 1 and call.item_kind["u1b"] == "follow_up"
@@ -152,13 +153,14 @@ def test_finish_payload_and_rubric_passed_to_grader(monkeypatch, short_call):
     result = asyncio.run(rs.finish_call(call.call_id, "u1"))
 
     assert set(result) >= {"report", "answers", "transcript", "turns", "cost", "answered", "model_completed"}
+    quality = {"explanation_requested": False, "version": "standard", "repeat_requests": 0, "silences": 0}
     assert result["answers"] == [
         {"question_id": "q1", "question_number": 1, "first_answer": "Current is flow of charge",
-         "hints_used": 0, "explanation_requested": False},
+         "hints_used": 0, **quality},
         {"question_id": "q2", "question_number": 2, "first_answer": "Resistance goes up",
-         "hints_used": 2, "explanation_requested": False},
+         "hints_used": 2, **quality},
         {"question_id": "q3", "question_number": 3, "first_answer": "Heat is produced",
-         "hints_used": 0, "explanation_requested": False},
+         "hints_used": 0, **quality},
     ]
     assert result["answered"] == 3 and result["model_completed"] is True
     assert result["turns"] is result["transcript"]
@@ -304,3 +306,121 @@ def test_unprompted_hint_does_not_relabel_previous_answer():
     rs._tool_output(call, "ask_question", 2)
     rs._tool_output(call, "give_hint", 2)  # no new student turn since Q1's answer
     assert call.progress[1]["first_item"] == "u1" and call.item_kind["u1"] == "answer"
+
+
+_EASIER = {"spoken_text": "Easy question 2?", "expected_points": ["easy point"], "misconceptions": ["easy wrong"],
+           "hints": ["easy hint 1", "easy hint 2"]}
+
+
+def _easier_config():
+    return SessionConfig(questions=[_q(1), _q(2, easier=_EASIER), _q(3)])
+
+
+def test_easier_version_is_asked_hinted_and_graded():
+    call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.session_store.create_session(_easier_config()))
+    assert rs._tool_output(call, "ask_question", 1, easier=True)[0]["say"] == "Question 1 text?"  # none -> standard
+    assert rs._tool_output(call, "ask_question", 2, easier=True)[0]["say"] == "Easy question 2?"
+    call.items["u2"] = {"role": "user", "text": "I don't know"}
+    call.item_question["u2"] = 2
+    rs._tag_user_turn(call, "u2")
+    assert rs._tool_output(call, "give_hint", 2)[0] == {"hint": "easy hint 1"}
+    rubric = rs.question_rubric(call)
+    assert [r["version"] for r in rubric] == ["standard", "easier", "standard"]
+    assert rubric[1]["question"] == "Easy question 2?" and rubric[1]["key_points"] == ["easy point"]
+    assert rubric[1]["misconceptions"] == ["easy wrong"] and rubric[0]["key_points"] == ["point 1a", "point 1b"]
+    assert rs.question_answers(call)[1]["version"] == "easier"
+
+
+def test_config_accepts_new_fields_and_old_payloads():
+    old = SessionConfig(questions=[_q(1)])
+    assert old.student_name is None and old.student_context is None and old.questions[0].easier is None
+    new = SessionConfig(student_name="Asha", student_context="Last test: strong at Remember, found Apply hard.",
+                        questions=[_q(1, easier=_EASIER)])
+    assert new.questions[0].easier.hints == ["easy hint 1", "easy hint 2"]
+    with pytest.raises(ValidationError):
+        SessionConfig(student_context="x" * 301)
+    with pytest.raises(ValidationError):
+        SessionConfig(questions=[_q(1, easier={**_EASIER, "spoken_text": "x" * 1001})])
+    with pytest.raises(ValidationError):
+        SessionConfig(questions=[_q(1, easier={**_EASIER, "hints": ["h"] * 5})])
+
+
+def test_prompt_has_the_new_rules_and_the_student_when_given():
+    text = rs.build_session(SessionConfig(student_name="Asha", student_context="Last test: strong at Remember.",
+                                          questions=[_q(1)]))["instructions"]
+    assert '"Asha"' in text and "Last test: strong at Remember." in text
+    for rule in ("easier=true", "How would you explain that to a friend?", "Tanglish", "never correct their language",
+                 '"[SILENCE]"', "Take your time. Want a small hint?", "Nice start, keep going",
+                 "smaller sub-question", "first question standard"):
+        assert rule in text, rule
+    bare = rs.build_session(_config())["instructions"]
+    assert "first name is" not in bare and "LAST TEST" not in bare
+    assert "easier" in rs.ASK_QUESTION_TOOL["parameters"]["properties"]
+    assert "first name" in rs.CLOSING_INSTRUCTIONS and "strength" in rs.CLOSING_INSTRUCTIONS
+
+
+class _SlowWS(FakeWS):
+    """FakeWS that also understands a {"type": "_sleep"} pause between events."""
+
+    async def __anext__(self):
+        raw = await super().__anext__()
+        if json.loads(raw).get("type") == "_sleep":
+            await asyncio.sleep(0.1)
+            return await self.__anext__()
+        return raw
+
+
+_STOPPED = {"type": "output_audio_buffer.stopped"}
+_SLEEP = {"type": "_sleep"}
+
+
+def _silences(ws):
+    return [m for m in ws.sent if m.get("item", {}).get("content", [{}])[0].get("text") == "[SILENCE]"]
+
+
+@pytest.fixture
+def silence_call(monkeypatch):
+    monkeypatch.setattr(rs, "SILENCE_SECONDS", 0.02)
+    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 1.0)
+    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+
+
+def test_silence_check_in_once_per_question_and_counted_in_payload(monkeypatch, silence_call):
+    async def fake_grade(session, transcript, rubric=None, client=None):
+        return {"qa_transcripts": []}
+
+    monkeypatch.setattr(rs, "grade_transcript", fake_grade)
+    events = [
+        *_assistant("a0", "Hi Asha! Are you ready?"), *_user("u0", "Yes"), _STOPPED, _SLEEP,  # greeting: no check-in
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"), _STOPPED, _SLEEP,  # -> [SILENCE]
+        *_assistant("a1s", "Take your time. Want a small hint?"), _STOPPED, _SLEEP,  # already checked in: none
+        *_user("u1r", "Sorry, can you repeat?"), *_assistant("a1r", "Question 1 text?"), _STOPPED, _SLEEP,
+        *_user("u1", "Current flows"),
+        _done({"type": "function_call", "name": "ask_question", "call_id": "c2",
+               "arguments": json.dumps({"question_number": 2, "easier": True})}),
+        *_assistant("a2", "Easy question 2?"), _STOPPED, _SLEEP,  # new question -> [SILENCE] again
+        *_user("u2", "Resistance"),
+    ]
+    ws = _SlowWS(events)
+    call, _ = _run_sideband(monkeypatch, ws, _easier_config())
+    assert len(_silences(ws)) == 2
+    assert _outputs(ws)["c2"]["say"] == "Easy question 2?"
+    monkeypatch.setitem(rs._calls, call.call_id, call)
+    answers = asyncio.run(rs.finish_call(call.call_id, "u1"))["answers"]
+    assert [(a["version"], a["repeat_requests"], a["silences"]) for a in answers] == [
+        ("standard", 1, 1), ("easier", 0, 1), ("standard", 0, 0)]
+    assert answers[0]["first_answer"] == "Current flows"
+
+
+def test_no_silence_check_in_while_anyone_is_speaking(monkeypatch, silence_call):
+    events = [
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+        _STOPPED, {"type": "output_audio_buffer.started"}, _SLEEP,  # Milo talking again
+        {"type": "input_audio_buffer.speech_started"}, _STOPPED, _SLEEP,  # student barged in and is still talking
+    ]
+    ws = _SlowWS(events)
+    call, _ = _run_sideband(monkeypatch, ws, _config())
+    assert not _silences(ws) and call.progress[1]["silences"] == 0
+    call.student_speaking, call.state.is_completed = False, True
+    assert not rs._awaiting_answer(call, 1)  # after end_session: never

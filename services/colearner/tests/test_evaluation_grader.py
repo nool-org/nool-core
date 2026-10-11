@@ -107,3 +107,18 @@ def test_generate_bloom_report_delegates_to_grader(monkeypatch, tmp_path):
     session = session_store.create_session(SessionConfig(num_questions=1))
     report = asyncio.run(chained_service.generate_bloom_report(session, "TRANSCRIPT"))
     assert seen["t"] == "TRANSCRIPT" and report["grading_error"] == "x"
+
+
+def test_easier_version_is_capped_at_70_before_the_hint_penalty():
+    payload = {"overall_feedback": "", "answers": [
+        _answer(1, "Understanding", 95, True), _answer(2, "Understanding", 95, True, hints=1),
+        _answer(3, "Understanding", 50, True)]}
+    rubric = [{"question_number": 1, "version": "standard"}, {"question_number": 2, "version": "easier"},
+              {"question_number": 3, "version": "easier"}]
+    client = _FakeClient(payload)
+    _, report = _grade(client, rubric=rubric)
+    qa = report["qa_transcripts"]
+    assert [a["score_percent"] for a in qa] == [95, 60, 50]  # 95 -> cap 70 -> -10 hint
+    assert [a["raw_score_percent"] for a in qa] == [95, 95, 50]
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "at most 70" in prompt and "Tanglish" in prompt
