@@ -161,9 +161,12 @@ failed) - it is not the primary AI anywhere.
    WebSocket to record the transcript itself. Audio flows app <-> OpenAI
    directly; server VAD detects turn ends and the student can interrupt.
    Milo asks exactly the prepared questions, in order, through tools -
-   `ask_question`, `give_hint` (max 2 per question, from the rubric),
-   `give_explanation`, `end_session` - so colearner knows which question
+   `ask_question`, `give_hint` (max 2 guiding nudges per question, from the
+   rubric, never the answer), `end_session` - so colearner knows which question
    each student turn answers (first answer vs. follow-up / hint request).
+   Milo acts as a teacher: one follow-up for a vague answer, nudges when
+   stuck, never explains or gives answers during the test; the expected
+   points go only to the grader, never into Milo's instructions.
    After `end_session` or the time limit the model gets a 30 s grace, then
    colearner hangs up.
 5. **Grading** - the app calls `POST /ai-assessor/sessions/{id}/finish`;

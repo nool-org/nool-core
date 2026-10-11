@@ -53,17 +53,14 @@ def _session_events():
         _tool("ask_question", 1, "c1"),
         *_assistant("a1", "Question 1 text?"),
         *_user("u1", "Current is flow of charge"),
-        *_assistant("a1b", "Okay, got it."),
-        *_user("u1b", "Can you explain it?"),
-        _tool("give_explanation", 1, "c2"),
-        *_assistant("a1c", "Sure, point 1a and point 1b."),
+        *_assistant("a1b", "Can you tell me why?"),  # follow-up probe
+        *_user("u1b", "Because charges move"),
         _tool("ask_question", 2, "c3"),
         *_assistant("a2", "Question 2 text?"),
         *_user("u2a", "Hint please"), _tool("give_hint", 2, "h1"), *_assistant("a2h1", "hint 2.1"),
-        *_user("u2b", "One more hint"), _tool("give_hint", 2, "h2"), *_assistant("a2h2", "hint 2.2"),
-        *_user("u2c", "Another hint?"), _tool("give_hint", 2, "h3"), *_assistant("a2h3", "Try it yourself!"),
-        *_user("u2d", "Resistance goes up"),
-        *_assistant("a2b", "Okay."),
+        *_user("u2b", "I don't know"), _tool("give_hint", 2, "h2"), *_assistant("a2h2", "hint 2.2"),
+        *_user("u2c", "Resistance goes up"), _tool("give_hint", 2, "h3"),  # nudges used up: this stays the answer
+        *_assistant("a2h3", "That's okay, we'll work on this in your homework."),
         _tool("ask_question", 3, "c4"),
         *_assistant("a3", "Question 3 text?"),
         *_user("u3", "Heat is produced"),
@@ -81,10 +78,29 @@ def short_call(monkeypatch):
 
 def test_session_uses_prepared_questions_and_tools():
     session = rs.build_session(_config())
-    assert [t["name"] for t in session["tools"]] == ["ask_question", "give_hint", "give_explanation", "end_session"]
+    assert [t["name"] for t in session["tools"]] == ["ask_question", "give_hint", "end_session"]
     text = session["instructions"]
     assert text.index("Question 1 text?") < text.index("Question 2 text?") < text.index("Question 3 text?")
     assert "Are you ready?" in text and "Indian English" in text
+    assert "never ask whether they are ready for the next question" in text.lower()
+    assert "never say question numbers aloud" in text.lower()
+
+
+def test_instructions_never_carry_the_answers():
+    for config in (_config(), SessionConfig(textbook_context="Ohm's law")):
+        session = rs.build_session(config)
+        assert "point 1a" not in session["instructions"] and "Key points" not in session["instructions"]
+        assert "give_explanation" not in json.dumps(session)
+    addendum = rs.build_session(SessionConfig()).get("instructions").lower()
+    assert "never ask whether they are ready for the next question" in addendum
+    assert "never say question numbers aloud" in addendum
+
+
+def test_speakerphone_audio_config():
+    audio_in = rs.build_session(_config())["audio"]["input"]
+    assert audio_in["noise_reduction"] == {"type": "far_field"}
+    assert audio_in["turn_detection"] == {"type": "semantic_vad", "eagerness": "medium"}
+    assert "interrupt_response" not in audio_in["turn_detection"]  # barge-in stays on (default)
 
 
 def test_fallback_without_questions_keeps_textbook_prompt():
@@ -95,30 +111,32 @@ def test_fallback_without_questions_keeps_textbook_prompt():
     assert config.num_questions == 2
 
 
-def test_tool_events_map_answers_hints_and_explanations(monkeypatch, short_call):
+def test_tool_events_map_answers_and_hints(monkeypatch, short_call):
     ws = FakeWS(_session_events())
     call, _ = _run_sideband(monkeypatch, ws, _config())
 
     out = _outputs(ws)
     assert out["c1"] == {"question_number": 1, "say": "Question 1 text?"}
-    assert out["c2"] == {"key_points": ["point 1a", "point 1b"]}
     assert out["h1"] == {"hint": "hint 2.1"} and out["h2"] == {"hint": "hint 2.2"}
-    assert out["h3"]["no_hints_left"] is True  # cap: 3rd request -> encourage instead
+    assert out["h3"]["no_hints_left"] is True and "homework" in out["h3"]["say_instead"]  # cap: 3rd -> move on
+    assert "point" not in json.dumps(out)  # no expected points ever reach the model
     # each tool-only response is followed by our response.create; question replies get the longer cap
     creates = [m["response"]["max_output_tokens"] for m in ws.sent
                if m["type"] == "response.create" and "max_output_tokens" in m.get("response", {})
                and "instructions" not in m["response"]]
-    assert creates == [rs.MAX_QUESTION_TOKENS, rs.MAX_EXPLANATION_TOKENS, rs.MAX_QUESTION_TOKENS,
+    assert creates == [rs.MAX_QUESTION_TOKENS, rs.MAX_QUESTION_TOKENS,
                        rs.MAX_REPLY_TOKENS, rs.MAX_REPLY_TOKENS, rs.MAX_REPLY_TOKENS, rs.MAX_QUESTION_TOKENS]
     forced = [m for m in ws.sent if m.get("response", {}).get("tool_choice") == {"type": "function", "name": "end_session"}]
     assert len(forced) == 1 and call.state.is_completed
     assert "response.cancel" not in [m["type"] for m in ws.sent]
 
     p = call.progress
-    assert p[1] == {"first_item": "u1", "hints_used": 0, "explanation_requested": True}
-    assert p[2] == {"first_item": "u2d", "hints_used": 2, "explanation_requested": False}
+    assert p[1] == {"first_item": "u1", "hints_used": 0, "explanation_requested": False}
+    assert p[2] == {"first_item": "u2c", "hints_used": 2, "explanation_requested": False}
     assert p[3]["first_item"] == "u3"
-    assert call.item_kind["u1b"] == "explanation_request" and call.item_kind["u2c"] == "hint_request"
+    # the probe's reply stays with Q1, graded together with the first answer
+    assert call.item_question["u1b"] == 1 and call.item_kind["u1b"] == "follow_up"
+    assert call.item_kind["u2b"] == "hint_request" and call.item_kind["u2c"] == "answer"
 
 
 def test_finish_payload_and_rubric_passed_to_grader(monkeypatch, short_call):
@@ -136,7 +154,7 @@ def test_finish_payload_and_rubric_passed_to_grader(monkeypatch, short_call):
     assert set(result) >= {"report", "answers", "transcript", "turns", "cost", "answered", "model_completed"}
     assert result["answers"] == [
         {"question_id": "q1", "question_number": 1, "first_answer": "Current is flow of charge",
-         "hints_used": 0, "explanation_requested": True},
+         "hints_used": 0, "explanation_requested": False},
         {"question_id": "q2", "question_number": 2, "first_answer": "Resistance goes up",
          "hints_used": 2, "explanation_requested": False},
         {"question_id": "q3", "question_number": 3, "first_answer": "Heat is produced",
@@ -157,6 +175,7 @@ def test_finish_payload_and_rubric_passed_to_grader(monkeypatch, short_call):
     assert rubric[1]["hints_used"] == 2
     assert "[Q2] [STUDENT] (hint request): Hint please" in graded["transcript"]
     assert "[Q2] [STUDENT]: Resistance goes up" in graded["transcript"]
+    assert "[Q1] [STUDENT] (follow up): Because charges move" in graded["transcript"]
     assert result["report"]["session_summary"]["overall_mastery_percent"] == 70
 
 
@@ -232,24 +251,49 @@ def test_filler_plus_tool_in_one_response_still_gets_spoken(monkeypatch, short_c
     assert call.progress[2]["first_item"] == "u2b" and call.item_kind["u2"] == "hint_request"
 
 
-def test_explanation_of_previous_question_after_moving_on(monkeypatch, short_call):
+def test_repeat_request_and_noise_are_not_answers(monkeypatch, short_call):
     events = [
         *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
         _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+        *_user("u1r", "Sorry, can you repeat please?"),  # barged in while Milo read the question
+        *_assistant("a1r", "Question 1 text?"),
+        *_user("u1noise", ""),  # noise - never an answer
         *_user("u1", "Current flows"),
-        _tool("ask_question", 2, "c2"), *_assistant("a2", "Okay. Question 2 text?"),
-        *_user("u2x", "Can you explain question 1?"),  # tagged Q2 when heard
-        _tool("give_explanation", 1, "x1"), *_assistant("a1x", "point 1a, point 1b"),
-        *_user("u2noise", ""),  # noise - never an answer
-        _tool("ask_question", 2, "c3"), *_assistant("a2r", "Question 2 text?"),
-        *_user("u2", "Resistance"),
+    ]
+    call, _ = _run_sideband(monkeypatch, FakeWS(events), _config())
+    assert call.item_kind["u1r"] == "repeat_request" and call.item_kind["u1noise"] == "noise"
+    assert call.progress[1]["first_item"] == "u1" and call.item_kind["u1"] == "answer"
+
+
+def test_late_repeat_transcript_hands_the_answer_to_the_next_turn():
+    call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.session_store.create_session(_config(2)))
+    call.current = 1
+    for item_id in ("u1r", "u1"):  # both heard before the first one's transcript arrived
+        call.items[item_id] = {"role": "user", "text": ""}
+        call.item_question[item_id] = 1
+        rs._tag_user_turn(call, item_id)
+    rs._not_an_answer(call, "u1r", "repeat_request")
+    assert call.progress[1]["first_item"] == "u1" and call.item_kind["u1"] == "answer"
+
+
+def test_repeat_request_detection():
+    for text in ("What?", "Pardon?", "Sorry, say that again", "Can you repeat the question?", "wait", "I didn't hear you"):
+        assert rs._repeat_request(text), text
+    for text in ("", "Current flows from positive to negative", "What happens is the bulb glows", "I don't know"):
+        assert not rs._repeat_request(text), text
+
+
+def test_follow_up_probe_on_last_question_is_not_cut_off(monkeypatch, short_call):
+    events = [
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+        *_user("u1", "Heat"),
+        *_assistant("a1p", "Can you tell me why?"),  # probe - the student gets to answer
     ]
     ws = FakeWS(events)
-    call, _ = _run_sideband(monkeypatch, ws, _config())
-    assert _outputs(ws)["x1"] == {"key_points": ["point 1a", "point 1b"]}
-    assert call.item_question["u2x"] == 1 and call.item_kind["u2x"] == "explanation_request"
-    assert call.progress[1] == {"first_item": "u1", "hints_used": 0, "explanation_requested": True}
-    assert call.progress[2]["first_item"] == "u2" and call.item_kind["u2noise"] == "noise"
+    call, _ = _run_sideband(monkeypatch, ws, _config(1))
+    forced = [m for m in ws.sent if m.get("response", {}).get("tool_choice") == {"type": "function", "name": "end_session"}]
+    assert not forced and call.progress[1]["first_item"] == "u1"
 
 
 def test_unprompted_hint_does_not_relabel_previous_answer():

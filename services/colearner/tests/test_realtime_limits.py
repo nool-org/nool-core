@@ -74,8 +74,9 @@ def test_time_clamp_applies_to_live_call(monkeypatch):
 
 
 def test_reply_cap_forces_wrap_up_and_hangs_up(monkeypatch, caplog):
-    events = [_done(MESSAGE) for _ in range(rs.MAX_REPLIES)] + [
-        {"type": "response.created"},  # Milo's 19th reply starts -> cancelled
+    cap = rs.reply_cap(10)  # the default session in _run_sideband has 10 questions
+    events = [_done(MESSAGE) for _ in range(cap)] + [
+        {"type": "response.created"},  # the reply past the cap starts -> cancelled
         _done(),  # cancelled reply -> forced end_session
         _done({"type": "function_call", "name": "end_session", "call_id": "fc_1"}),  # -> closing turn
         _done(MESSAGE),  # goodbye generated
@@ -93,14 +94,14 @@ def test_reply_cap_forces_wrap_up_and_hangs_up(monkeypatch, caplog):
     assert closing[0]["response"]["max_output_tokens"] == rs.MAX_CLOSING_TOKENS
     assert call.state.is_completed and hangups == ["call_1"]
     cost_log = next(r for r in caplog.records if r.getMessage().startswith("realtime_call_cost"))
-    assert cost_log.call_id == "call_1" and cost_log.replies == rs.MAX_REPLIES + 1
+    assert cost_log.call_id == "call_1" and cost_log.replies == cap + 1
     assert cost_log.total_usd == 0 and cost_log.duration_seconds >= 0
 
 
 def test_no_cap_below_limit(monkeypatch):
     monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 0.05)
     monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
-    ws = FakeWS([_done(MESSAGE) for _ in range(rs.MAX_REPLIES - 1)] + [{"type": "response.created"}])
+    ws = FakeWS([_done(MESSAGE) for _ in range(rs.reply_cap(10) - 1)] + [{"type": "response.created"}])
     call, _ = _run_sideband(monkeypatch, ws)
     assert "response.cancel" not in [m["type"] for m in ws.sent] and not call.forcing_end
 
@@ -129,3 +130,8 @@ def test_may_end_only_when_really_over():
     assert rs._may_end(call)
     call.spoken_turns, call.time_up = 1, True
     assert rs._may_end(call)
+
+
+def test_reply_cap_leaves_room_for_follow_ups_and_nudges():
+    assert rs.reply_cap(2) == rs.MAX_REPLIES  # short tests keep the floor
+    assert rs.reply_cap(10) >= 5 * 10  # ask + follow-up + two nudges + acknowledgement each

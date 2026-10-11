@@ -44,9 +44,10 @@ itself.
 With `config.questions` (the test's prepared questions, contract C3) Milo
 asks exactly those, in order, through tools: `ask_question` (returns the
 question's `spoken_text`), `give_hint` (the rubric's hints, max 2 per
-question, then "encourage instead"), `give_explanation` (the expected
-points) and `end_session`. The sideband tags each student turn with its
-question (first answer vs. follow-up / hint / explanation request). Without
+question, then "we'll work on this in your homework" and move on) and
+`end_session`. The expected points never reach the realtime model (only the
+grader). The sideband tags each student turn with its question (first
+answer vs. follow-up / hint request / repeat request / noise). Without
 questions Milo improvises from `textbook_context`.
 
 `POST .../realtime/calls/{call_id}/finish` grades that server-side

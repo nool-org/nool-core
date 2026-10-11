@@ -91,6 +91,9 @@ Rules:
 - A claim that breaks a basic principle (e.g. energy being created or used up, charge being consumed) is a misconception, even if worded casually.
 - Judge directions, conventions and definitions by the textbook for the stated grade: loose wording that makes the stated fact false (e.g. calling electron flow "electricity" or "current" and giving the wrong direction for it) is wrong.
 - A correct but shallow answer is substantively correct with a moderate score; a correct, well-reasoned answer scores high.
+- These are spoken answers: judge meaning, not wording, grammar or exact terms - a correct idea in everyday words counts.
+- Every student turn tagged with the same [Qn] is one answer: a reply to the Co-Learner's follow-up ("Can you tell me why?") or after a hint is judged together with the first reply. Ignore turns marked (repeat request) or (noise).
+- Partial credit, against the question's expected key points (or the textbook answer if no rubric): all key points stated correctly = 85-100; about half of them correct = 50-60 (partial, is_substantively_correct true only if the core idea is right); a little relevant but mostly missing = 20-40; none, off-topic or "I don't know" = 0-15. A confidently wrong central claim stays under 40 whatever else is covered.
 - Do NOT include the opening readiness exchange (e.g. "Are you ready to begin?") or closing small talk.
 - If a rubric is given, use its expected key points and known misconceptions for that question.
 

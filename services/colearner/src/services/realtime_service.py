@@ -13,8 +13,8 @@ never from anything the client claims. The report comes from the strict
 grader (src/services/evaluation).
 
 With prepared questions (config.questions, contract C3) Milo asks exactly
-those, in order, and the model calls ask_question / give_hint /
-give_explanation / end_session tools - so the sideband knows which question
+those, in order, and the model calls ask_question / give_hint / end_session
+tools - so the sideband knows which question
 each student turn belongs to, and finish grades against each question's rubric.
 Without them Milo improvises from the textbook context (the original flow).
 
@@ -59,12 +59,16 @@ _KEEP_SECONDS = 3 * 3600
 # a backstop for "1-2 short sentences" (a reply may be cut, never runs on).
 MAX_REPLY_TOKENS = 220
 MAX_CLOSING_TOKENS = 500  # the 2-3 sentence summary + fixed sign-off line
-MAX_REPLIES = 18  # co-learner replies per call, then the wrap-up is forced
+MAX_REPLIES = 18  # co-learner replies per call (floor), then the wrap-up is forced
+REPLIES_PER_QUESTION = 5  # ask + one follow-up + two nudges + acknowledgement
+
+
+def reply_cap(num_questions: int) -> int:
+    return max(MAX_REPLIES, REPLIES_PER_QUESTION * num_questions + 3)
 MAX_CALL_SECONDS = 8 * 60  # config's session_max_time_seconds is unbounded
 # Replies we start ourselves after a tool call: reading a prepared question
-# (plus one context sentence) or a 2-3 sentence explanation runs longer.
+# (plus one context sentence) runs longer.
 MAX_QUESTION_TOKENS = 400
-MAX_EXPLANATION_TOKENS = MAX_CLOSING_TOKENS
 MAX_HINTS = 2  # per question
 
 END_SESSION_TOOL = {
@@ -91,15 +95,9 @@ ASK_QUESTION_TOOL = {
 GIVE_HINT_TOOL = {
     "type": "function",
     "name": "give_hint",
-    "description": "Call this, without speaking, when the student asks for a hint. It returns the hint to say.",
-    "parameters": _QUESTION_NUMBER,
-}
-GIVE_EXPLANATION_TOOL = {
-    "type": "function",
-    "name": "give_explanation",
     "description": (
-        "Call this, without speaking, when the student asks you to explain a question they have ALREADY answered. "
-        "It returns the key points to explain from."
+        "Call this, without speaking, when the student asks for a hint, is stuck or says they don't know. "
+        "It returns a guiding nudge to say."
     ),
     "parameters": _QUESTION_NUMBER,
 }
@@ -110,6 +108,9 @@ LIVE VOICE SESSION RULES (this is a real-time spoken call):
 - Speak first: open with a short, warm greeting that names the chapter and ends with "Are you ready to begin?".
 - Keep every turn to 1-2 short spoken sentences (under 25 words in total), then stop and let the student talk.
 - Never explain, recap or lecture, and never repeat what the student said back to them - one quick acknowledgement at most.
+- "Are you ready to begin?" is asked ONCE, at the start. Never ask whether they are ready for the next question and never ask for any other confirmation between questions - after a short neutral acknowledgement, go straight on.
+- Never say question numbers aloud (no "question two", "next is question 3"); "last one" is fine.
+- If the student asks for the answer or asks you to explain, kindly say you can't give answers during the test but they should give it their best guess, and stay on the question.
 - Every turn after the student speaks is ONE reply: acknowledge and ask the next question together. Never send a separate filler turn like "let me set the stage" or "let me think of a question" - just ask it.
 - If the student interrupts you, stop and listen - respond to what they said.
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
@@ -179,23 +180,24 @@ def _api_key() -> str:
 
 
 def build_question_instructions(config: SessionConfig) -> str:
-    questions = "\n".join(
-        f"Q{n} [{q.bloom_level}]: \"{q.spoken_text}\"\n"
-        f"  Key points (only for an explanation after the student has answered): {'; '.join(q.expected_points) or '-'}"
-        for n, q in enumerate(config.questions, 1)
-    )
-    return f"""You are Milo, a friendly classmate running a short spoken {config.subject} quiz on "{config.chapter_name}" with a {config.grade} student in India.
-Speak simple Indian English, like a friendly classmate in a South Indian school: short, clear sentences and everyday words.
+    # Never the expected points: whatever is in here can end up said aloud.
+    # The grader gets them separately (question_rubric).
+    questions = "\n".join(f"Q{n} [{q.bloom_level}]: \"{q.spoken_text}\"" for n, q in enumerate(config.questions, 1))
+    return f"""You are Milo, a warm teacher giving a short spoken {config.subject} test on "{config.chapter_name}" to a {config.grade} student in India. You guide the student's thinking - you never give the answers.
+Speak simple Indian English, like a kind teacher in a South Indian school: short, clear sentences and everyday words.
 
 THE QUESTIONS - ask exactly these {len(config.questions)}, in this order. Never invent, skip, reorder, merge or change the meaning of a question:
 {questions}
 
 HOW THE SESSION GOES (this is a real-time spoken call):
-- Speak first: a short, warm greeting that names the chapter, then ask "Are you ready?" and wait for the student.
+- Speak first: a short, warm greeting that names the chapter, then ask "Are you ready?" and wait for the student. This is the ONLY confirmation in the whole test.
 - Before each question, call ask_question with its number, without speaking. Then say the text it returns. You may add ONE short friendly sentence of context before it, but keep the question's meaning.
-- Then stop and listen. Never say or hint whether an answer is right or wrong, never correct it, never praise it as correct, and never repeat it back. Give one short neutral acknowledgement (like "Okay, got it.") and go to the next question.
-- Hints: only when the student asks for one. Call give_hint with the question number, without speaking, then say the hint it returns - never the answer. If it says no hints are left, gently encourage the student to try in their own words. Stay on the same question.
-- Explanation: only if the student asks AFTER they have answered. Call give_explanation with the question number, without speaking, then explain in 2-3 short sentences using only the key points it returns. Then go on to the next unanswered question (if you had already asked it, call ask_question for it again).
+- Never say question numbers aloud (no "question two", "next is question 3"); "last one" is fine.
+- Then stop and listen. Never say or hint whether an answer is right or wrong, never correct it, never praise it as correct, and never repeat it back.
+- If the answer is vague or too short, ask ONE short follow-up (like "Can you tell me why?" or "What happens next?"), then move on whatever they say.
+- Otherwise give one short neutral acknowledgement (like "Okay, got it.") and go straight to the next question. Never ask whether they are ready for the next question and never ask for any other confirmation between questions.
+- If the student is stuck, says "I don't know" or asks for a hint: call give_hint with the question number, without speaking, then say the guiding nudge it returns - a guiding question, never the answer. At most 2 nudges per question; if it says no nudges are left, say something like "That's okay, we'll work on this in your homework" and go to the next question.
+- If the student asks for the answer or asks you to explain: kindly say "I can't give answers during the test, but give it your best guess," and stay on the question. Never explain or teach the answer during the test - that comes later in their homework.
 - Keep every other turn to 1-2 short sentences (under 25 words).
 - If the student interrupts you, stop and listen - respond to what they said.
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
@@ -208,7 +210,7 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 def build_session(config: SessionConfig) -> dict:
     if config.questions:
         instructions = build_question_instructions(config)
-        tools = [ASK_QUESTION_TOOL, GIVE_HINT_TOOL, GIVE_EXPLANATION_TOOL, END_SESSION_TOOL]
+        tools = [ASK_QUESTION_TOOL, GIVE_HINT_TOOL, END_SESSION_TOOL]
     else:
         instructions = build_chained_system_prompt(config) + _REALTIME_ADDENDUM
         tools = [END_SESSION_TOOL]
@@ -223,10 +225,11 @@ def build_session(config: SessionConfig) -> dict:
                     "language": "en",
                     "prompt": f"A school student answering {config.subject} questions about {config.chapter_name}.",
                 },
-                "noise_reduction": {"type": "near_field"},
+                # far_field: students use phones on speakerphone, so they can still barge in.
+                "noise_reduction": {"type": "far_field"},
                 # semantic_vad judges "finished a thought", not just silence -
-                # a student pausing mid-answer isn't cut off. "low" = patient.
-                "turn_detection": {"type": "semantic_vad", "eagerness": "low"},
+                # a student pausing mid-answer isn't cut off. "medium" still lets them interrupt Milo.
+                "turn_detection": {"type": "semantic_vad", "eagerness": "medium"},
             },
             "output": {"voice": VOICE},
         },
@@ -339,7 +342,7 @@ async def _record(call: RealtimeCall, ws) -> None:
             final_answer_in = (not call.state.config.questions
                                and call.spoken_turns >= call.state.config.num_questions + 1)
             # reply cap: the student answers Milo's last reply, then the wrap-up is forced the same way
-            capped = call.replies >= MAX_REPLIES
+            capped = call.replies >= reply_cap(call.state.config.num_questions)
             if (final_answer_in or capped) and not call.forcing_end and not call.state.is_completed:
                 call.forcing_end = True
                 if capped and not final_answer_in:
@@ -352,6 +355,8 @@ async def _record(call: RealtimeCall, ws) -> None:
             entry["text"] = (event.get("transcript") or "").strip()
             if not entry["text"] and call.item_kind.get(event["item_id"]) == "answer":
                 _not_an_answer(call, event["item_id"])
+            elif call.item_kind.get(event["item_id"]) in ("answer", "follow_up") and _repeat_request(entry["text"]):
+                _not_an_answer(call, event["item_id"], "repeat_request")
             add_transcription_usage(call.usage, event.get("usage"))
         elif kind == "response.output_audio_transcript.done":
             entry = call.items.setdefault(event["item_id"], {"role": "assistant", "text": ""})
@@ -459,12 +464,32 @@ def _request_turn(call: RealtimeCall, n: int, kind: str) -> None:
     call.item_kind[item_id] = kind
 
 
-def _not_an_answer(call: RealtimeCall, item_id: str) -> None:
-    """Heard nothing (noise) - the question's answer is still to come."""
-    call.item_kind[item_id] = "noise"
-    progress = _progress(call, call.item_question[item_id])
+# Words a "say that again?" turn is made of - a turn using only these (and at
+# least one of _REPEAT_KEYS) asks for a repeat, it doesn't answer.
+# ponytail: word-list heuristic, transcript-based; add barge-in timing (output_audio_buffer events) if it misses.
+_REPEAT_WORDS = set(
+    "sorry pardon what huh wait repeat say it that again please can could you the question come one more time "
+    "once i didn't did not hear get catch understand was milo sir ma'am miss okay ok hello".split()
+)
+_REPEAT_KEYS = {"pardon", "what", "huh", "wait", "repeat", "again", "hear", "get", "catch"}
+
+
+def _repeat_request(text: str) -> bool:
+    words = re.findall(r"[a-z']+", text.lower())
+    return bool(words) and set(words) <= _REPEAT_WORDS and bool(_REPEAT_KEYS & set(words))
+
+
+def _not_an_answer(call: RealtimeCall, item_id: str, kind: str = "noise") -> None:
+    """Heard nothing (noise) or a repeat request - the question's answer is still to come
+    (or is the next turn on it, if that already arrived)."""
+    call.item_kind[item_id] = kind
+    n = call.item_question[item_id]
+    progress = _progress(call, n)
     if progress["first_item"] == item_id:
-        progress["first_item"] = None
+        progress["first_item"] = next((i for i in call.items if call.item_question.get(i) == n
+                                       and call.item_kind.get(i) == "follow_up"), None)
+        if progress["first_item"]:
+            call.item_kind[progress["first_item"]] = "answer"
 
 
 def _tool_output(call: RealtimeCall, name: str, n: int | None) -> tuple[dict, int]:
@@ -479,20 +504,15 @@ def _tool_output(call: RealtimeCall, name: str, n: int | None) -> tuple[dict, in
     if name == "ask_question":
         call.current = n
         return {"question_number": n, "say": q.spoken_text}, MAX_QUESTION_TOKENS
-    if name == "give_hint":
-        _request_turn(call, n, "hint_request")
-        if progress["hints_used"] >= min(MAX_HINTS, len(q.hints)):
-            return {"no_hints_left": True,
-                    "say_instead": "Gently encourage the student to try answering in their own words."}, MAX_REPLY_TOKENS
-        progress["hints_used"] += 1
-        return {"hint": q.hints[progress["hints_used"] - 1]}, MAX_REPLY_TOKENS
-    # give_explanation
-    _request_turn(call, n, "explanation_request")
-    if progress["first_item"] is None:
-        return {"not_yet": True,
-                "say_instead": "The student hasn't answered yet - encourage them to try first."}, MAX_REPLY_TOKENS
-    progress["explanation_requested"] = True
-    return {"key_points": q.expected_points}, MAX_EXPLANATION_TOKENS
+    # give_hint
+    if progress["hints_used"] >= min(MAX_HINTS, len(q.hints)):
+        # nudges used up: the student's last turn (e.g. "I don't know") stands as the answer
+        return {"no_hints_left": True,
+                "say_instead": "Kindly say \"That's okay, we'll work on this in your homework\", "
+                               "then go to the next question."}, MAX_REPLY_TOKENS
+    _request_turn(call, n, "hint_request")
+    progress["hints_used"] += 1
+    return {"hint": q.hints[progress["hints_used"] - 1]}, MAX_REPLY_TOKENS
 
 
 def _said(spoken: str, text: str) -> bool:
@@ -506,7 +526,7 @@ async def _questions_done(call: RealtimeCall, ws, outputs: list[dict]) -> None:
     """response.done with prepared questions: answer the question tools, or force
     the end once the last question has its answer and Milo just talked on."""
     calls = [o for o in outputs if o.get("type") == "function_call"
-             and o.get("name") in ("ask_question", "give_hint", "give_explanation")]
+             and o.get("name") in ("ask_question", "give_hint")]
     messages = [o["id"] for o in outputs if o.get("type") == "message" and o.get("id")]
     spoken = " ".join(call.items.get(m, {}).get("text", "") for m in messages)
     max_tokens, reply_needed = MAX_REPLY_TOKENS, False
@@ -531,8 +551,9 @@ async def _questions_done(call: RealtimeCall, ws, outputs: list[dict]) -> None:
     if reply_needed:
         await ws.send(json.dumps({"type": "response.create", "response": {"max_output_tokens": max_tokens}}))
     elif (messages and not calls and not call.forcing_end and call.current == len(call.state.config.questions)
-          and _progress(call, call.current)["first_item"] is not None):
-        # Milo acknowledged the final answer but didn't end - make it (the goodbye follows)
+          and _progress(call, call.current)["first_item"] is not None and not spoken.rstrip().endswith("?")):
+        # Milo acknowledged the final answer but didn't end - make it (the goodbye follows).
+        # A reply ending in "?" is a follow-up probe ("Can you tell me why?") - let the student answer it.
         call.forcing_end = call.forced_end_sent = True
         await ws.send(json.dumps({
             "type": "response.create",
