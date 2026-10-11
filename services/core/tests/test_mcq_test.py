@@ -646,3 +646,37 @@ async def test_migration_upgrade_and_downgrade(db_session):
     await _ddl(db_session, lambda conn: McqQuestionAnswer.__table__.drop(conn, checkfirst=True))
     await _ddl(db_session, run(module.downgrade))
     assert set((await db_session.run_sync(tables)).values()) == {None}
+
+
+async def test_bank_questions_get_a_written_why_and_hint_and_keep_fallbacks_when_generation_is_down(monkeypatch):
+    from src.services import generation_client
+    from src.services import mcq_test as svc
+
+    def draft():
+        return {0: svc._Draft(BloomLevel.REMEMBER, "lime water", "Which gas turns lime water milky?",
+                              ["Oxygen", "Carbon dioxide", "Hydrogen", "Nitrogen"], 1),
+                1: svc._Draft(BloomLevel.APPLY, "alloys", "Brass is an alloy of?", ["a", "b", "c", "d"], 0,
+                              explanation="Already written.", hint="Already a hint.")}
+
+    sent = []
+
+    async def explain(payload):
+        sent.append(payload)
+        return {"results": [{"question_number": 1, "explanation": "CO2 makes calcium carbonate.", "hint": None}]}
+
+    monkeypatch.setattr(generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(generation_client, "explain_mcq", explain)
+    drafts = draft()
+    await svc._explain_bank(drafts)
+    assert [i["question_number"] for i in sent[0]["items"]] == [1]  # only the one missing them
+    assert drafts[0].explanation == "CO2 makes calcium carbonate." and drafts[0].hint == ""
+    assert drafts[1].explanation == "Already written."
+
+    async def down(payload):
+        raise generation_client.GenerationServiceUnavailableError("down")
+
+    monkeypatch.setattr(generation_client, "explain_mcq", down)
+    drafts = draft()
+    await svc._explain_bank(drafts)  # no raise; fallbacks apply when rows are built
+    assert drafts[0].explanation == ""
+    assert svc.explanation_of(drafts[0].options, 1, drafts[0].explanation) == "The answer is Carbon dioxide."

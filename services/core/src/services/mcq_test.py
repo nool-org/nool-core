@@ -360,7 +360,8 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     counts["relaxed_bank"] = len(drafts) - counts["bank"] - counts["generated"]
     logger.info("mcq_questions_built", extra={"mcq_test_id": str(mcq.id), **counts})
 
-    # bank questions carry no explanation/hint: deterministic ones (no batch endpoint for them)
+    await _explain_bank(drafts)
+    # anything still without them gets the deterministic fallbacks
     rows = [McqTestQuestion(mcq_test_id=mcq.id, order=order, bloom_level=d.bloom_level, concept=d.concept,
                             text=strip_inline_options(d.text), options=d.options, correct_index=d.correct_index,
                             source_question_id=d.source_question_id,
@@ -372,6 +373,26 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     session.add_all(rows)
     await session.flush()
     return rows
+
+
+async def _explain_bank(drafts: dict[int, "_Draft"]) -> None:
+    """Bank questions come without a "why" or a hint: one batched generation
+    call writes both. Best effort - on failure the fallbacks are used."""
+    todo = {i: d for i, d in drafts.items() if not d.explanation or not d.hint}
+    if not todo or not generation_client.is_configured():
+        return
+    items = [{"question_number": i + 1, "text": d.text, "options": d.options,
+              "correct_index": d.correct_index, "concept": d.concept} for i, d in todo.items()]
+    try:
+        body = await generation_client.explain_mcq({"items": items})
+    except generation_client.GenerationServiceUnavailableError:
+        logger.warning("mcq_explain_unavailable", extra={"count": len(items)})
+        return
+    for r in body.get("results") or []:
+        d = todo.get(int(r.get("question_number", 0)) - 1)
+        if d is not None:
+            d.explanation = d.explanation or (r.get("explanation") or "")
+            d.hint = d.hint or (r.get("hint") or "")
 
 
 async def prebuild(mcq_test_id: uuid.UUID, student_id: uuid.UUID) -> None:

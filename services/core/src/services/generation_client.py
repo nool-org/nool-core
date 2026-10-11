@@ -42,6 +42,12 @@ async def generate_mcq(payload: dict) -> dict:
     return await _post("/v1/homework/gap-fill", payload, GAP_FILL_TIMEOUT_SECONDS)
 
 
+async def explain_mcq(payload: dict) -> dict:
+    """POST /v1/mcq/explain - {items: [{question_number, text, options, correct_index,
+    concept}]} -> {results: [{question_number, explanation, hint}]} (null when unusable)."""
+    return await _post("/v1/mcq/explain", payload, GAP_FILL_TIMEOUT_SECONDS)
+
+
 async def prep_voice_test(payload: dict) -> dict:
     """POST /v1/voice-test/prep - {grade, subject, chapter, board, levels,
     candidates} -> {questions: [...]}, one reworded question per level."""
