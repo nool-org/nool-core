@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, UniqueConstraint, false, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -30,6 +30,11 @@ class McqTest(IdMixin, TimestampMixin, Base):
     answers: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     # {before, after, perBloom: {LEVEL: percent}, growth: [{key, kind, before, afterCorrected, delta}]}
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    lifelines_used: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default="[]")  # fifty_fifty, ask_milo
+    speed_mode: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # one retry of the misses, for practice XP - never changes score_percent / mastery
+    retry_score_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retry_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class McqTestQuestion(IdMixin, Base):
@@ -47,3 +52,24 @@ class McqTestQuestion(IdMixin, Base):
     source_question_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("dataset_questions.id", ondelete="SET NULL"), nullable=True
     )
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)  # one line: why the answer is right
+    hint: Mapped[str | None] = mapped_column(Text, nullable=True)  # "Ask Milo" lifeline - never the answer
+    is_boss: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())  # harder, double XP
+    gap_concept: Mapped[str | None] = mapped_column(Text, nullable=True)  # the voice-test gap it targets
+
+
+class McqQuestionAnswer(IdMixin, Base):
+    """A student's FIRST answer to one MCQ question (instant feedback). The
+    attempt is scored from these; a retry of the misses never overwrites them."""
+
+    __tablename__ = "mcq_question_answers"
+    __table_args__ = (UniqueConstraint("mcq_test_question_id", "student_id",
+                                       name="uq_mcq_question_answers_question_student"),)
+
+    mcq_test_question_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mcq_test_questions.id", ondelete="CASCADE"))
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    option_index: Mapped[int] = mapped_column(Integer)
+    correct: Mapped[bool] = mapped_column(Boolean)
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timedelta
 from enum import Enum
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, UniqueConstraint, false, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -149,6 +149,13 @@ class VoiceTestQuestion(IdMixin, TimestampMixin, Base):
     expected_points: Mapped[list[str]] = mapped_column(JSONB, default=list)
     misconceptions: Mapped[list[str]] = mapped_column(JSONB, default=list)
     hints: Mapped[list[str]] = mapped_column(JSONB, default=list)  # gentle, then stronger
+    # adaptive difficulty: the same slot asked more gently, for a student who is struggling -
+    # {"spoken_text", "expected_points", "misconceptions", "hints"} or NULL
+    easier_version: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # quality loop across students: how often asked, how often it confused (repeat requests / no answer)
+    asked_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    confused_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    needs_rewording: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     status: Mapped[VoiceTestQuestionStatus] = mapped_column(
         SAEnum(VoiceTestQuestionStatus, name="voice_test_question_status"), default=VoiceTestQuestionStatus.DRAFT
     )
