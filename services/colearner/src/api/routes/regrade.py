@@ -1,15 +1,20 @@
+import logging
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from shared.auth import AuthenticatedUser
+from shared.errors import AppError
 
 from src.api.deps import get_current_user
 from src.domain.schemas import SessionConfig
 from src.services.evaluation import grade_transcript
+from src.services.evaluation.grader import grade_answer
 from src.services.realtime_service import _transcript_text, build_rubric
 from src.services.session_store import SessionState
 
 router = APIRouter(prefix="/api/v1", tags=["colearner-regrade"])
+logger = logging.getLogger(__name__)
 
 MAX_TURNS = 500
 
@@ -33,3 +38,34 @@ async def regrade(body: RegradeIn, _user: AuthenticatedUser = Depends(get_curren
     answers = {a.get("question_number"): a for a in body.answers if isinstance(a, dict)}
     rubric = build_rubric(body.config.questions, answers)
     return await grade_transcript(SessionState("regrade", body.config), _transcript_text(turns), rubric=rubric)
+
+
+class GradeAnswerIn(BaseModel):
+    """One short spoken practice answer (Core's daily practice, practice_voice.py)."""
+    question: str = Field(..., min_length=1, max_length=2000)
+    expected_points: list[str] = Field(default_factory=list, max_length=10)
+    misconceptions: list[str] = Field(default_factory=list, max_length=10)
+    transcript: str = Field(..., max_length=5000)
+    subject: str | None = Field(default=None, max_length=100)
+
+
+class GradeAnswerOut(BaseModel):
+    score: int
+    good: str
+    add: str
+
+
+class GradingUnavailableError(AppError):
+    code = "GRADING_UNAVAILABLE"
+    status_code = 503
+
+
+@router.post("/colearner/grade-answer", response_model=GradeAnswerOut, summary="Grade one short spoken answer")
+async def grade_one_answer(body: GradeAnswerIn, _user: AuthenticatedUser = Depends(get_current_user)) -> GradeAnswerOut:
+    """503 when the model call fails - the caller keeps the transcript ungraded."""
+    try:
+        return GradeAnswerOut(**await grade_answer(body.question, body.expected_points, body.misconceptions,
+                                                   body.transcript, body.subject))
+    except Exception as exc:
+        logger.warning("grade_answer_failed", extra={"reason": f"{type(exc).__name__}: {exc}"})
+        raise GradingUnavailableError("Could not grade this answer.") from exc

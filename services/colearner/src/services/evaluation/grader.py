@@ -164,9 +164,7 @@ def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str,
     }
 
 
-def _record_cost(session: SessionState, usage: Any) -> None:
-    if not usage:
-        return
+def _cost_metrics(usage: Any) -> Dict[str, Any]:
     cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
     metrics = calculate_turn_cost(GRADER_MODEL, usage.prompt_tokens, usage.completion_tokens)
     # calculate_turn_cost bills all input at the uncached rate - credit the cached part back
@@ -175,7 +173,12 @@ def _record_cost(session: SessionState, usage: Any) -> None:
     metrics["input_cost_usd"] = round(metrics["input_cost_usd"] - saving, 7)
     metrics["turn_cost_usd"] = round(metrics["turn_cost_usd"] - saving, 6)
     metrics["cached_input_tokens"] = cached
-    record_turn_metrics(session, metrics)
+    return metrics
+
+
+def _record_cost(session: SessionState, usage: Any) -> None:
+    if usage:
+        record_turn_metrics(session, _cost_metrics(usage))
 
 
 async def grade_transcript(
@@ -216,3 +219,77 @@ async def grade_transcript(
         report["session_summary"]["overall_mastery_percent"] = None
         report["grading_error"] = f"{type(ex).__name__}: {ex}"
         return report
+
+
+# ---- one short practice answer (daily practice, core's practice_voice.py) ----
+ANSWER_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "answer_grading",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "score_percent": {"type": "integer"},
+                "good": {"type": "string"},
+                "add": {"type": "string"},
+            },
+            "required": ["score_percent", "good", "add"],
+        },
+    },
+}
+
+ANSWER_SYSTEM_PROMPT = """You are an honest, strict evaluator of ONE short spoken answer a school student gave to a practice question. You are not a cheerleader.
+
+Return:
+- score_percent: 0-100 for how well the answer shows correct understanding.
+- good: one short sentence (under 15 words) on what the answer got right, addressed to the student ("You named both gases correctly."). Empty string if nothing was right.
+- add: one short sentence (under 15 words): the single most important thing to add or fix, as a pointer, e.g. "Add why light bends: its speed changes." Never recite the full answer. Empty string only if the answer is complete.
+
+Rules:
+- Judge correctness against standard textbook knowledge for the subject. Check every claim.
+- A confident but wrong answer scores low (under 40). Fluency, length and keywords are not correctness.
+- A vague, evasive, or "I don't know" answer scores 0-15.
+- A claim that breaks a basic principle (e.g. energy being created or used up) is a misconception, even if worded casually - point "add" at fixing it.
+- This is a spoken answer: judge meaning, not wording, grammar or exact terms - a correct idea in everyday words counts.
+- Students may mix English with Tamil, Hindi, Telugu, Kannada, Malayalam or another language (Tanglish, Hinglish): judge the meaning regardless of the language mix, never mark it down.
+- Partial credit, against the expected key points (or the textbook answer if none are given): all key points stated correctly = 85-100; about half of them correct = 50-60; a little relevant but mostly missing = 20-40; none, off-topic or "I don't know" = 0-15. A confidently wrong central claim stays under 40 whatever else is covered.
+- If known misconceptions are given and the answer states one, score it under 40."""
+
+EMPTY_ANSWER = {"score": 0, "good": "", "add": "Say your answer out loud - even a short one counts."}
+
+
+async def grade_answer(
+    question: str,
+    expected_points: List[str],
+    misconceptions: List[str],
+    transcript: str,
+    subject: Optional[str] = None,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """{score 0-100, good, add} for one spoken answer. Empty transcript -> EMPTY_ANSWER,
+    no model call. Raises on any failure (no key, API error, refusal) - never fakes a grade."""
+    if not transcript.strip():
+        return dict(EMPTY_ANSWER)
+    client = client or _get_client()
+    if client is None:
+        raise RuntimeError("openai_api_key is not configured")
+    prompt = json.dumps({"subject": subject, "question": question, "expected_key_points": expected_points,
+                         "known_misconceptions": misconceptions}, ensure_ascii=False)
+    resp = await client.chat.completions.create(
+        model=GRADER_MODEL,
+        messages=[
+            {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+            {"role": "user", "content": f'{prompt}\nSTUDENT ANSWER:\n"""\n{transcript}\n"""'},
+        ],
+        response_format=ANSWER_RESPONSE_FORMAT,
+    )
+    if usage := getattr(resp, "usage", None):
+        logger.info("grade_answer_cost", extra=_cost_metrics(usage))
+    msg = resp.choices[0].message
+    if getattr(msg, "refusal", None):
+        raise RuntimeError(f"grader refused: {msg.refusal}")
+    data = json.loads(msg.content)
+    return {"score": _clamp_score(data["score_percent"]), "good": str(data.get("good") or "").strip(),
+            "add": str(data.get("add") or "").strip()}

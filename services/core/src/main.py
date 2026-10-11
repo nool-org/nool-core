@@ -18,6 +18,7 @@ from src.api.routes import (
     assistant,
     bloom_result,
     curriculum,
+    daily_practice,
     dataset,
     devices,
     gamification,
@@ -28,6 +29,7 @@ from src.api.routes import (
     leaderboard,
     mcq_test,
     practice_bank,
+    practice_voice,
     profile,
     progress,
     question_paper,
@@ -110,6 +112,7 @@ def create_app() -> FastAPI:
     app.include_router(ai_assessor.router)
     app.include_router(student_homework.router)
     app.include_router(practice_bank.router)
+    app.include_router(practice_voice.router)
     app.include_router(bloom_result.router)
     app.include_router(insights.router)
     app.include_router(progress.router)
@@ -117,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(gamification.router)
     app.include_router(journey.router)
     app.include_router(mcq_test.router)
+    app.include_router(daily_practice.router)
     app.include_router(realtime.router)
     # Super Admin / School Admin
     app.include_router(admin.router)

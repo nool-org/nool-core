@@ -66,3 +66,14 @@ async def regrade_transcript(*, config: dict, transcript: list, answers: list, t
         "/api/v1/colearner/regrade",
         {"config": config, "transcript": transcript, "answers": answers}, token=token, timeout=90.0,
     )
+
+
+async def grade_answer(*, question: str, expected_points: list[str], misconceptions: list[str], transcript: str,
+                       subject: str | None, token: str) -> dict:
+    """{score 0-100, good, add} for one short spoken practice answer
+    (colearner's routes/regrade.py grade-answer) - one cheap LLM call."""
+    return await _realtime_post(
+        "/api/v1/colearner/grade-answer",
+        {"question": question, "expected_points": expected_points, "misconceptions": misconceptions,
+         "transcript": transcript, "subject": subject}, token=token, timeout=30.0,
+    )
