@@ -21,6 +21,7 @@ class SubjectTestSummaryOut(CamelModel):
     test_type: str
     score_percent: int
     trend_label: str
+    test_id: str | None = None  # the finished voice test (opens its insights)
 
 
 class TrajectoryPointOut(CamelModel):

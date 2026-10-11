@@ -13,6 +13,7 @@ from src.api.schemas.progress import (
 )
 from src.domain.models import (
     BloomLevel,
+    Chapter,
     Role,
     StudentTestResult,
     StudentTestResultBloomScore,
@@ -118,15 +119,28 @@ async def get_my_progress(
             message="Once you complete a Voice Test, your Bloom-level breakdown will show up here.",
         )
 
+    # Each finished voice test, newest first - chapter name and score.
+    finished = await session.execute(
+        select(StudentTestResult.test_id, StudentTestResult.mastery_percent, Subject.id, Subject.name, Chapter.name)
+        .join(VoiceTest, VoiceTest.id == StudentTestResult.test_id)
+        .join(Subject, Subject.id == VoiceTest.subject_id)
+        .outerjoin(Chapter, Chapter.id == VoiceTest.chapter_id)
+        .where(StudentTestResult.student_id == user.id)
+        .order_by(VoiceTest.created_at.desc())
+        .limit(20)
+    )
+    subject_tests = [
+        SubjectTestSummaryOut(
+            subject_id=str(subject_id), label=chapter_name or subject_name, test_type=f"Voice test · {subject_name}",
+            score_percent=mastery, trend_label="", test_id=str(test_id),
+        )
+        for test_id, mastery, subject_id, subject_name, chapter_name in finished.all()
+    ]
+
     return StudentProgressOverviewOut(
         bloom_mastery=bloom_mastery,
         subject_summaries=subject_summaries,
-        subject_tests=[
-            SubjectTestSummaryOut(
-                subject_id=s.subject_id, label=s.subject_label, test_type="Test", score_percent=s.score_percent, trend_label=""
-            )
-            for s in subject_summaries
-        ],
+        subject_tests=subject_tests,
         trajectory=trajectory,
         trajectory_gain_label=trajectory_gain_label,
         next_best_focus=next_best_focus,

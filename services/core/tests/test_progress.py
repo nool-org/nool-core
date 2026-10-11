@@ -107,3 +107,16 @@ async def test_progress_trajectory_reflects_real_mastery_percent(db_session):
 
     assert len(result.trajectory) == 1
     assert result.trajectory[0].mastery_percent == 60
+
+
+async def test_progress_lists_each_finished_test_with_its_chapter_and_score(db_session):
+    school = await _seed_school(db_session)
+    student = await _seed_student(db_session, school.id)
+    await _seed_result(db_session, school.id, student.id, mastery_percent=64, bloom_scores={BloomLevel.REMEMBER: 64})
+    await _seed_result(db_session, school.id, student.id, mastery_percent=30, bloom_scores={BloomLevel.APPLY: 30})
+
+    result = await progress.get_my_progress(user=student, session=db_session)
+
+    assert sorted(t.score_percent for t in result.subject_tests) == [30, 64]
+    assert all(t.label == "Chapter 1" and t.test_id for t in result.subject_tests)
+    assert all(t.test_type.startswith("Voice test · ") for t in result.subject_tests)
