@@ -18,6 +18,7 @@ from src.api.schemas.student_dashboard import (
 )
 from src.domain.models import (
     Chapter,
+    DailyPracticeSession,
     Role,
     StudentHomeworkProgress,
     StudentTestResult,
@@ -43,6 +44,13 @@ async def _learning_streak(session: AsyncSession, student_id) -> LearningStreakO
         )
     )
     active_dates = {row[0].date() for row in confirmed.all()}
+    # a completed daily practice counts as the day's learning activity too
+    active_dates |= {row[0].date() for row in (await session.execute(
+        select(DailyPracticeSession.completed_at).where(
+            DailyPracticeSession.student_id == student_id,
+            DailyPracticeSession.completed_at >= since,
+        )
+    )).all()}
     today = datetime.now(timezone.utc).date()
 
     days = []
