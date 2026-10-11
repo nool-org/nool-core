@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import undefer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,7 @@ from shared.logging import get_logger
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.common import ListEnvelope
 from src.api.routes.gamification import apply_xp
-from src.api.schemas.homework import HomeworkAnswerIn, HomeworkAnswerOut, HomeworkQuestionOut
+from src.api.schemas.homework import HomeworkAnswerIn, HomeworkAnswerOut, StudentHomeworkQuestionOut
 from src.api.schemas.student_homework import (
     CurrentHomeworkResponse,
     HomeworkLearningContextOut,
@@ -47,6 +47,7 @@ logger = get_logger(__name__)
 
 ANSWER_XP = 10
 BOSS_ANSWER_XP = 2 * ANSWER_XP
+MIN_ANSWER_CHARS = 3  # shorter (or empty) answers earn no XP
 
 
 async def _progress_in(session: AsyncSession, homework_id: str, student_id) -> StudentHomeworkProgress:
@@ -222,8 +223,9 @@ async def get_my_homework_questions(
     homework_id: str,
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
-) -> ListEnvelope[HomeworkQuestionOut]:
-    """The offline-capable Q&A set - the client caches this on-device."""
+) -> ListEnvelope[StudentHomeworkQuestionOut]:
+    """The offline-capable Q&A set - the client caches this on-device. No
+    answers: the student writes their own."""
     await _progress_in(session, homework_id, user.id)
     result = await session.execute(
         select(HomeworkQuestion)
@@ -232,14 +234,13 @@ async def get_my_homework_questions(
         .order_by(HomeworkQuestion.order)
     )
     items = [
-        HomeworkQuestionOut(
+        StudentHomeworkQuestionOut(
             id=str(q.id),
             homework_id=homework_id,
             order=q.order,
             bloom_level=q.bloom_level,
             dataset_id=str(q.dataset_id),
             text=q.text,
-            answer=q.answer,
             is_boss=q.is_boss,
         )
         for q in result.scalars().all()
@@ -315,8 +316,9 @@ async def answer_question(
     session: AsyncSession = Depends(get_db_session),
 ) -> HomeworkAnswerOut:
     """Saves the student's answer and self-rating for one question. XP
-    (double for the boss question) is awarded only the first time - a repeat
-    just updates the saved answer and returns xpAwarded 0."""
+    (double for the boss question) is awarded only the first time, and only
+    if they actually wrote an answer - a repeat just updates the saved answer
+    and returns xpAwarded 0 (so a blank first submit can't earn XP later)."""
     progress = await _progress_in(session, homework_id, user.id)
     question = (await session.execute(
         select(HomeworkQuestion).options(undefer(HomeworkQuestion.is_boss))
@@ -325,7 +327,9 @@ async def answer_question(
     if question is None:
         raise NotFoundError("This question isn't part of this Homework.")
 
-    xp = BOSS_ANSWER_XP if question.is_boss else ANSWER_XP
+    # XP only for a real written attempt, whichever rating
+    attempted = len((body.answer_text or "").strip()) >= MIN_ANSWER_CHARS
+    xp = (BOSS_ANSWER_XP if question.is_boss else ANSWER_XP) if attempted else 0
     # ON CONFLICT: two racing submits can't both count as the first
     created = (await session.execute(
         insert(HomeworkAnswer)
@@ -335,13 +339,20 @@ async def answer_question(
         .returning(HomeworkAnswer.id)
     )).scalar_one_or_none()
     if created is None:
-        xp = 0
-        existing = (await session.execute(select(HomeworkAnswer).where(
-            HomeworkAnswer.homework_question_id == question.id, HomeworkAnswer.student_id == user.id))).scalar_one()
-        existing.self_rating = body.self_rating
+        # a repeat: XP once if this is the first real written answer (a blank first tap earned 0);
+        # the guarded UPDATE keeps two racing repeats from both earning it
+        values = {"self_rating": body.self_rating}
         if body.answer_text is not None:
-            existing.answer_text = body.answer_text
-    else:
+            values["answer_text"] = body.answer_text
+        mine = (HomeworkAnswer.homework_question_id == question.id, HomeworkAnswer.student_id == user.id)
+        earned = (await session.execute(
+            update(HomeworkAnswer).where(*mine, HomeworkAnswer.xp_awarded == 0)
+            .values(**values, xp_awarded=xp).returning(HomeworkAnswer.id)
+        )).scalar_one_or_none() if xp else None
+        if earned is None:
+            xp = 0
+            await session.execute(update(HomeworkAnswer).where(*mine).values(**values))
+    if xp:
         await apply_xp(session, user.id, xp)
     if progress.status == StudentHomeworkStatus.ASSIGNED:
         progress.status = StudentHomeworkStatus.IN_PROGRESS

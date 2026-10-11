@@ -43,15 +43,20 @@ class AssignHomeworkIn(CamelModel):
     completion_window_hours: int
 
 
-class HomeworkQuestionOut(CamelModel):
+class StudentHomeworkQuestionOut(CamelModel):
+    """Student-facing: never carries the answer (students write their own)."""
     id: str
     homework_id: str
     order: int
     bloom_level: BloomLevel
     dataset_id: str
     text: str
-    answer: str
     is_boss: bool = False  # auto homework's double-XP question
+
+
+class HomeworkQuestionOut(StudentHomeworkQuestionOut):
+    """Teacher-facing: includes the model answer."""
+    answer: str
 
 
 class HomeworkAnswerIn(CamelModel):

@@ -422,7 +422,7 @@ async def test_step5_teacher_results_then_homework_generate_review_assign(db_ses
     cur3 = (await student_homework.get_current_homework(user=s3, session=db)).homework
     assert cur3 and cur3.homework_id == hw.id and cur3.total_questions == 3
     got = (await student_homework.get_my_homework_questions(hw.id, user=s3, session=db)).items
-    assert [q.answer for q in got][0] == "Edited"
+    assert len(got) == 3 and not hasattr(got[0], "answer")  # students never get answers
     with pytest.raises(NotFoundError):
         await student_homework.get_my_homework(hw.id, user=s1, session=db)
     await student_homework.confirm_completion(hw.id, background_tasks=BackgroundTasks(), user=s3, session=db)

@@ -310,13 +310,13 @@ async def test_answer_is_saved_and_awards_xp_once_double_for_the_boss(schema):
     assert first.model_dump(by_alias=True) == {"saved": True, "xpAwarded": 10}
     again = await answer(plain, selfRating="confused")  # camelCase accepted too; no text keeps the old one
     assert again.xp_awarded == 0
-    assert (await answer(boss, self_rating="got_it")).xp_awarded == 20
+    assert (await answer(boss, answer_text="V = IR", self_rating="got_it")).xp_awarded == 20
     assert await _xp(db, student.id) == 30
 
     rows = (await db.execute(select(HomeworkAnswer).where(HomeworkAnswer.student_id == student.id)
                              .order_by(HomeworkAnswer.xp_awarded))).scalars().all()
     assert [(r.homework_question_id, r.answer_text, r.self_rating, r.xp_awarded) for r in rows] == [
-        (plain.id, "R adds up", "confused", 10), (boss.id, None, "got_it", 20)]
+        (plain.id, "R adds up", "confused", 10), (boss.id, "V = IR", "got_it", 20)]
     progress = (await db.execute(select(StudentHomeworkProgress).where(
         StudentHomeworkProgress.homework_id == hw.id))).scalar_one()
     assert progress.status == StudentHomeworkStatus.IN_PROGRESS and not progress.qa_completed
@@ -325,6 +325,27 @@ async def test_answer_is_saved_and_awards_xp_once_double_for_the_boss(schema):
     await student_homework.confirm_completion(str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db)
     await db.refresh(progress)
     assert progress.status == StudentHomeworkStatus.COMPLETED
+
+
+async def test_blank_answer_earns_no_xp_until_a_real_answer_then_only_once(schema):
+    db = schema
+    s = await _seed(db)
+    hw, plain, boss = await _homework_with_questions(db, s)
+    student = s["student"]
+
+    async def answer(question, **body):
+        return await student_homework.answer_question(str(hw.id), question.id, HomeworkAnswerIn(**body),
+                                                      user=student, session=db)
+
+    assert (await answer(plain, self_rating="confused")).xp_awarded == 0
+    assert (await answer(boss, answer_text="  ok ", self_rating="got_it")).xp_awarded == 0  # < 3 chars trimmed
+    assert await _xp(db, student.id) == 0
+    # writing a real answer after a blank tap earns the XP once
+    assert (await answer(plain, answer_text="R adds up", self_rating="got_it")).xp_awarded == 10
+    assert (await answer(boss, answer_text="Series resistors add", self_rating="confused")).xp_awarded == 20
+    # ...and never again
+    assert (await answer(plain, answer_text="R1 + R2", self_rating="got_it")).xp_awarded == 0
+    assert await _xp(db, student.id) == 30
 
 
 async def test_answer_rejects_another_homeworks_question_and_unassigned_students(schema):
@@ -354,6 +375,7 @@ async def test_questions_endpoint_flags_the_boss(schema):
     hw, _, _ = await _homework_with_questions(db, s)
     items = (await student_homework.get_my_homework_questions(str(hw.id), user=s["student"], session=db)).items
     assert [q.model_dump(by_alias=True)["isBoss"] for q in items] == [False, True]
+    assert not any("answer" in q.model_dump(by_alias=True) for q in items)  # students never get answers
 
 
 async def test_teacher_questions_list_flags_the_boss(schema):
@@ -365,3 +387,4 @@ async def test_teacher_questions_list_flags_the_boss(schema):
     items = (await teacher_homework.list_homework_questions(str(hw.id), user=s["teacher"], _feature=s["teacher"],
                                                              session=db)).items
     assert [q.model_dump(by_alias=True)["isBoss"] for q in items] == [False, True]
+    assert [q.answer for q in items] == ["a1", "a2"]  # teachers still see answers
