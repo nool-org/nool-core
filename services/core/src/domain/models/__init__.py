@@ -42,6 +42,13 @@ from .practice_bank import PracticeBankEntry
 from .reporting import ReportConfiguration, ReportShare
 from .leaderboard import StudentPoints
 from .mcq_test import McqQuestionAnswer, McqTest, McqTestQuestion
+from .practice import (
+    ClassTopicProgress,
+    DailyPracticeItem,
+    DailyPracticeSession,
+    PracticeQuestion,
+    StudentTopicMastery,
+)
 from .question_paper import (
     PaperDifficultyLevel,
     QuestionPaper,
@@ -121,6 +128,11 @@ __all__ = [
     "ReportShare",
     "StudentPoints",
     "McqQuestionAnswer",
+    "ClassTopicProgress",
+    "DailyPracticeItem",
+    "DailyPracticeSession",
+    "PracticeQuestion",
+    "StudentTopicMastery",
     "McqTest",
     "McqTestQuestion",
     "PaperDifficultyLevel",
