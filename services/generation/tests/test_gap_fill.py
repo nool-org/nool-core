@@ -15,7 +15,8 @@ REQUEST = GapFillRequest(
 
 def question(i, text="q"):
     return Question(slot_index=i, question_type="numerical", text=f"{text}{i}", options=[], answer="a",
-                    solution="s", grounded_in="11.6.1 Resistors in Series")
+                    solution="s", explanation="", hint="",
+                    grounded_in="11.6.1 Resistors in Series")
 
 
 class FakeLLM:
@@ -117,7 +118,7 @@ async def test_a_failing_verifier_keeps_what_was_already_accepted_and_the_retry_
 @pytest.mark.asyncio
 async def test_a_malformed_mcq_is_rejected_without_asking_the_verifier():
     bad = Question(slot_index=0, question_type="mcq", text="Which?", options=["a", "b", " "], answer="a",
-                   solution="s", grounded_in="x")
+                   solution="s", explanation="e", hint="h", grounded_in="x")
     llm = FakeLLM([_Drafts(questions=[bad]), _Drafts(questions=[question(1)]), _Drafts(questions=[question(0)])],
                   [_Verdicts(verdicts=ok(1)), _Verdicts(verdicts=ok(0))])
     result = await fill_gaps(llm, REQUEST, generation_model="gen", verify_model="ver")
@@ -132,7 +133,7 @@ async def test_an_mcq_slot_gets_its_concept_and_misconceptions_and_rejects_a_non
         slots=[{"bloom_level": "UNDERSTAND", "difficulty": "MEDIUM", "question_type": "mcq", "concept": "current",
                 "misconceptions": ["current is used up in a bulb"]}])
     mcq = Question(slot_index=0, question_type="mcq", text="Which is true?", options=["a", "b", "c", "d"], answer="a",
-                   solution="s", grounded_in="x")
+                   solution="s", explanation="e", hint="h", grounded_in="x")
     llm = FakeLLM([_Drafts(questions=[question(0)]), _Drafts(questions=[mcq])], [_Verdicts(verdicts=ok(0))])
     result = await fill_gaps(llm, request, generation_model="gen", verify_model="ver")
     assert [q.question_type for q in result.questions] == ["mcq"]
@@ -165,3 +166,22 @@ async def test_spoken_style_asks_for_one_short_question():
     systems.clear()
     await fill_gaps(llm, REQUEST, generation_model="gen", verify_model="ver")
     assert not any("ASKED ALOUD" in s for _, s in systems)  # homework (written) is unchanged
+
+
+@pytest.mark.asyncio
+async def test_an_mcq_hint_that_gives_the_answer_away_is_rejected_in_code():
+    request = GapFillRequest(subject="Science", grade=10, chapter="Electricity", sections=REQUEST.sections,
+                             slots=[{"bloom_level": "ANALYZE", "difficulty": "HARD", "question_type": "mcq"}])
+
+    def mcq(hint, explanation="Series resistances add up."):
+        return Question(slot_index=0, question_type="mcq", text="Total resistance?", options=["6 ohm", "2 ohm", "8 ohm", "3 ohm"],
+                        answer="6 ohm", solution="s", explanation=explanation, hint=hint, grounded_in="x")
+    llm = FakeLLM([_Drafts(questions=[mcq("It is 6 Ohm, add them.")]), _Drafts(questions=[mcq("What happens to R in series?")])],
+                  [_Verdicts(verdicts=ok(0))])
+    result = await fill_gaps(llm, request, generation_model="gen", verify_model="ver")
+    [q] = result.questions
+    assert q.hint == "What happens to R in series?" and q.explanation == "Series resistances add up."
+    assert "never contains the right option" in llm.calls[1][2]
+    llm = FakeLLM([_Drafts(questions=[mcq("Think series.", explanation=" ")])] * 2, [])
+    result = await fill_gaps(llm, request, generation_model="gen", verify_model="ver")
+    assert result.unfilled_slot_indexes == [0] and "one-line explanation" in llm.calls[1][2]

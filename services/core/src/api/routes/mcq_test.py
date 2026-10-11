@@ -9,12 +9,21 @@ from shared.errors import ConflictError, NotFoundError
 from src.api.deps import get_db_session, require_role
 from src.api.routes.gamification import apply_xp
 from src.api.schemas.mcq_test import (
+    LifelineIn,
+    LifelineOut,
+    McqAnsweredOut,
+    McqAnswerIn,
+    McqAnswerOut,
     McqAttemptIn,
     McqAttemptOut,
     McqQuestionOut,
+    McqRetryIn,
+    McqRetryOut,
     McqTestItemOut,
     McqTestListOut,
     McqTestOut,
+    SpeedModeIn,
+    SpeedModeOut,
     TestGrowthOut,
 )
 from src.domain.models import Chapter, McqTest, McqTestQuestion, Role, Topic, User, VoiceTest
@@ -85,12 +94,59 @@ async def get_my_mcq_test(
         raise ConflictError("This MCQ test is not unlocked yet.")
     questions = await mcq_test.ensure_questions(session, mcq, user)
     await session.commit()
+    answers = await mcq_test.answers_of(session, mcq)
     return McqTestOut(
         id=str(mcq.id), test_id=str(mcq.voice_test_id), title=await _title(session, mcq.voice_test_id),
-        # never the answer: correct_index stays server-side
+        # never the answer of an unanswered question: correct_index stays server-side
         questions=[McqQuestionOut(id=str(q.id), text=q.text, options=q.options, bloom_level=q.bloom_level.value,
-                                  concept=q.concept) for q in questions],
+                                  concept=q.concept, is_boss=q.is_boss, gap_concept=q.gap_concept)
+                   for q in questions],
+        speed_mode=mcq.speed_mode,
+        lifelines_left=[k for k in mcq_test.LIFELINES if k not in (mcq.lifelines_used or [])],
+        answered=[McqAnsweredOut(question_id=str(q.id), option_index=answers[q.id].option_index,
+                                 correct=answers[q.id].correct, correct_index=q.correct_index,
+                                 explanation=mcq_test.explanation_of(q.options, q.correct_index, q.explanation))
+                  for q in questions if q.id in answers],
     )
+
+
+@router.post("/me/mcq-tests/{mcq_test_id}/speed-mode")
+async def set_my_mcq_speed_mode(
+    mcq_test_id: str,
+    body: SpeedModeIn,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> SpeedModeOut:
+    mcq = await _own(session, mcq_test_id, user)
+    await mcq_test.set_speed_mode(session, mcq, body.on)
+    await session.commit()
+    return SpeedModeOut(speed_mode=mcq.speed_mode)
+
+
+@router.post("/me/mcq-tests/{mcq_test_id}/answers")
+async def answer_my_mcq_question(
+    mcq_test_id: str,
+    body: McqAnswerIn,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> McqAnswerOut:
+    mcq = await _own(session, mcq_test_id, user)
+    result = await mcq_test.record_answer(session, mcq, body.question_id, body.option_index, body.elapsed_ms)
+    await session.commit()
+    return McqAnswerOut.model_validate(result)
+
+
+@router.post("/me/mcq-tests/{mcq_test_id}/lifelines")
+async def use_my_mcq_lifeline(
+    mcq_test_id: str,
+    body: LifelineIn,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> LifelineOut:
+    mcq = await _own(session, mcq_test_id, user)
+    result = await mcq_test.use_lifeline(session, mcq, body.kind, body.question_id)
+    await session.commit()
+    return LifelineOut.model_validate(result)
 
 
 @router.post("/me/mcq-tests/{mcq_test_id}/attempt")
@@ -101,12 +157,26 @@ async def submit_my_mcq_attempt(
     session: AsyncSession = Depends(get_db_session),
 ) -> McqAttemptOut:
     mcq = await _own(session, mcq_test_id, user)
-    result, correct = await mcq_test.submit_attempt(
-        session, mcq, {a.question_id: a.option_index for a in body.answers})
-    xp = correct * mcq_test.XP_PER_CORRECT
-    await apply_xp(session, user.id, xp)
+    result = await mcq_test.submit_attempt(session, mcq, {a.question_id: a.option_index for a in body.answers})
+    rank = await mcq_test.award_points(session, user.id, result["xp_awarded"])
+    await apply_xp(session, user.id, result["xp_awarded"])
     await session.commit()
-    return McqAttemptOut.model_validate({**result, "xp_awarded": xp})
+    return McqAttemptOut.model_validate({**result, "rank": rank})
+
+
+@router.post("/me/mcq-tests/{mcq_test_id}/retry")
+async def retry_my_mcq_misses(
+    mcq_test_id: str,
+    body: McqRetryIn,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> McqRetryOut:
+    mcq = await _own(session, mcq_test_id, user)
+    result = await mcq_test.submit_retry(session, mcq, {a.question_id: a.option_index for a in body.answers})
+    await mcq_test.award_points(session, user.id, result["xp_awarded"])
+    await apply_xp(session, user.id, result["xp_awarded"])
+    await session.commit()
+    return McqRetryOut.model_validate(result)
 
 
 @router.get("/tests/{test_id}/growth")

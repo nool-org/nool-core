@@ -25,6 +25,16 @@ class McqQuestionOut(CamelModel):
     options: list[str]
     bloom_level: str
     concept: str
+    is_boss: bool = False
+    gap_concept: str | None = None
+
+
+class McqAnsweredOut(CamelModel):
+    question_id: str
+    option_index: int
+    correct: bool
+    correct_index: int
+    explanation: str
 
 
 class McqTestOut(CamelModel):
@@ -32,6 +42,42 @@ class McqTestOut(CamelModel):
     test_id: str
     title: str
     questions: list[McqQuestionOut]
+    speed_mode: bool = False
+    lifelines_left: list[str] = []
+    # already-answered questions (first answers), so the app can resume
+    answered: list[McqAnsweredOut] = []
+
+
+class SpeedModeIn(CamelModel):
+    on: bool
+
+
+class SpeedModeOut(CamelModel):
+    speed_mode: bool
+
+
+class McqAnswerIn(CamelModel):
+    question_id: str
+    option_index: int = Field(ge=0, le=3)
+    elapsed_ms: int | None = Field(default=None, ge=0)
+
+
+class McqAnswerOut(CamelModel):
+    correct: bool
+    correct_index: int
+    explanation: str
+    combo: int  # consecutive correct answers in question order, ending at this one
+    xp_so_far: int
+
+
+class LifelineIn(CamelModel):
+    kind: Literal["fifty_fifty", "ask_milo"]
+    question_id: str
+
+
+class LifelineOut(CamelModel):
+    hide_option_indexes: list[int] | None = None  # fifty_fifty
+    hint: str | None = None  # ask_milo
 
 
 class McqAnswer(CamelModel):
@@ -40,7 +86,28 @@ class McqAnswer(CamelModel):
 
 
 class McqAttemptIn(CamelModel):
-    answers: list[McqAnswer]
+    # optional: answers recorded per question while playing count first; legacy clients send them all here
+    answers: list[McqAnswer] = []
+
+
+class XpBreakdownOut(CamelModel):
+    correct: int
+    combo_bonus: int
+    boss_bonus: int
+    speed_bonus: int
+    lifeline_cost: int
+    total: int
+
+
+class GapsFixedOut(CamelModel):
+    fixed: int
+    total: int
+    concepts: list[str]
+
+
+class RankChangeOut(CamelModel):
+    before: int
+    after: int
 
 
 class GrowthOut(CamelModel):
@@ -60,6 +127,25 @@ class McqAttemptOut(CamelModel):
     mastery_before: int | None = None
     mastery_after: int | None = None
     xp_awarded: int = 0
+    xp_breakdown: XpBreakdownOut | None = None
+    best_combo: int = 0
+    gaps_fixed: GapsFixedOut | None = None
+    # "you beat X% of your class" - null under 3 classmates' completed checks
+    class_percentile: int | None = None
+    rank: RankChangeOut | None = None  # class leaderboard rank before/after this attempt's XP
+    missed_question_ids: list[str] = []
+
+
+class McqRetryIn(CamelModel):
+    answers: list[McqAnswer]
+
+
+class McqRetryOut(CamelModel):
+    correct: int
+    total: int
+    score_percent: int
+    xp_awarded: int
+    correct_answers: list[McqAnswer]
 
 
 class StudentGrowthOut(CamelModel):

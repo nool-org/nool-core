@@ -20,6 +20,7 @@ access rules and what the student has already seen).
 import asyncio
 import json
 import logging
+import re
 from typing import Literal
 
 from llama_index.core.workflow import Context, Event, StartEvent, StopEvent, Workflow, step
@@ -80,6 +81,9 @@ class Question(BaseModel):
     options: list[str] = Field(description="exactly 4 options for mcq, otherwise empty")
     answer: str = Field(description="the model answer a student is marked against")
     solution: str = Field(description="worked solution / explanation")
+    # mcq only (core's MCQ check game), empty otherwise
+    explanation: str = Field(description="mcq: one short line on why the right option is right; else empty")
+    hint: str = Field(description="mcq: a one-line nudge toward the idea, never naming or giving the answer; else empty")
     grounded_in: str = Field(description="title of the section the question is based on")
 
 
@@ -115,6 +119,8 @@ no facts, formulas or data that aren't in them or standard for this class.
 - Give a model answer a teacher can mark against, and a short worked solution.
 - A slot with question_type "mcq" must be an mcq on its `concept` with exactly 4 options; build the wrong
   options from its `misconceptions` (each a plausible belief a student really holds), never silly ones.
+  Give it an `explanation` (one short line: why the right option is right) and a `hint` (one line nudging
+  toward the idea - it never names, quotes or gives away the right option).
 - If a slot has `feedback`, your previous question for it was rejected for that reason - fix it."""
 
 VERIFY_SYSTEM = """You are a strict CBSE Class {grade} {subject} teacher checking generated homework questions.
@@ -122,10 +128,16 @@ For each question, ok=true only if ALL hold:
 1. The answer is correct and complete (re-derive any numericals yourself).
 2. It is answerable from the given textbook sections at Class {grade} level.
 3. It fits its requested Bloom level and difficulty reasonably.
-4. It is self-contained (no unseen figure/diagram/table) and unambiguous; an mcq has exactly one correct option.
+4. It is self-contained (no unseen figure/diagram/table) and unambiguous; an mcq has exactly one correct option,
+   a correct one-line explanation, and a hint that never gives the right option away.
 5. It is not a copy or near-copy of an example, an `avoid` item, or another question in this batch
    (when two in the batch overlap, reject the later slot).
 If not ok, say precisely what is wrong in `problem`."""
+
+
+def reveals(hint: str, answer: str) -> bool:
+    """The hint contains the right option's text (as whole words)."""
+    return re.search(rf"(?<!\w){re.escape(answer.strip())}(?!\w)", hint, re.IGNORECASE) is not None
 
 
 def _malformed(q: Question, slot: Slot) -> str | None:
@@ -139,6 +151,10 @@ def _malformed(q: Question, slot: Slot) -> str | None:
             return "an mcq needs exactly 4 distinct, non-empty options"
         if q.answer.strip() not in options:
             return "the mcq answer must be one of its options, word for word"
+        if slot.question_type == "mcq" and not q.explanation.strip():
+            return "an mcq needs a one-line explanation of why the answer is right"
+        if slot.question_type == "mcq" and (not q.hint.strip() or reveals(q.hint, q.answer)):
+            return "an mcq needs a hint that never contains the right option"
     elif q.options:
         return "only an mcq has options"
     return None

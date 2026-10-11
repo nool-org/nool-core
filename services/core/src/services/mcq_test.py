@@ -11,8 +11,15 @@ you lag" to "did it improve".
   the generation service first (distractors from the voice test's
   misconceptions); slots it can't fill take a bank MCQ of the chapter on the
   same level and concept, then any unused bank MCQ of the chapter.
-- Attempt (submit_attempt): marked here, one attempt only; growth math in
-  services/growth.py.
+  The last question is the boss (Analyze or harder, bonus XP); each carries
+  a one-line explanation and an "Ask Milo" hint that never gives the answer.
+- Play (record_answer, use_lifeline, set_speed_mode): the FIRST answer to
+  each question is kept and marked at once (McqQuestionAnswer); lifelines
+  50:50 and Ask Milo once each per test.
+- Attempt (submit_attempt): scored from those first answers, one attempt
+  only; growth math in services/growth.py. XP (xp_breakdown) adds combo,
+  boss and speed bonuses, but score, mastery and growth stay correctness
+  only. One retry of the misses afterwards for half XP (submit_retry).
 """
 
 import logging
@@ -26,7 +33,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ConflictError
+from shared.errors import ConflictError, NotFoundError
 from src.domain.models import (
     AiAssessorSession,
     AiAssessorSessionRecord,
@@ -35,12 +42,15 @@ from src.domain.models import (
     DatasetQuestion,
     DatasetType,
     Homework,
+    McqQuestionAnswer,
     McqTest,
     McqTestQuestion,
     QuestionType,
     SchoolClass,
     StudentHomeworkProgress,
     StudentHomeworkStatus,
+    StudentPoints,
+    StudentProfile,
     StudentTestResult,
     StudentTestResultBloomScore,
     Subject,
@@ -63,6 +73,13 @@ UNLOCK_AFTER = timedelta(hours=48)
 STRONG_PERCENT = 75
 MAX_STRONG_CHECKS = 2
 XP_PER_CORRECT = 10
+BOSS_BONUS = 10
+COMBO_FROM, COMBO_BONUS = 3, 5  # +5 for the 3rd consecutive correct answer and each one after
+SPEED_LIMIT_MS, SPEED_BONUS = 15_000, 3
+LIFELINE_COST = 5
+RETRY_XP_PER_CORRECT = 5
+LIFELINES = ("fifty_fifty", "ask_milo")
+CLASS_PERCENTILE_MIN = 3  # classmates' completed checks needed for "you beat X%"
 _BLOOM_ORDER = list(BloomLevel)
 
 
@@ -190,6 +207,8 @@ def plan_slots(levels: list[BloomLevel], concepts: dict[str, int]) -> list[tuple
     weak = [c for c in ranked if concepts[c] < STRONG_PERCENT] or ranked
     strong = [c for c in reversed(ranked) if c not in weak][:MAX_STRONG_CHECKS]
     check_slots = {MCQ_QUESTION_COUNT - 1 - 2 * i: c for i, c in enumerate(strong)}
+    # the last slot is the boss: Analyze at least
+    slot_levels[-1] = max(slot_levels[-1], BloomLevel.ANALYZE, key=_BLOOM_ORDER.index)
     return [(level, check_slots.get(i) or weak[i % len(weak)]) for i, level in enumerate(slot_levels)]
 
 
@@ -214,6 +233,20 @@ class _Draft:
     options: list[str]
     correct_index: int
     source_question_id: uuid.UUID | None = None
+    explanation: str = ""
+    hint: str = ""
+
+
+def explanation_of(options: list[str], index: int, explanation: str | None = None) -> str:
+    return (explanation or "").strip() or f"The answer is {options[index]}."
+
+
+def hint_of(concept: str, answer: str, hint: str | None = None) -> str:
+    """The "Ask Milo" nudge - falls back when it's empty or names the answer."""
+    hint = (hint or "").strip()
+    if not hint or re.search(rf"(?<!\w){re.escape(answer.strip())}(?!\w)", hint, re.IGNORECASE):
+        return f"Think about {concept}."
+    return hint
 
 
 def _has_concept(q: DatasetQuestion, concept: str) -> bool:
@@ -250,7 +283,8 @@ async def _generate(session, *, test, slots, open_slots, scores: VoiceScores, dr
         "grade": school_class.grade if school_class else 10,
         "chapter": chapter_name,
         "sections": sections,
-        "slots": [{"bloom_level": slots[i][0].value, "difficulty": "MEDIUM", "question_type": "mcq",
+        "slots": [{"bloom_level": slots[i][0].value, "difficulty": "HARD" if i == len(slots) - 1 else "MEDIUM",
+                   "question_type": "mcq",
                    "concept": slots[i][1],
                    "misconceptions": list(dict.fromkeys(scores.misconceptions.get(slots[i][1]) or all_misconceptions))[:6]}
                   for i in open_slots],
@@ -270,7 +304,8 @@ async def _generate(session, *, test, slots, open_slots, scores: VoiceScores, dr
         options = [str(o).strip() for o in g["options"]]
         answer = options[index]
         random.Random(f"{seed}:{slot}").shuffle(options)  # models tend to put the answer first
-        drafts[slot] = _Draft(slots[slot][0], slots[slot][1], g["text"], options, options.index(answer))
+        drafts[slot] = _Draft(slots[slot][0], slots[slot][1], g["text"], options, options.index(answer),
+                              explanation=g.get("explanation") or "", hint=g.get("hint") or "")
 
 
 async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -> list[McqTestQuestion]:
@@ -286,8 +321,8 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     bank = await _bank(session, student, test)
     used: set[str] = set()
 
-    def take(pred) -> DatasetQuestion | None:
-        for q in bank:
+    def take(pred, pool=bank) -> DatasetQuestion | None:
+        for q in pool:
             if question_uid(q) not in used and pred(q):
                 used.add(question_uid(q))
                 return q
@@ -314,17 +349,25 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
             if q is not None:
                 drafts[i] = from_bank(q, concept)
     counts["bank"] = len(drafts) - counts["generated"]
-    for i, (level, concept) in enumerate(slots):
+    boss = len(slots) - 1
+    hardest_first = sorted(bank, key=lambda q: _BLOOM_ORDER.index(q.bloom_level), reverse=True)
+    for i in sorted(range(len(slots)), key=lambda i: i != boss):  # the boss picks first
+        level, concept = slots[i]
         if i not in drafts:
-            q = take(lambda q: q.bloom_level == level) or take(lambda q: True)
+            q = take(lambda q: q.bloom_level == level) or take(lambda q: True, hardest_first if i == boss else bank)
             if q is not None:
                 drafts[i] = from_bank(q, concept)
     counts["relaxed_bank"] = len(drafts) - counts["bank"] - counts["generated"]
     logger.info("mcq_questions_built", extra={"mcq_test_id": str(mcq.id), **counts})
 
+    # bank questions carry no explanation/hint: deterministic ones (no batch endpoint for them)
     rows = [McqTestQuestion(mcq_test_id=mcq.id, order=order, bloom_level=d.bloom_level, concept=d.concept,
                             text=strip_inline_options(d.text), options=d.options, correct_index=d.correct_index,
-                            source_question_id=d.source_question_id)
+                            source_question_id=d.source_question_id,
+                            explanation=explanation_of(d.options, d.correct_index, d.explanation),
+                            hint=hint_of(d.concept, d.options[d.correct_index], d.hint),
+                            is_boss=order == len(drafts),
+                            gap_concept=d.concept if scores.concepts.get(d.concept, 100) < STRONG_PERCENT else None)
             for order, d in enumerate((drafts[i] for i in sorted(drafts)), start=1)]
     session.add_all(rows)
     await session.flush()
@@ -352,11 +395,144 @@ async def questions_of(session: AsyncSession, mcq_test_id: uuid.UUID) -> list[Mc
                                        .order_by(McqTestQuestion.order))).scalars().all())
 
 
+# -------------------------------------------------------------------- play
+def _playable(mcq: McqTest) -> None:
+    if status(mcq) == "locked":
+        raise ConflictError("This MCQ test is not unlocked yet.")
+    if status(mcq) == "completed":
+        raise ConflictError("This MCQ test has already been attempted.")
+
+
+async def answers_of(session: AsyncSession, mcq: McqTest) -> dict[uuid.UUID, McqQuestionAnswer]:
+    """The student's first answers, by question id."""
+    rows = (await session.execute(
+        select(McqQuestionAnswer).join(McqTestQuestion, McqTestQuestion.id == McqQuestionAnswer.mcq_test_question_id)
+        .where(McqTestQuestion.mcq_test_id == mcq.id, McqQuestionAnswer.student_id == mcq.student_id))).scalars().all()
+    return {a.mcq_test_question_id: a for a in rows}
+
+
+async def _record(session: AsyncSession, mcq: McqTest, q: McqTestQuestion, option_index: int,
+                  elapsed_ms: int | None = None) -> None:
+    """Keeps the first answer only (unique per question and student)."""
+    await session.execute(pg_insert(McqQuestionAnswer).values(
+        id=uuid.uuid4(), mcq_test_question_id=q.id, student_id=mcq.student_id, option_index=option_index,
+        correct=option_index == q.correct_index, elapsed_ms=elapsed_ms,
+    ).on_conflict_do_nothing(index_elements=["mcq_test_question_id", "student_id"]))
+
+
+async def _question(session: AsyncSession, mcq: McqTest,
+                    question_id: str) -> tuple[list[McqTestQuestion], McqTestQuestion]:
+    questions = await questions_of(session, mcq.id)
+    q = next((q for q in questions if str(q.id) == question_id), None)
+    if q is None:
+        raise NotFoundError("Question not found.")
+    return questions, q
+
+
+def xp_breakdown(questions: list[McqTestQuestion], answers: dict, *, speed_mode: bool,
+                 lifelines: list[str]) -> tuple[dict, list[int]]:
+    """XP from the first answers (objects with .correct and .elapsed_ms, by
+    question id), and the run of consecutive correct answers ending at each
+    question, in question order (an unanswered question breaks it)."""
+    streaks, run = [], 0
+    for q in questions:
+        a = answers.get(q.id)
+        run = run + 1 if a is not None and a.correct else 0
+        streaks.append(run)
+    right = [(q, answers[q.id]) for q in questions if q.id in answers and answers[q.id].correct]
+    xp = {
+        "correct": XP_PER_CORRECT * len(right),
+        "combo_bonus": COMBO_BONUS * sum(s >= COMBO_FROM for s in streaks),
+        "boss_bonus": BOSS_BONUS * sum(q.is_boss for q, _ in right),
+        "speed_bonus": SPEED_BONUS * sum(a.elapsed_ms is not None and a.elapsed_ms <= SPEED_LIMIT_MS
+                                         for _, a in right) if speed_mode else 0,
+        "lifeline_cost": LIFELINE_COST * len(lifelines),
+    }
+    xp["total"] = max(0, xp["correct"] + xp["combo_bonus"] + xp["boss_bonus"] + xp["speed_bonus"]
+                      - xp["lifeline_cost"])
+    return xp, streaks
+
+
+async def record_answer(session: AsyncSession, mcq: McqTest, question_id: str, option_index: int,
+                        elapsed_ms: int | None) -> dict:
+    """Marks one answer at once. Only the first answer counts: a repeat
+    returns the stored result. Caller commits."""
+    _playable(mcq)
+    questions, q = await _question(session, mcq, question_id)
+    await _record(session, mcq, q, option_index, elapsed_ms)
+    answers = await answers_of(session, mcq)
+    xp, streaks = xp_breakdown(questions, answers, speed_mode=mcq.speed_mode, lifelines=mcq.lifelines_used or [])
+    return {"correct": answers[q.id].correct, "correct_index": q.correct_index,
+            "explanation": explanation_of(q.options, q.correct_index, q.explanation),
+            "combo": streaks[questions.index(q)], "xp_so_far": xp["total"]}
+
+
+async def set_speed_mode(session: AsyncSession, mcq: McqTest, on: bool) -> None:
+    """Only before the first answer. Caller commits."""
+    _playable(mcq)
+    if await answers_of(session, mcq):
+        raise ConflictError("Speed mode can only be changed before the first answer.")
+    mcq.speed_mode = on
+
+
+async def use_lifeline(session: AsyncSession, mcq: McqTest, kind: str, question_id: str) -> dict:
+    """50:50 hides two wrong options; Ask Milo gives the hint. Each once per
+    test, on an unanswered question. Caller commits."""
+    _playable(mcq)
+    # lock the row so two taps can't both spend the same lifeline
+    await session.execute(select(McqTest).where(McqTest.id == mcq.id).with_for_update()
+                          .execution_options(populate_existing=True))
+    used = list(mcq.lifelines_used or [])
+    if kind in used:
+        raise ConflictError("This lifeline has already been used.")
+    _, q = await _question(session, mcq, question_id)
+    if q.id in await answers_of(session, mcq):
+        raise ConflictError("This question has already been answered.")
+    mcq.lifelines_used = [*used, kind]
+    if kind == "fifty_fifty":
+        wrong = [i for i in range(len(q.options)) if i != q.correct_index]
+        return {"hide_option_indexes": sorted(random.Random(f"{mcq.id}:{q.id}").sample(wrong, 2))}
+    return {"hint": hint_of(q.concept, q.options[q.correct_index], q.hint)}
+
+
 # ----------------------------------------------------------------- attempt
-async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str, int]) -> tuple[dict, int]:
-    """Marks the attempt and stores it with its growth. Returns (result,
-    number correct). 409 when locked, not opened yet, or already attempted.
-    Caller commits."""
+async def class_percentile(session: AsyncSession, mcq: McqTest, score: int) -> int | None:
+    """% of classmates' completed checks of the same voice test this score beats."""
+    others = (await session.execute(select(McqTest.score_percent).where(
+        McqTest.voice_test_id == mcq.voice_test_id, McqTest.student_id != mcq.student_id,
+        McqTest.completed_at.is_not(None), McqTest.score_percent.is_not(None)))).scalars().all()
+    if len(others) < CLASS_PERCENTILE_MIN:
+        return None
+    return round(100 * sum(s < score for s in others) / len(others))
+
+
+async def award_points(session: AsyncSession, student_id: uuid.UUID, xp: int) -> dict | None:
+    """Adds the XP to the student's leaderboard points too (the leaderboard
+    ranks by StudentPoints, not level XP) and returns their class rank before
+    and after: 1 + classmates with more points, like the leaderboard's
+    rank(). None when the student has no class."""
+    row = await session.get(StudentPoints, student_id)
+    if row is None:
+        row = StudentPoints(student_id=student_id, points=0)
+        session.add(row)
+    before = row.points or 0
+    row.points = before + xp
+    class_id = (await session.execute(
+        select(StudentProfile.class_id).where(StudentProfile.user_id == student_id))).scalar_one_or_none()
+    if class_id is None:
+        return None
+    others = (await session.execute(
+        select(func.coalesce(StudentPoints.points, 0)).select_from(StudentProfile)
+        .outerjoin(StudentPoints, StudentPoints.student_id == StudentProfile.user_id)
+        .where(StudentProfile.class_id == class_id, StudentProfile.user_id != student_id))).scalars().all()
+    return {"before": 1 + sum(p > before for p in others), "after": 1 + sum(p > row.points for p in others)}
+
+
+async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str, int]) -> dict:
+    """Marks the attempt from the first answers recorded while playing; an
+    answer in `answers` (legacy clients send them all here) is recorded
+    first for any question not answered yet. Stores it with its growth.
+    409 when locked, not opened yet, or already attempted. Caller commits."""
     if status(mcq) == "locked":
         raise ConflictError("This MCQ test is not unlocked yet.")
     questions = await questions_of(session, mcq.id)
@@ -367,11 +543,16 @@ async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str,
                                     .values(completed_at=now).returning(McqTest.id))
     if claimed.scalar_one_or_none() is None:
         raise ConflictError("This MCQ test has already been attempted.")
+    for q in questions:
+        if str(q.id) in answers:
+            await _record(session, mcq, q, answers[str(q.id)])
+    first = await answers_of(session, mcq)
+    missed = [q for q in questions if not (q.id in first and first[q.id].correct)]
 
     by_level: dict[str, list[bool]] = {}
     by_concept: dict[str, list[bool]] = {}
     for q in questions:
-        right = answers.get(str(q.id)) == q.correct_index
+        right = q not in missed
         by_level.setdefault(q.bloom_level.value, []).append(right)
         by_concept.setdefault(q.concept, []).append(right)
     correct = sum(sum(v) for v in by_level.values())
@@ -382,9 +563,12 @@ async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str,
     test = await session.get(VoiceTest, mcq.voice_test_id)
     before = await voice_scores(session, mcq.student_id, test)
     growth = growth_entries("bloom", per_bloom, before.bloom) + growth_entries("concept", per_concept, before.concepts)
+    xp, streaks = xp_breakdown(questions, first, speed_mode=mcq.speed_mode, lifelines=mcq.lifelines_used or [])
+    gaps = [q for q in questions if q.gap_concept]
     mcq.completed_at = now
     mcq.score_percent = score
-    mcq.answers = [{"questionId": k, "optionIndex": v} for k, v in answers.items()]
+    mcq.answers = [{"questionId": str(q.id), "optionIndex": first[q.id].option_index}
+                   for q in questions if q.id in first]
     mcq.result = {"before": before.mastery, "after": corrected(score), "perBloom": per_bloom, "growth": growth}
     return {
         "score_percent": score,
@@ -393,4 +577,35 @@ async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str,
         "mastery_before": before.mastery,
         "mastery_after": corrected(score),
         "correct_answers": [{"question_id": str(q.id), "option_index": q.correct_index} for q in questions],
-    }, correct
+        "xp_awarded": xp["total"],
+        "xp_breakdown": xp,
+        "best_combo": max(streaks, default=0),
+        "gaps_fixed": {"fixed": sum(q not in missed for q in gaps), "total": len(gaps),
+                       "concepts": list(dict.fromkeys(q.gap_concept for q in gaps if q not in missed))},
+        "class_percentile": await class_percentile(session, mcq, score),
+        "missed_question_ids": [str(q.id) for q in missed],
+    }
+
+
+async def submit_retry(session: AsyncSession, mcq: McqTest, answers: dict[str, int]) -> dict:
+    """One retry of the questions missed in the attempt, for half XP. Never
+    touches score_percent, mastery or growth. 409 before the attempt, with
+    nothing missed, or once already retried. Caller commits."""
+    if mcq.completed_at is None:
+        raise ConflictError("Finish the MCQ test before retrying it.")
+    first = {a["questionId"]: a["optionIndex"] for a in mcq.answers or []}
+    missed = [q for q in await questions_of(session, mcq.id) if first.get(str(q.id)) != q.correct_index]
+    if not missed:
+        raise ConflictError("Nothing to retry - every answer was right.")
+    now = datetime.now(timezone.utc)
+    claimed = await session.execute(update(McqTest).where(McqTest.id == mcq.id, McqTest.retry_completed_at.is_(None))
+                                    .values(retry_completed_at=now).returning(McqTest.id))
+    if claimed.scalar_one_or_none() is None:
+        raise ConflictError("This MCQ test has already been retried.")
+    correct = sum(answers.get(str(q.id)) == q.correct_index for q in missed)
+    mcq.retry_completed_at = now
+    mcq.retry_score_percent = percent(correct, len(missed))
+    return {"correct": correct, "total": len(missed), "score_percent": mcq.retry_score_percent,
+            "xp_awarded": RETRY_XP_PER_CORRECT * correct,
+            "correct_answers": [{"question_id": str(q.id), "option_index": q.correct_index} for q in missed]}
+

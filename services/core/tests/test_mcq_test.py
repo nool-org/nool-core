@@ -10,9 +10,11 @@ test's own transaction, without foreign keys (see test_voice_test_questions.py).
 
 import asyncio
 import importlib.util
+import itertools
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -22,7 +24,7 @@ from sqlalchemy.schema import CreateTable
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError
 from src.api.routes import mcq_test as routes
-from src.api.schemas.mcq_test import McqAttemptIn
+from src.api.schemas.mcq_test import LifelineIn, McqAnswerIn, McqAttemptIn, McqRetryIn, SpeedModeIn
 from src.domain.models import (
     AiAssessorSession,
     AiAssessorSessionRecord,
@@ -34,6 +36,7 @@ from src.domain.models import (
     Homework,
     HomeworkDifficulty,
     HomeworkStatus,
+    McqQuestionAnswer,
     McqTest,
     McqTestQuestion,
     QuestionType,
@@ -45,6 +48,7 @@ from src.domain.models import (
     StudentGamification,
     StudentHomeworkProgress,
     StudentHomeworkStatus,
+    StudentPoints,
     StudentProfile,
     StudentTestResult,
     StudentTestResultBloomScore,
@@ -237,8 +241,12 @@ async def test_questions_come_from_the_bank_and_never_reveal_answers(schema, mon
     assert sum(q.concept == "power" for q in out.questions) == 1
     assert all(q.concept in ("current", "resistance") for q in out.questions if q.concept != "power")
     assert all(q.text.split()[1] == q.concept for q in out.questions)  # bank question on the slot's concept
-    wire = out.model_dump_json(by_alias=True)
-    assert "right" in wire and "correct" not in wire.lower() and "answer" not in wire.lower()
+    wire = out.model_dump(by_alias=True)
+    assert wire["answered"] == [] and wire["speedMode"] is False and wire["lifelinesLeft"] == ["fifty_fifty", "ask_milo"]
+    assert all(set(q) == {"id", "text", "options", "bloomLevel", "concept", "isBoss", "gapConcept"}
+               for q in wire["questions"])
+    assert [q.is_boss for q in out.questions] == [False] * 9 + [True]
+    assert all(q.gap_concept == (q.concept if q.concept != "power" else None) for q in out.questions)
     again = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)  # built once
     assert [q.id for q in again.questions] == [q.id for q in out.questions]
 
@@ -322,13 +330,17 @@ async def test_attempt_marks_scores_growth_and_awards_xp_once(schema, monkeypatc
     assert concept["power"].after_corrected == 100 and concept["power"].delta == 10
     assert {(a.question_id, a.option_index) for a in out.correct_answers} == {(str(r.id), r.correct_index) for r in rows}
     wire = out.model_dump(by_alias=True)
-    assert set(wire) == {"scorePercent", "perBloom", "growth", "correctAnswers",
-                         "masteryBefore", "masteryAfter", "xpAwarded"}
-    assert out.xp_awarded == 9 * service.XP_PER_CORRECT and out.mastery_after is not None
+    assert set(wire) == {"scorePercent", "perBloom", "growth", "correctAnswers", "masteryBefore", "masteryAfter",
+                         "xpAwarded", "xpBreakdown", "bestCombo", "gapsFixed", "classPercentile", "rank",
+                         "missedQuestionIds"}
+    # the 3rd question is wrong: combo bonus on questions 6..10, the boss (last) right
+    assert wire["xpBreakdown"] == {"correct": 90, "comboBonus": 25, "bossBonus": 10, "speedBonus": 0,
+                                   "lifelineCost": 0, "total": 125}
+    assert out.xp_awarded == 125 and out.best_combo == 7 and out.mastery_after is not None
     assert set(wire["growth"][0]) == {"key", "kind", "before", "afterCorrected", "delta"}
 
     xp = (await db.execute(select(StudentGamification.xp).where(StudentGamification.student_id == s["student"].id))).scalar_one()
-    assert xp == 9 * service.XP_PER_CORRECT
+    assert xp == 125
     with pytest.raises(ConflictError):
         await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=[]), user=s["student"], session=db)
     assert (await _open(db, s)).status == "completed"
@@ -376,6 +388,224 @@ async def test_teacher_sees_class_growth_and_others_do_not(schema, monkeypatch):
         await routes.get_test_growth(str(s["test"].id), user=outsider, session=db)
 
 
+# ------------------------------------------------------------------ game
+def _ans(ok, ms=None):
+    return SimpleNamespace(correct=ok, elapsed_ms=ms)
+
+
+def test_xp_breakdown_combo_boss_speed_and_lifelines():
+    qs = [SimpleNamespace(id=i, is_boss=i == 5) for i in range(6)]
+    answers = {0: _ans(True, 1000), 1: _ans(True, 20_000), 2: _ans(True), 3: _ans(False, 1000), 4: _ans(True, 15_000),
+               5: _ans(True, 9000)}
+    xp, streaks = service.xp_breakdown(qs, answers, speed_mode=False, lifelines=[])
+    assert streaks == [1, 2, 3, 0, 1, 2]
+    assert xp == {"correct": 50, "combo_bonus": 5, "boss_bonus": 10, "speed_bonus": 0, "lifeline_cost": 0, "total": 65}
+    xp, _ = service.xp_breakdown(qs, answers, speed_mode=True, lifelines=["fifty_fifty", "ask_milo"])
+    assert xp["speed_bonus"] == 9 and xp["lifeline_cost"] == 10 and xp["total"] == 64  # 1000, 15000, 9000 ms
+    del answers[1]  # unanswered breaks the run
+    _, streaks = service.xp_breakdown(qs, answers, speed_mode=False, lifelines=[])
+    assert streaks == [1, 0, 1, 0, 1, 2]
+    xp, _ = service.xp_breakdown(qs, {3: _ans(False)}, speed_mode=False, lifelines=["ask_milo"])
+    assert xp["total"] == 0  # never below 0
+
+
+def test_hint_never_names_the_answer():
+    assert service.hint_of("current", "1 A", "It is 1 a, obviously") == "Think about current."
+    assert service.hint_of("current", "1 A", "") == "Think about current."
+    assert service.hint_of("current", "1 A", "What flows per second?") == "What flows per second?"
+    assert service.explanation_of(["x", "y"], 1) == "The answer is y."
+
+
+def test_the_boss_slot_is_analyze_at_least():
+    assert service.plan_slots([B.REMEMBER], {"current": 30})[-1] == (B.ANALYZE, "current")
+    assert service.plan_slots(LEVELS, {"current": 30})[-1][0] == B.EVALUATE
+
+
+async def _ready(db, monkeypatch):
+    s = await _seed(db, taken_hours_ago=49)
+    await _full_bank(db, s)
+    _no_generation(monkeypatch)
+    item = await _open(db, s)
+    await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    return s, item, await service.questions_of(db, uuid.UUID(item.id))
+
+
+def _answer(db, s, item, q, option, ms=None):
+    return routes.answer_my_mcq_question(item.id, McqAnswerIn(question_id=str(q.id), option_index=option, elapsed_ms=ms),
+                                         user=s["student"], session=db)
+
+
+async def test_answer_keeps_only_the_first_answer_and_returns_the_marking(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    q = rows[0]
+    out = await _answer(db, s, item, q, (q.correct_index + 1) % 4)
+    assert out.model_dump(by_alias=True) == {"correct": False, "correctIndex": q.correct_index,
+                                             "explanation": "The answer is right.", "combo": 0, "xpSoFar": 0}
+    again = await _answer(db, s, item, q, q.correct_index)  # a second answer changes nothing
+    assert again == out
+    out = await _answer(db, s, item, rows[1], rows[1].correct_index)
+    assert (out.correct, out.combo, out.xp_so_far) == (True, 1, 10)
+    got = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    assert [(a.question_id, a.correct) for a in got.answered] == [(str(rows[0].id), False), (str(rows[1].id), True)]
+    assert got.answered[0].option_index == (q.correct_index + 1) % 4 and got.answered[0].correct_index == q.correct_index
+    with pytest.raises(NotFoundError):
+        await routes.answer_my_mcq_question(item.id, McqAnswerIn(question_id=str(uuid.uuid4()), option_index=0),
+                                            user=s["student"], session=db)
+
+
+async def test_speed_mode_only_before_the_first_answer_and_its_bonus(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    assert (await routes.set_my_mcq_speed_mode(item.id, SpeedModeIn(on=True), user=s["student"], session=db)).speed_mode
+    for q in rows:
+        await _answer(db, s, item, q, q.correct_index, 1000)
+    with pytest.raises(ConflictError):
+        await routes.set_my_mcq_speed_mode(item.id, SpeedModeIn(on=False), user=s["student"], session=db)
+    out = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(), user=s["student"], session=db)
+    assert out.xp_breakdown.model_dump() == {"correct": 100, "combo_bonus": 40, "boss_bonus": 10, "speed_bonus": 30,
+                                             "lifeline_cost": 0, "total": 180}
+    assert out.xp_awarded == 180 and out.best_combo == 10 and out.score_percent == 100 and out.missed_question_ids == []
+    with pytest.raises(ConflictError):  # completed
+        await _answer(db, s, item, rows[0], 0)
+
+
+async def test_lifelines_once_each_never_reveal_and_cost_xp(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+
+    def use(kind, q):
+        return routes.use_my_mcq_lifeline(item.id, LifelineIn(kind=kind, question_id=str(q.id)), user=s["student"],
+                                          session=db)
+    await _answer(db, s, item, rows[0], rows[0].correct_index)
+    with pytest.raises(ConflictError):  # already answered
+        await use("ask_milo", rows[0])
+    half = await use("fifty_fifty", rows[1])
+    assert len(half.hide_option_indexes) == 2 and rows[1].correct_index not in half.hide_option_indexes
+    assert half.model_dump(by_alias=True, exclude_none=True) == {"hideOptionIndexes": half.hide_option_indexes}
+    with pytest.raises(ConflictError):
+        await use("fifty_fifty", rows[2])
+    milo = await use("ask_milo", rows[2])
+    assert milo.hint and "right" not in milo.hint.lower()
+    with pytest.raises(ConflictError):
+        await use("ask_milo", rows[3])
+    got = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    assert got.lifelines_left == []
+    out = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(), user=s["student"], session=db)
+    assert out.xp_breakdown.lifeline_cost == 10 and out.xp_breakdown.total == 0  # only q1 answered: 10 - 10
+    with pytest.raises(ConflictError):  # completed
+        await use("ask_milo", rows[4])
+
+
+async def test_finalise_from_recorded_answers_fills_the_rest_from_a_legacy_body(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    await _answer(db, s, item, rows[0], (rows[0].correct_index + 1) % 4)  # first answer: wrong
+    await _answer(db, s, item, rows[1], rows[1].correct_index)
+    body = [{"questionId": str(q.id), "optionIndex": q.correct_index} for q in rows]  # claims q1 right
+    out = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=body), user=s["student"], session=db)
+    assert out.score_percent == 90 and out.missed_question_ids == [str(rows[0].id)]
+    assert len(await service.answers_of(db, await db.get(McqTest, uuid.UUID(item.id)))) == 10
+    gaps = [q for q in rows if q.gap_concept]
+    assert out.gaps_fixed.total == len(gaps) == 9 and out.gaps_fixed.fixed == 8
+    assert set(out.gaps_fixed.concepts) == {"current", "resistance"}
+    assert out.class_percentile is None  # no classmates have done it
+
+
+_rolls = itertools.count(2)
+
+
+async def _classmate(db, s, *, score=None, points=None):
+    other = _user(Role.STUDENT, s["school"].id)
+    db.add(other)
+    await db.flush()
+    db.add(StudentProfile(user_id=other.id, class_id=s["class"].id, roll_number=next(_rolls)))
+    if score is not None:
+        now = datetime.now(timezone.utc)
+        db.add(McqTest(student_id=other.id, voice_test_id=s["test"].id, unlocks_at=now, unlocked_at=now,
+                       completed_at=now, score_percent=score))
+    if points is not None:
+        db.add(StudentPoints(student_id=other.id, points=points))
+    await db.flush()
+
+
+async def test_class_percentile_needs_three_classmates(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    for score in (50, 80, 100):
+        await _classmate(db, s, score=score)
+    body = [{"questionId": str(q.id), "optionIndex": q.correct_index if i else (q.correct_index + 1) % 4}
+            for i, q in enumerate(rows)]
+    out = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=body), user=s["student"], session=db)
+    assert out.score_percent == 90 and out.class_percentile == 67  # beat 2 of 3
+
+
+async def test_class_percentile_is_null_under_three_classmates(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    for score in (50, 80):
+        await _classmate(db, s, score=score)
+    out = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(), user=s["student"], session=db)
+    assert out.class_percentile is None
+
+
+async def test_rank_before_and_after_the_attempt_xp(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    await _classmate(db, s, points=100)
+    await _classmate(db, s, points=150)
+    body = [{"questionId": str(q.id), "optionIndex": q.correct_index} for q in rows]
+    out = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=body), user=s["student"], session=db)
+    assert out.xp_awarded == 150  # 100 + combo 40 + boss 10
+    assert out.rank.model_dump() == {"before": 3, "after": 1}  # 0 -> 150 points, a tie shares rank 1
+    points = (await db.execute(select(StudentPoints.points).where(StudentPoints.student_id == s["student"].id))).scalar_one()
+    assert points == 150
+
+
+async def test_retry_the_misses_once_for_half_xp_without_touching_mastery(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    with pytest.raises(ConflictError):  # not completed yet
+        await routes.retry_my_mcq_misses(item.id, McqRetryIn(answers=[]), user=s["student"], session=db)
+    body = [{"questionId": str(q.id), "optionIndex": q.correct_index if i > 1 else (q.correct_index + 1) % 4}
+            for i, q in enumerate(rows)]
+    first = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=body), user=s["student"], session=db)
+    mcq = await db.get(McqTest, uuid.UUID(item.id))
+    result_before = dict(mcq.result)
+    retry = [{"questionId": str(rows[0].id), "optionIndex": rows[0].correct_index},
+             {"questionId": str(rows[1].id), "optionIndex": (rows[1].correct_index + 1) % 4}]
+    out = await routes.retry_my_mcq_misses(item.id, McqRetryIn(answers=retry), user=s["student"], session=db)
+    assert (out.correct, out.total, out.score_percent, out.xp_awarded) == (1, 2, 50, 5)
+    assert {a.question_id for a in out.correct_answers} == {str(rows[0].id), str(rows[1].id)}
+    assert mcq.score_percent == first.score_percent == 80 and mcq.result == result_before
+    assert mcq.retry_score_percent == 50 and mcq.retry_completed_at is not None
+    xp = (await db.execute(select(StudentGamification.xp).where(StudentGamification.student_id == s["student"].id))).scalar_one()
+    assert xp == first.xp_awarded + 5
+    with pytest.raises(ConflictError):
+        await routes.retry_my_mcq_misses(item.id, McqRetryIn(answers=retry), user=s["student"], session=db)
+
+
+async def test_generated_mcqs_carry_explanation_and_a_safe_hint_and_a_hard_boss(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, taken_hours_ago=49)
+    calls = []
+
+    async def fake(payload):
+        calls.append(payload)
+        return {"questions": [{"slot_index": i, "text": f"gen {i}", "options": ["ok", "m1", "m2", "m3"], "answer": "ok",
+                               "explanation": f"why {i}", "hint": "It is ok" if i == 0 else f"nudge {i}"}
+                              for i in range(len(payload["slots"]))]}
+    monkeypatch.setattr(service.generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(service.generation_client, "generate_mcq", fake)
+    item = await _open(db, s)
+    await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    rows = await service.questions_of(db, uuid.UUID(item.id))
+    assert [sl["difficulty"] for sl in calls[0]["slots"]] == ["MEDIUM"] * 9 + ["HARD"]
+    assert rows[0].hint == f"Think about {rows[0].concept}." and rows[1].hint == "nudge 1"
+    assert [r.explanation for r in rows] == [f"why {i}" for i in range(10)]
+    assert rows[-1].is_boss and rows[-1].bloom_level in (B.ANALYZE, B.EVALUATE)
+
+
 # ------------------------------------------------------------- migration
 def _migration_module():
     here = Path(__file__).resolve()
@@ -412,5 +642,7 @@ async def test_migration_upgrade_and_downgrade(db_session):
     found = await db_session.run_sync(tables)
     for table in NEW_TABLES:
         assert found[table.name] == {c.name for c in table.columns}
+    # a later migration's table hangs off mcq_test_questions; drop it first (rolled back too)
+    await _ddl(db_session, lambda conn: McqQuestionAnswer.__table__.drop(conn, checkfirst=True))
     await _ddl(db_session, run(module.downgrade))
     assert set((await db_session.run_sync(tables)).values()) == {None}
