@@ -97,7 +97,7 @@ Stateless LLM writer; only Core calls it, it has no database. See
   for a voice test into simple spoken Indian classroom English and writes
   each one's rubric (`expected_points`, `misconceptions`, two `hints`):
   `gpt-5.1` rewords, code checks plus `gpt-5-mini` verify, one regenerate,
-  then the original wording.
+  then the original wording (Core drops such a question; see below).
 - `POST /v1/homework/gap-fill` - writes questions for the Homework slots the
   question bank couldn't fill: `gpt-5.1` writes, `gpt-5-mini` verifies,
   failed slots are regenerated once.
@@ -117,7 +117,7 @@ with Structured Outputs. See `services/kg/README.md`.
 | Step | Path | Model(s) | Fallback |
 | --- | --- | --- | --- |
 | Voice test textbook context (on test create, background) | Core -> kg | `gpt-5.1` | session runs ungrounded (generic syllabus instruction) |
-| Voice test questions (on test create, background) | Core picks one dataset question per Bloom level -> generation `/v1/voice-test/prep` | `gpt-5.1` reword + `gpt-5-mini` verify | dataset text as-is, no rubric; no question found -> Milo improvises from the textbook context |
+| Voice test questions (on test create, background) | Core picks one dataset question per Bloom level -> generation `/v1/voice-test/prep` | `gpt-5.1` reword + `gpt-5-mini` verify | a question that can't be made spoken is swapped for another of its level, then dropped (never asked in raw dataset wording); a level left empty gets a written spoken question; none at all -> Milo improvises from the textbook context |
 | Voice test conversation | app -> Core -> colearner realtime | `gpt-realtime-2.1-mini` + `gpt-4o-mini-transcribe` | none - the call fails with 503 |
 | Voice test grading | colearner, on `.../finish` | `gpt-5-mini` (rubric per question; scores computed in code) | none - the session is stored with `needs_review` and no score |
 | Homework questions | Core: question bank -> generation gap-fill -> relaxed bank -> kg -> deterministic generator | `gpt-5.1` + `gpt-5-mini` verify (generation), `gpt-5.1` (kg) | `DeterministicContentGenerator`, last resort only |

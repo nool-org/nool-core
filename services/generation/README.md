@@ -30,7 +30,8 @@ simple Indian classroom English (same meaning, answer, Bloom level and
 difficulty), writes `spoken_text` (symbols in words) and a rubric
 (`expected_points`, `misconceptions`, two `hints`). Same workflow shape
 (`src/services/voice_prep.py`): gpt-5.1 rewords → code checks (sentence
-length, numbers/units kept, banned words) + gpt-5-mini answers the reworded
+length, no changed/added numbers, kept numbers keep units, banned words,
+no "write/draw/tabulate/any four" asks) + gpt-5-mini answers the reworded
 question and compares with the dataset answer → failed items regenerate
 once → still failing: original wording, rubric kept if well-formed. One
 output per requested level, in `levels` order.

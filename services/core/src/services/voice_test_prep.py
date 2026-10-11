@@ -4,9 +4,10 @@ service reword each for speech and write its grading rubric. Runs as a
 background task after POST /tests (see voice_test.py's create_test); the
 teacher can then review/approve/swap them (voice_test.py's /questions).
 
-Never fails silently: generation down -> the dataset text is used as-is
-(no rubric); no question for a level -> that level is skipped; no question
-at all -> the co-learner improvises from textbook_context, as before. Each
+Never fails silently: a question generation can't reword for speech is
+swapped for another of its level, then dropped (never asked in raw dataset
+wording); a level with no question gets one written to be spoken, else is
+skipped; no question at all -> the co-learner improvises from textbook_context, as before. Each
 case logs a warning. VoiceTest.prep_status tells sessions whether to wait
 (PENDING) or go (READY / FAILED). Questions that can't be asked aloud - MCQ
 stems, {tex} markup, broken encoding - are never picked (logged).
@@ -105,16 +106,11 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
                            extra={"test_id": str(test.id), "bloom_level": level.value})
             continue
         picked.append(question)
-    if missing := [level for level in levels if level not in {q.bloom_level for q in picked}]:
-        picked += await _write_for_levels(session, test, missing, examples=picked)
-        picked.sort(key=lambda q: order.index(q.bloom_level))
-    if not picked:
-        logger.warning("voice_test_prep_no_questions", extra={"test_id": str(test.id)})
-        return False
 
-    prepped = await _prep(test, ctx, picked)
-    # A question generation could not reword safely is swapped for another of
-    # the same level (up to REWORD_RETRIES rounds) before keeping dataset text.
+    prepped = await _prep(test, ctx, picked) if picked else []
+    # A question generation could not reword for speech is swapped for another
+    # of the same level (up to REWORD_RETRIES rounds), then dropped - never asked
+    # in its raw dataset wording.
     tried = {_uid(q) for q in picked}
     for _ in range(REWORD_RETRIES):
         redo = [i for i, (q, p) in enumerate(zip(picked, prepped)) if not _reworded(q, p)]
@@ -131,7 +127,21 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
             if _reworded(swaps[i], p):
                 picked[i], prepped[i] = swaps[i], p
 
-    for number, (question, p) in enumerate(zip(picked, prepped), start=1):
+    kept = [(q, p) for q, p in zip(picked, prepped) if _reworded(q, p)]
+    if len(kept) < len(picked):
+        logger.warning("voice_test_prep_dropped_unreworded", extra={
+            "test_id": str(test.id), "dataset_question_ids": [_key(q) for q, p in zip(picked, prepped)
+                                                              if not _reworded(q, p)]})
+    if missing := [level for level in levels if level not in {q.bloom_level for q, _ in kept}]:
+        written = await _write_for_levels(session, test, missing, examples=[q for q, _ in kept])
+        if written:  # already written to be spoken - _prep only adds the rubric
+            kept += zip(written, await _prep(test, ctx, written))
+    if not kept:
+        logger.warning("voice_test_prep_no_questions", extra={"test_id": str(test.id)})
+        return False
+
+    kept.sort(key=lambda qp: order.index(qp[0].bloom_level))
+    for number, (question, p) in enumerate(kept, start=1):
         session.add(VoiceTestQuestion(voice_test_id=test.id, order=number, **_fields(question, p)))
     await session.commit()
     return True
@@ -213,11 +223,17 @@ async def _dataset_ids(session: AsyncSession, teacher: User, test: VoiceTest, gr
 _LISTED_OPTIONS = re.compile(r"(?:^|\s)\(?[aA][.)]\s+\S.*(?:^|\s)\(?[bB][.)]\s+\S", re.S)
 
 
-_BLANKS = re.compile(r"_{3,}|fill in the blanks?", re.I)
+_BLANKS = re.compile(r"_{3,}|\bfill in\b", re.I)
 _DRAWING = re.compile(r"\b(draw|diagram|sketch|label|figure|graph|plot)\b", re.I)
 _PASSAGE = re.compile(r"read the (following|passage|text)|questions? that follows?|\btable\b|case[- ]based", re.I)
 _PARTS = re.compile(r"(?:^|\s)\(?(?:i{1,3}|iv|[a-d])[.)]\s")  # (i) ... (ii) ... / a. ... b. ...
 _OR_JOINED = re.compile(r"\s(?:OR|Or)\s")  # "State X. OR How is Y ..."
+# Written work rewording can't turn into one spoken answer. ("write any four ..." is NOT here:
+# generation narrows it to "tell me two or three ...".)
+_WRITTEN_WORK = re.compile(r"\btabulate\b|match the following|\bcomplete the (?:table|equation)"
+                           r"|\bbalance the (?:following )?(?:chemical )?equations?", re.I)
+_CALCULATE = re.compile(r"\bcalculate\b|\bfind the value", re.I)
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
 MAX_SPOKEN_WORDS = 45  # longer than this is too much to hold in mind when heard once
 
 
@@ -236,6 +252,10 @@ def _unspeakable(question: DatasetQuestion) -> str | None:
         return "drawing"
     if _PASSAGE.search(text):
         return "passage"
+    if _WRITTEN_WORK.search(text):
+        return "written_work"
+    if _CALCULATE.search(text) and len(_NUMBER.findall(text)) >= 3:
+        return "long_numerical"  # a multi-step sum is worked on paper, not held in mind
     if len(_PARTS.findall(text)) >= 2 or _OR_JOINED.search(text):
         return "multipart"
     if len(text.split()) > MAX_SPOKEN_WORDS:
@@ -272,7 +292,7 @@ async def _pick(session, test, dataset_ids, level, exclude: set[str]) -> Dataset
 
 async def _prep(test: VoiceTest, ctx: dict, questions: list[DatasetQuestion]) -> list[dict | None]:
     """generation's rewording per question (same order), None where it
-    gave nothing back - the caller then keeps the dataset text."""
+    gave nothing back - the caller then drops that question."""
     payload = {
         "grade": ctx["grade"], "subject": ctx["subject"], "chapter": ctx["chapter"].name, "board": ctx["board"],
         "levels": [q.bloom_level.value for q in questions],

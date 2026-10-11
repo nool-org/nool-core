@@ -6,13 +6,16 @@ grader. Same LlamaIndex Workflow shape as gap_fill.py:
     start -> generate -> verify --(failed items, once)--> generate -> verify -> stop
 
 - generate: one GENERATION_MODEL call per question, in parallel.
-- verify: code checks first (sentence length, every number/unit kept, no
-  banned Western/idiomatic words, rubric shape), then one VERIFY_MODEL call
-  for the batch that answers each reworded question itself and compares it
-  with the dataset answer, and checks the Bloom level/difficulty held.
+- verify: code checks first (sentence length, no changed/invented numbers,
+  kept numbers keep their units, no banned Western/idiomatic words, no
+  "write/draw/tabulate/any four" asks, rubric shape), then one VERIFY_MODEL
+  call for the batch that answers each reworded question itself and compares
+  it with the dataset answer, and checks concept, Bloom level, difficulty and
+  that it works when heard once and answered by speaking.
 - an item still failing after the retry keeps its ORIGINAL wording
   (reworded_text = original_text, spoken_text derived in code) and, if its
-  last draft had a well-formed rubric, that rubric.
+  last draft had a well-formed rubric, that rubric. Core treats an unchanged
+  reworded_text as "could not be made spoken" and drops the question.
 
 Stateless: core sends the candidates already chosen per Bloom level.
 """
@@ -25,7 +28,7 @@ import re
 from llama_index.core.workflow import Context, Event, StartEvent, StopEvent, Workflow, step
 from pydantic import BaseModel, Field, model_validator
 
-from src.services.gap_fill import BloomLevel, Difficulty
+from src.services.gap_fill import SPOKEN_RULES, BloomLevel, Difficulty
 from src.services.llm import StructuredLLM
 
 logger = logging.getLogger(__name__)
@@ -103,7 +106,7 @@ class PrepResult(BaseModel):
 
 # ---- LLM output shapes ---------------------------------------------------
 class _Rewording(BaseModel):
-    reworded_text: str = Field(description="the question asked a new way, same meaning/answer/level")
+    reworded_text: str = Field(description="the question asked a new way for speech, same concept and level")
     spoken_text: str = Field(description="reworded_text as Milo says it aloud: formulas and symbols in words")
     expected_points: list[str] = Field(description="2-4 points a full answer must contain")
     misconceptions: list[str] = Field(description="2-3 common wrong ideas students have on this question")
@@ -124,14 +127,20 @@ class _Verdicts(BaseModel):
 GENERATE_SYSTEM = """You prepare a {board} Class {grade} {subject} question for a spoken voice test.
 A friendly co-learner will read it aloud to an Indian school student, in a South Indian classroom.
 
-Reword the question. Keep the SAME meaning, the SAME answer, the SAME Bloom level and difficulty.
-Only the wording and the way of asking change. Ask for exactly what the original asks:
-do not add or drop any part (no extra "give reason", no extra sub-question).
+Reword the question so it works as a SPOKEN question. Keep the SAME concept, the SAME Bloom level
+and difficulty, and an answer that agrees with the given answer. Never add a part (no extra
+"give reason", no extra sub-question).
+The student hears it ONCE and answers by speaking ONCE:""" + SPOKEN_RULES + """
+- Never say "write", "draw", "list" or "tabulate". Turn "write/state/list any four (or N) ..." into
+  "Tell me two or three ...". Asking for fewer items is fine.
+- A long multi-step calculation becomes a reasoning ask ("How would you find ...?") or one simple step.
+- Self-contained: never say "this lens", "the given circuit", "the above" without first saying what it is.
 - Simple Indian English, as a teacher speaks in a South Indian classroom.
 - Short sentences, about 15 words or fewer each. Everyday words.
 - No idioms, no slang, no American or British phrasing.
 - Keep textbook terms exactly as in NCERT/state-board books (for example potential difference, resistivity).
-- Keep every number, unit and symbol from the original, written the same way.
+- Keep a number only if the question still needs it; never change a number or add a new one.
+  Every number you keep keeps its unit and symbol, written the same way. Say counts in words ("two or three").
 - Only if the original already has a scenario, you may set it in a familiar Indian setting
   (ceiling fan, mixie, tube light, geyser, plug point, cricket, bus, rupees). Never add a scenario.
 - Use phrasing students hear in class: "two times", "what will happen", "why is it like that".
@@ -140,7 +149,9 @@ do not add or drop any part (no extra "give reason", no extra sub-question).
 Also write:
 - spoken_text: reworded_text exactly as it should be said aloud. Formulas and symbols in words
   ("V = IR" -> "V equals I times R", "2 Ω" -> "2 ohm", "m/s" -> "metre per second", "x²" -> "x squared"; chemical symbols as names: "Zn" -> "zinc").
-- expected_points: 2 to 4 short points that a full answer must contain, taken from the given answer.
+- expected_points: 2 to 4 short points, taken from the given answer, for the question AS REWORDED.
+  If it now asks for two or three items, list the main ones and end with "Any two or three of these are enough.";
+  if it asks how to find something, the points are the steps of reasoning, not the full calculation.
 - misconceptions: 2 or 3 common wrong ideas students of this class have about this question.
 - hints: exactly 2. First a gentle nudge, then a stronger one. A hint never states the answer
   or any part of it; for a multi-part question, not even one part's answer.
@@ -149,12 +160,14 @@ If `feedback` is given, your previous attempt was rejected for that reason - fix
 VERIFY_SYSTEM = """You are a strict {board} Class {grade} {subject} teacher checking reworded voice-test questions.
 For each item: first answer the REWORDED question yourself, briefly, in `answer_to_reworded`.
 Then ok=true only if ALL hold:
-1. Your answer matches the dataset answer (same result, same key facts) - the meaning did not change.
-2. The reworded question has the same Bloom level and difficulty as the original; it is not easier or harder.
-3. It is clear, unambiguous and self-contained when heard aloud (no figure/diagram/table).
-4. spoken_text says the same thing as reworded_text, with symbols and formulas in words.
-5. It asks for exactly what the original asks - no part added or dropped.
-6. expected_points agree with the dataset answer.
+1. Your answer agrees with the dataset answer (same facts; for a narrowed ask, a correct part of it).
+2. It asks about the same concept at the same thinking level (Bloom level) and difficulty as the original.
+   It may ask for fewer items, or for the reasoning instead of a long calculation; it adds no new part.
+3. Self-contained when heard aloud once: anything it refers to ("this lens", "the circuit") is introduced
+   in the question itself; no figure, diagram, table or "given above".
+4. Answerable by speaking: nothing to write, draw or tabulate, no long list of items, no long working.
+5. spoken_text says the same thing as reworded_text, with symbols and formulas in words.
+6. expected_points agree with the dataset answer and match what the REWORDED question asks.
 7. No hint states the answer or any part of it (for a multi-part question, any one part's answer counts).
 If not ok, say precisely what is wrong in `problem`."""
 
@@ -171,6 +184,10 @@ def _units(text: str) -> set[str]:
     # ponytail: "short token after a number" ~ unit; long words ("resistors") and _NOT_UNITS are skipped
     return {f"{n} {u}" for n, u in _UNIT_AFTER_NUMBER.findall(text)
             if (len(u) <= 4 or not u.isalpha()) and u not in _NOT_UNITS}  # case-sensitive: "A" is ampere
+
+
+# asks a spoken answer can't meet - the prompt turns these into "tell me two or three ..."
+_WRITTEN_ASK = re.compile(r"\b(?:write|draw|tabulate)\b|\bany (?:three|four|five|six)\b", re.IGNORECASE)
 
 
 def _has_word(text: str, word: str) -> bool:
@@ -190,9 +207,16 @@ def _problems(original: str, draft: _Rewording) -> str | None:
     long = [s for s in re.split(r"(?<=[.?!])\s+|\n+", text) if len(s.split()) > MAX_SENTENCE_WORDS]
     if long:
         return f"sentence longer than {MAX_SENTENCE_WORDS} words, split it: {long[0]!r}"
-    missing = (set(_NUMBER.findall(original)) - set(_NUMBER.findall(text))) | (_units(original) - _units(text))
+    numbers = set(_NUMBER.findall(text))
+    added = numbers - set(_NUMBER.findall(original))
+    if added:
+        return f"never change or add a number (say counts in words); not in the original: {', '.join(sorted(added))}"
+    # ponytail: a dropped number is allowed (the ask may narrow); the verifier checks it is still answerable
+    missing = {u for u in _units(original) if u.split()[0] in numbers} - _units(text)
     if missing:
-        return f"keep every number, unit and symbol from the original; missing: {', '.join(sorted(missing))}"
+        return f"a number you keep keeps its unit and symbol as written; missing: {', '.join(sorted(missing))}"
+    if m := _WRITTEN_ASK.search(f"{text} {draft.spoken_text}"):
+        return f"it is answered by speaking once: do not say {m.group(0)!r}; ask for two or three things, said aloud"
     banned = [w for w in BANNED_WORDS if _has_word(text, w) and not _has_word(original, w)]
     if banned:
         return f"use simple Indian classroom English; avoid: {', '.join(banned)}"

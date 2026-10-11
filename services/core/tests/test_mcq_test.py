@@ -190,7 +190,7 @@ async def test_unlocks_48h_after_the_voice_test(schema):
     s = await _seed(schema, taken_hours_ago=49)
     item = await _open(schema, s)
     assert item.status == "available" and item.unlocks_at is None
-    assert item.title == "Electricity - MCQ check" and item.test_id == str(s["test"].id)
+    assert item.title == "Electricity · Ohm's law" and item.test_id == str(s["test"].id)
 
 
 async def test_unlocks_when_the_tests_homework_is_confirmed(schema):

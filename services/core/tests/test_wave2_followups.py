@@ -243,7 +243,17 @@ def test_unspeakable_rejects_questions_that_dont_work_aloud():
     assert voice_test_prep._unspeakable(q("(i) What is refraction? (ii) State its laws.")) == "multipart"
     assert voice_test_prep._unspeakable(q("State the laws of refraction. OR How is refractive index defined?")) == "multipart"
     assert voice_test_prep._unspeakable(q(" ".join(["word"] * 50) + "?")) == "too_long"
+    assert voice_test_prep._unspeakable(q("Balance the chemical equation: Fe + H2O -> Fe3O4 + H2")) == "written_work"
+    assert voice_test_prep._unspeakable(q("Match the following metals with their uses.")) == "written_work"
+    assert voice_test_prep._unspeakable(q("Tabulate the differences between metals and non-metals.")) == "written_work"
+    assert voice_test_prep._unspeakable(q("Fill in: the SI unit of power is ...")) == "blanks"
+    assert voice_test_prep._unspeakable(q(
+        "Calculate the energy used by a 100 W bulb in 5 hours a day for 30 days.")) == "long_numerical"
     assert voice_test_prep._unspeakable(q("Why does a pencil look bent in a glass of water?")) is None
+    assert voice_test_prep._unspeakable(q("Calculate the current when 12 V is applied across 4 ohm.")) is None
+    # rewording fixes this one ("tell me two or three ..."), so it stays eligible
+    assert voice_test_prep._unspeakable(q("A convex lens has focal length 20 cm. An object is kept 10 cm in front"
+                                          " of it. Write any four characteristics of the image formed.")) is None
 
 
 async def test_prep_swaps_a_question_generation_could_not_reword(schema, monkeypatch):
@@ -266,6 +276,29 @@ async def test_prep_swaps_a_question_generation_could_not_reword(schema, monkeyp
 
     [q] = await _questions(db, s["test"])
     assert q.dataset_question_id == good.id and q.reworded_text.startswith("In simple words")
+
+
+async def test_prep_drops_a_question_no_alternative_can_replace(schema, monkeypatch, caplog):
+    db = schema
+    _fake_kg(monkeypatch)
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND))
+    stuck = await _question(db, s, B.REMEMBER, "Define refraction of light.")
+    good = await _question(db, s, B.UNDERSTAND, "Why does a pencil look bent in water?")
+
+    async def prep(payload):  # generation gives `stuck` back in its original wording (its fallback)
+        return {"questions": [{
+            "dataset_question_id": c["id"], "bloom_level": c["bloom_level"],
+            "reworded_text": c["text"] if c["id"] == str(stuck.id) else f"In simple words: {c['text']}",
+            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1", "h2"],
+        } for c in payload["candidates"]]}
+    monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", prep)
+
+    with caplog.at_level(logging.WARNING):
+        await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    assert [q.dataset_question_id for q in await _questions(db, s["test"])] == [good.id]
+    assert s["test"].prep_status == VoiceTestPrepStatus.READY  # the rest still go ahead, no review needed
+    assert "voice_test_prep_dropped_unreworded" in caplog.text
 
 
 def _pick_in_order(*questions):

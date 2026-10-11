@@ -93,7 +93,7 @@ async def test_a_dropped_number_or_unit_is_rejected_in_code_and_fed_back():
 def test_code_checks():
     orig = Q_APPLY["text"]
     assert _problems(orig, GOOD_APPLY) is None
-    assert "missing: 220" in _problems(orig, rewording("A heater on a plug point takes 5 A. What is its resistance?"))
+    assert "not in the original: 230" in _problems(orig, rewording("A heater on 230 V takes 5 A. What is its resistance?"))
     assert "longer than" in _problems(orig, rewording(
         "A heater that is connected to a 220 V supply in the kitchen of a house draws a current of 5 A so find R."))
     assert "avoid: gonna" in _problems(orig, rewording("A heater on 220 V takes 5 A. What is it gonna be?"))
@@ -142,3 +142,34 @@ def test_a_line_break_ends_a_sentence():
     orig = Q_APPLY["text"]
     two_lines = "A heater on a plug point runs on 220 V and takes 5 A of current\nWhat is its resistance in ohms?"
     assert _problems(orig, rewording(two_lines)) is None
+
+
+LENS = ("A convex lens has focal length 20 cm. An object is kept 10 cm in front of its optical centre. "
+        "In this case, write any four characteristics of the image formed by this lens.")
+
+
+def test_written_asks_are_rejected_but_a_narrowed_spoken_ask_passes():
+    write_four = rewording("A convex lens has focal length 20 cm. An object is 10 cm from it. "
+                           "Write any four features of the image.")
+    assert "'Write'" in _problems(LENS, write_four)
+    assert "'any four'" in _problems(LENS, rewording("A convex lens has focal length 20 cm. The object is 10 cm away. "
+                                                     "Tell me any four features of the image."))
+    assert "'draw'" in _problems(LENS, rewording("Think of a convex lens. Can you draw the image?"))
+    assert "'tabulate'" in _problems(LENS, rewording("Show the two kinds side by side.", spoken="Please tabulate it."))
+    narrowed = rewording("A convex lens has focal length 20 cm. An object is kept 10 cm from the lens. "
+                         "Tell me two or three things about the image it forms.")
+    assert _problems(LENS, narrowed) is None
+    # a dropped number is fine when the ask narrows; the verifier checks it's still answerable
+    assert _problems(LENS, rewording("An object is kept between a convex lens and its focus. "
+                                     "Tell me two or three things about the image.")) is None
+    assert "not in the original: 2, 3" in _problems(LENS, rewording("A convex lens has focal length 20 cm. "
+                                                                     "Tell me 2 or 3 features of the image."))
+
+
+def test_prompts_carry_the_voice_first_rules():
+    from src.services.voice_prep import GENERATE_SYSTEM, VERIFY_SYSTEM
+    prompt = GENERATE_SYSTEM.format(board="CBSE", grade=10, subject="Science")
+    assert "answered by speaking" in prompt and "Tell me two or three" in prompt and "this lens" in prompt
+    assert "do not add or drop any part" not in prompt
+    verify = VERIFY_SYSTEM.format(board="CBSE", grade=10, subject="Science")
+    assert "fewer items" in verify and "Self-contained" in verify and "Answerable by speaking" in verify

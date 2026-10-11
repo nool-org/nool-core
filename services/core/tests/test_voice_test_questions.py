@@ -238,7 +238,7 @@ async def test_prep_picks_one_question_per_level_in_bloom_order_and_rewords_it(s
     assert len(calls) == 1 and len(await _questions(db, s["test"])) == 2
 
 
-async def test_prep_falls_back_to_dataset_text_when_generation_is_down(schema, monkeypatch, caplog):
+async def test_prep_drops_questions_instead_of_raw_text_when_generation_is_down(schema, monkeypatch, caplog):
     db = schema
     s = await _seed(db, levels=(B.REMEMBER,))
     await _question(db, s, B.REMEMBER, "Define resistance.")
@@ -251,10 +251,9 @@ async def test_prep_falls_back_to_dataset_text_when_generation_is_down(schema, m
     with caplog.at_level(logging.WARNING):
         await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
 
-    [row] = await _questions(db, s["test"])
-    assert row.original_text == row.reworded_text == row.spoken_text == "Define resistance."
-    assert row.expected_points == row.misconceptions == row.hints == []
+    assert await _questions(db, s["test"]) == []  # never the raw dataset wording; co-learner improvises
     assert "voice_test_prep_generation_unavailable" in caplog.text
+    assert "voice_test_prep_dropped_unreworded" in caplog.text
 
 
 async def test_prep_skips_a_level_with_no_question_and_logs(schema, monkeypatch, caplog):

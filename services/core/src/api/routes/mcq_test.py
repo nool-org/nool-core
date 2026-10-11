@@ -17,7 +17,7 @@ from src.api.schemas.mcq_test import (
     McqTestOut,
     TestGrowthOut,
 )
-from src.domain.models import Chapter, McqTest, McqTestQuestion, Role, User, VoiceTest
+from src.domain.models import Chapter, McqTest, McqTestQuestion, Role, Topic, User, VoiceTest
 from src.repositories.lookups import get_test_for_teacher
 from src.services import growth, mcq_test
 
@@ -25,9 +25,15 @@ router = APIRouter(prefix="/api/v1", tags=["mcq-tests"])
 
 
 async def _title(session: AsyncSession, voice_test_id) -> str:
-    name = (await session.execute(select(Chapter.name).join(VoiceTest, VoiceTest.chapter_id == Chapter.id)
-                                  .where(VoiceTest.id == voice_test_id))).scalar_one_or_none()
-    return f"{name or 'Chapter'} - MCQ check"
+    """'Chapter · Topic' so two checks on one chapter read differently."""
+    chapter, topic = (await session.execute(
+        select(Chapter.name, Topic.name).select_from(VoiceTest)
+        .join(Chapter, Chapter.id == VoiceTest.chapter_id)
+        .outerjoin(Topic, Topic.id == VoiceTest.topic_id)
+        .where(VoiceTest.id == voice_test_id))).one_or_none() or (None, None)
+    if topic and topic.isupper():
+        topic = topic.title()  # the textbook graph stores headings in capitals
+    return " · ".join(filter(None, [chapter or "Chapter", topic]))
 
 
 async def _own(session: AsyncSession, mcq_test_id: str, user: User) -> McqTest:
@@ -57,6 +63,13 @@ async def list_my_mcq_tests(
             # not built until first opened - the planned count until then
             question_count=counts.get(mcq.id, mcq_test.MCQ_QUESTION_COUNT),
         ))
+    # same chapter and topic tested twice: tell them apart by the test date
+    dates = dict((await session.execute(
+        select(VoiceTest.id, VoiceTest.created_at).where(VoiceTest.id.in_([m.voice_test_id for m in rows])))).all())         if rows else {}
+    seen = [i.title for i in items]
+    for item, mcq in zip(items, rows):
+        if seen.count(item.title) > 1 and mcq.voice_test_id in dates:
+            item.title = f"{item.title} · {dates[mcq.voice_test_id]:%-d %b}"
     return McqTestListOut(items=items)
 
 
