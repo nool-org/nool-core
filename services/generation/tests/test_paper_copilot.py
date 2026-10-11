@@ -149,7 +149,7 @@ def test_api_503_without_key_then_plan_and_transcribe(monkeypatch):
 
         seen = {}
 
-        async def fake_transcriber(*, audio, filename, prompt):
+        async def fake_transcriber(*, audio, filename, prompt, language="en"):
             seen.update(audio=audio, filename=filename, prompt=prompt)
             return " make question 3 harder "
 

@@ -68,8 +68,8 @@ def flow(monkeypatch):
     monkeypatch.setattr(services_pkg, "daily_practice",
                         SimpleNamespace(load_item_for_student=load, record_item_result=record), raising=False)
 
-    async def transcribe(audio_base64, mime_type, prompt):
-        state.transcribed.append((audio_base64, mime_type, prompt))
+    async def transcribe(audio_base64, mime_type, prompt, language="en"):
+        state.transcribed.append((audio_base64, mime_type, prompt, language))
         return "the speed of light changes"
 
     async def grade(**kw):
@@ -97,6 +97,7 @@ async def test_answer_is_transcribed_graded_and_stored_without_the_audio(flow):
                    "xp_awarded": 15}
     assert flow.recorded == [80] and session.commits == 1
     assert flow.transcribed[0][1] == "audio/m4a" and "Science. Light" in flow.transcribed[0][2]
+    assert flow.transcribed[0][3] == "auto"  # mixed-language answers aren't forced into English
     assert flow.graded[0]["expected_points"] == ["its speed changes"] and flow.graded[0]["subject"] == "Science"
     item = flow.item
     assert item.score == 80 and item.xp_awarded == 15 and item.answered_at is not None
@@ -119,7 +120,7 @@ async def test_grading_failure_keeps_the_transcript_ungraded_without_xp(flow):
 
 
 async def test_transcription_failure_is_a_retryable_503_and_saves_nothing(flow, monkeypatch):
-    async def broken(*args):
+    async def broken(*args, **kwargs):
         raise GenerationServiceUnavailableError("down")
 
     monkeypatch.setattr(generation_client, "transcribe", broken)
@@ -183,7 +184,7 @@ async def test_prepare_batches_voice_rows_and_stores_spoken_text_and_rubric(monk
 
 
 async def test_prepare_failure_leaves_rows_untouched(monkeypatch):
-    async def broken(payload):
+    async def broken(*args, **kwargs):
         raise GenerationServiceUnavailableError("down")
 
     monkeypatch.setattr(generation_client, "prep_voice_test", broken)

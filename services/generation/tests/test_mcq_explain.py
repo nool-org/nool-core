@@ -42,3 +42,21 @@ def test_explains_each_question_and_drops_a_hint_that_names_the_answer():
 def test_missing_results_come_back_empty_not_invented():
     result = asyncio.run(svc.explain(FakeLLM([]), _body(), model="m"))
     assert all(r.explanation is None and r.hint is None for r in result.results)
+
+
+def test_transcriber_forces_english_only_when_asked():
+    from src.services.transcribe import OpenAITranscriber, TranscribeRequest
+
+    calls = []
+
+    class FakeTranscriptions:
+        async def create(self, **kw):
+            calls.append(kw)
+            return type("R", (), {"text": "ok"})()
+
+    t = OpenAITranscriber.__new__(OpenAITranscriber)
+    t.client = type("C", (), {"audio": type("A", (), {"transcriptions": FakeTranscriptions()})()})()
+    asyncio.run(t(audio=b"x", filename="a.m4a", prompt=""))
+    asyncio.run(t(audio=b"x", filename="a.m4a", prompt="", language="auto"))
+    assert calls[0]["language"] == "en" and "language" not in calls[1]
+    assert TranscribeRequest(audio_base64="eA==").language == "en"

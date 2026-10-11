@@ -100,7 +100,7 @@ async def answer_voice_item(session: AsyncSession, session_id: str, item_id: str
     _decode_audio(audio_base64)
 
     try:
-        transcript = await generation_client.transcribe(audio_base64, mime_type, await _vocabulary(session, question))
+        transcript = await generation_client.transcribe(audio_base64, mime_type, await _vocabulary(session, question), language="auto")
     except AppError as exc:
         logger.warning("practice_voice_transcribe_failed", extra={"item_id": str(item.id), "reason": str(exc)})
         raise TranscriptionUnavailableError("We couldn't process your recording - please try again.") from exc

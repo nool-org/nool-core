@@ -22,6 +22,8 @@ class TranscribeRequest(BaseModel):
     audio_base64: str = Field(min_length=1, max_length=(MAX_AUDIO_BYTES * 4) // 3 + 4)
     mime_type: str = Field(default="audio/m4a", max_length=50)
     prompt: str = Field(default="", max_length=1000)
+    # "en" for the Copilot; "auto" lets a student's mixed Tamil/Hindi-English answer through unforced
+    language: str = Field(default="en", pattern=r"^(auto|[a-z]{2})$")
 
     def audio(self) -> bytes:
         try:
@@ -44,9 +46,10 @@ class OpenAITranscriber:
     def __init__(self, api_key: str, timeout: float = 60.0):
         self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=0)
 
-    async def __call__(self, *, audio: bytes, filename: str, prompt: str) -> str:
+    async def __call__(self, *, audio: bytes, filename: str, prompt: str, language: str = "en") -> str:
+        extra = {} if language == "auto" else {"language": language}
         result = await self.client.audio.transcriptions.create(
-            model=MODEL, file=(filename, audio), language="en", prompt=prompt or None,
+            model=MODEL, file=(filename, audio), prompt=prompt or None, **extra,
         )
         return result.text
 

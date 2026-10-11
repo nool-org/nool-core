@@ -55,10 +55,11 @@ async def prep_voice_test(payload: dict) -> dict:
     return await _post("/v1/voice-test/prep", payload, VOICE_TEST_PREP_TIMEOUT_SECONDS)
 
 
-async def transcribe(audio_base64: str, mime_type: str, prompt: str) -> str:
-    """POST /v1/transcribe (gpt-4o-mini-transcribe) - the recognised text, stripped."""
-    body = await _post("/v1/transcribe", {"audio_base64": audio_base64, "mime_type": mime_type, "prompt": prompt},
-                       TRANSCRIBE_TIMEOUT_SECONDS)
+async def transcribe(audio_base64: str, mime_type: str, prompt: str, language: str = "en") -> str:
+    """POST /v1/transcribe (gpt-4o-mini-transcribe) - the recognised text, stripped.
+    language "auto" for students' answers, which may mix English with Indian languages."""
+    body = await _post("/v1/transcribe", {"audio_base64": audio_base64, "mime_type": mime_type, "prompt": prompt,
+                                          "language": language}, TRANSCRIBE_TIMEOUT_SECONDS)
     return str(body.get("text") or "").strip()
 
 

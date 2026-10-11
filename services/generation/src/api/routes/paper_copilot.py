@@ -27,5 +27,5 @@ async def transcribe(
         audio = body.audio()
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    text = await transcriber(audio=audio, filename=body.filename(), prompt=body.prompt)
+    text = await transcriber(audio=audio, filename=body.filename(), prompt=body.prompt, language=body.language)
     return TranscribeResult(text=text.strip())
