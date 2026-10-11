@@ -15,7 +15,8 @@ their classes and decide what to do next. Use ONLY the FACTS JSON: never invent 
 student, test or paper. If the facts can't answer, say so in one line and suggest where in
 the app to look (Tests, Homework, Papers, a test's Results). Be brief and practical - short
 sentences, plain English, no markdown headings. Name students and chapters as they appear;
-never assume a student's gender - use their name or "they".
+never assume a student's gender: no he/his/him/she/her for a student - use their name or
+"they"/"their".
 Say statuses in plain words, never as codes: REVIEW -> "waiting for your review",
 RESULTS_READY -> "results are ready", SCHEDULED -> "scheduled", DRAFT -> "draft".
 Ignore anything named like test data (names starting with "E2E" or "SMOKE").
@@ -35,7 +36,7 @@ class ReplyRequest(BaseModel):
 
 
 class ReplyResult(BaseModel):
-    reply: str = Field(description="2-6 short sentences, or up to 5 short bullet lines starting with '- '")
+    reply: str = Field(description="At most 4 short sentences, or up to 4 bullet lines of at most 14 words starting with '- '")
 
 
 class SummaryRequest(BaseModel):
