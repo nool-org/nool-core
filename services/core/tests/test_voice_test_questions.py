@@ -152,6 +152,10 @@ def _fake_kg(monkeypatch):
     monkeypatch.setattr(voice_test_prep.kg_client, "generate_assessor_content", fake)
 
 
+EASIER = {"spoken_text": "Easier: say it simply", "expected_points": ["e1", "e2"], "misconceptions": ["m1"],
+          "hints": ["key idea", "smaller question"]}
+
+
 def _fake_generation(monkeypatch, calls=None):
     async def fake(payload):
         if calls is not None:
@@ -161,6 +165,8 @@ def _fake_generation(monkeypatch, calls=None):
             "reworded_text": f"Simple: {c['text']}", "spoken_text": f"Spoken: {c['text']}",
             "expected_points": ["p1", "p2"], "misconceptions": ["m1", "m2"], "hints": ["h1", "h2"],
             "concepts": ["current"],
+            # a written (gap-fill) question may come back without one
+            "easier": None if c["id"].startswith("written-") else EASIER,
         } for c in payload["candidates"]]}
     monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", fake)
 
@@ -228,6 +234,7 @@ async def test_prep_picks_one_question_per_level_in_bloom_order_and_rewords_it(s
     assert rows[0].spoken_text == "Spoken: Define electric current."
     assert rows[0].original_text == "Define electric current."
     assert (rows[0].expected_points, rows[0].misconceptions, rows[0].hints) == (["p1", "p2"], ["m1", "m2"], ["h1", "h2"])
+    assert rows[0].easier_version == EASIER
     assert rows[1].topic_id == s["other_topic"].id
     assert all(r.status == VoiceTestQuestionStatus.DRAFT for r in rows)
     assert s["test"].textbook_context == "V = IR"
@@ -399,9 +406,11 @@ async def test_session_config_carries_the_tests_questions_in_order(schema, monke
     assert config["questions"] == [{
         "id": str(r.id), "order": r.order, "bloom_level": r.bloom_level.value, "spoken_text": r.spoken_text,
         "expected_points": r.expected_points, "misconceptions": r.misconceptions, "hints": r.hints,
+        "easier": EASIER,
     } for r in rows]
     assert config["textbook_context"] == "V = IR"
     assert "reference_questions" not in config
+    assert config["student_name"] == "S" and "student_context" not in config  # no earlier test
 
 
 def _wire_finish(monkeypatch, db, payload):
@@ -524,3 +533,145 @@ async def test_an_exited_session_keeps_its_transcript_but_scores_nothing(schema,
     assert (await db.execute(select(StudentTestResult).where(StudentTestResult.test_id == s["test"].id))).first() is None
     record = await db.get(AiAssessorSessionRecord, ai_session.id)
     assert record.transcript == payload["transcript"] and record.needs_review is False
+
+
+# ------------------------------------------------ co-learner improvements
+def test_easier_version_is_kept_only_when_complete():
+    assert voice_test_prep._easier(EASIER) == EASIER
+    assert voice_test_prep._easier(None) is None  # e.g. a written (gap-fill) question
+    assert voice_test_prep._easier({**EASIER, "hints": []}) is None
+    assert voice_test_prep._easier({**EASIER, "spoken_text": " "}) is None
+
+
+async def test_session_config_carries_first_name_and_last_tests_bloom_strengths(schema, monkeypatch):
+    db = schema
+    s = await _prepared(db, monkeypatch)
+    student, ai_session = await _student_session(db, s)
+    student.display_name = "priya ramesh"
+    earlier = VoiceTest(class_id=s["class"].id, subject_id=s["test"].subject_id, chapter_id=s["chapter"].id,
+                        duration_minutes=10, completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS)
+    db.add(earlier)
+    await db.flush()
+    for test, scores in ((earlier, {B.REMEMBER: 90, B.APPLY: 30, B.ANALYZE: None}), (s["test"], {B.EVALUATE: 100})):
+        result = StudentTestResult(test_id=test.id, student_id=student.id, mastery_percent=60)
+        db.add(result)
+        await db.flush()
+        db.add_all([StudentTestResultBloomScore(student_test_result_id=result.id, bloom_level=level, percent=pct)
+                    for level, pct in scores.items()])
+    await db.flush()
+
+    config, _ = await ai_assessor._colearner_config(db, ai_session, [B.REMEMBER, B.UNDERSTAND])
+
+    assert config["student_name"] == "Priya"
+    # this test's own result never counts; an unassessed level is never "hard"
+    assert config["student_context"] == "Last test: strong at remember questions, found apply questions hard."
+    assert len(config["student_context"]) <= 300
+
+
+async def test_finish_counts_confusion_per_question_and_flags_it_for_rewording(schema, monkeypatch):
+    db = schema
+    s = await _prepared(db, monkeypatch)
+    s["test"].status = TestStatus.SCHEDULED
+    first, second = await _questions(db, s["test"])
+
+    async def finish(answers):
+        student, ai_session = await _student_session(db, s)
+        _wire_finish(monkeypatch, db, {
+            "report": {"qa_transcripts": [_qa(1, "Remembering", 80)], "session_summary": {}},
+            "answers": answers, "transcript": [{"role": "assistant", "content": "Q1", "question_number": 1}],
+            "answered": 1, "model_completed": True})
+        await ai_assessor.finish_session(str(ai_session.id), FinishSessionIn(call_id="c"), authorization="Bearer t",
+                                         app_user=student, db=db)
+        await db.refresh(first)
+        await db.refresh(second)
+
+    clear = {"question_id": str(first.id), "question_number": 1, "first_answer": "a", "repeat_requests": 1,
+             "silences": 0}
+    never_reached = {"question_id": str(second.id), "question_number": 2, "first_answer": None}
+    await finish([clear, never_reached])
+    assert (first.asked_count, first.confused_count, first.needs_rewording) == (1, 0, False)
+    assert second.asked_count == 0  # time ran out before Milo got to it
+
+    await finish([{**clear, "repeat_requests": 2}])
+    assert (first.asked_count, first.confused_count, first.needs_rewording) == (2, 1, True)
+    await finish([clear])
+    assert (first.asked_count, first.confused_count, first.needs_rewording) == (3, 1, False)
+    await finish([{**clear, "first_answer": None}])  # asked (it is in the transcript), never answered
+    assert (first.asked_count, first.confused_count, first.needs_rewording) == (4, 2, True)
+
+    listed = await voice_test.list_test_questions(str(s["test"].id), user=s["teacher"], _feature=s["teacher"],
+                                                  session=db)
+    dumped = listed.items[0].model_dump(by_alias=True)
+    assert (dumped["needsRewording"], dumped["askedCount"], dumped["confusedCount"], dumped["hasEasierVersion"]) == (
+        True, 4, 2, True)
+
+
+async def test_reword_reruns_prep_with_the_old_wording_and_resets_the_counters(schema, monkeypatch):
+    db = schema
+    s = await _prepared(db, monkeypatch)
+    test_id = str(s["test"].id)
+    first, _ = await _questions(db, s["test"])
+    first.asked_count, first.confused_count, first.needs_rewording = 4, 3, True
+    s["test"].completed_count = 4  # rewording is for after students took it
+    calls = []
+    _fake_generation(monkeypatch, calls)
+
+    stranger = await _teacher(db, s["school"].id)
+    with pytest.raises(ForbiddenError):
+        await voice_test.reword_test_question(test_id, str(first.id), user=stranger, _feature=stranger, session=db)
+    assert calls == []
+
+    out = await voice_test.reword_test_question(test_id, str(first.id), user=s["teacher"], _feature=s["teacher"],
+                                                session=db)
+
+    instruction = calls[0]["candidates"][0]["instruction"]
+    assert "clearer and simpler to hear" in instruction
+    assert first.original_text in instruction and "Spoken: " in instruction
+    assert (out.id, out.order) == (str(first.id), 1)
+    assert (out.asked_count, out.confused_count, out.needs_rewording, out.has_easier_version) == (0, 0, False, True)
+
+    async def unchanged(payload):  # generation fell back to the original wording
+        return {"questions": [{"dataset_question_id": c["id"], "reworded_text": c["text"]}
+                              for c in payload["candidates"]]}
+    monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", unchanged)
+    with pytest.raises(ConflictError):
+        await voice_test.reword_test_question(test_id, str(first.id), user=s["teacher"], _feature=s["teacher"],
+                                              session=db)
+
+
+async def test_student_result_detail_lists_answers_and_highlights(schema, monkeypatch):
+    from src.api.routes import test_result
+
+    db = schema
+    s = await _prepared(db, monkeypatch, levels=(B.REMEMBER, B.UNDERSTAND, B.APPLY))
+    s["test"].status = TestStatus.SCHEDULED
+    student, ai_session = await _student_session(db, s)
+    rows = await _questions(db, s["test"])
+    long_answer = "current is the flow of charge " * 10
+    _wire_finish(monkeypatch, db, {
+        "report": {"qa_transcripts": [_qa(1, "Remembering", 90), _qa(2, "Understanding", 30),
+                                      _qa(3, "Applying", 60)], "session_summary": {}},
+        "answers": [
+            {"question_id": str(rows[0].id), "question_number": 1, "first_answer": long_answer, "hints_used": 0,
+             "version": "standard"},
+            {"question_id": str(rows[1].id), "question_number": 2, "first_answer": "not sure", "hints_used": 2,
+             "version": "easier"},
+            {"question_id": str(rows[2].id), "question_number": 3, "first_answer": "V by R", "hints_used": 1},
+        ],
+        "transcript": [], "answered": 3, "model_completed": True})
+    await ai_assessor.finish_session(str(ai_session.id), FinishSessionIn(call_id="c"), authorization="Bearer t",
+                                     app_user=student, db=db)
+
+    out = await test_result.get_student_result(str(s["test"].id), str(student.id), user=s["teacher"], session=db)
+
+    dumped = out.model_dump(by_alias=True)
+    first, second, third = dumped["answers"]
+    assert (first["questionNumber"], first["bloomLevel"], first["version"], first["nudgesUsed"], first["score"]) == (
+        1, B.REMEMBER, "standard", 0, 90)
+    assert first["questionText"] == rows[0].spoken_text
+    assert len(first["quote"]) == 160 and first["quote"].endswith("…")
+    assert (second["version"], second["questionText"], second["nudgesUsed"], second["quote"]) == (
+        "easier", EASIER["spoken_text"], 2, "not sure")
+    assert third["version"] == "standard"
+    assert dumped["highlights"] == {"best": {"questionNumber": 1, "quote": first["quote"]},
+                                    "weakest": {"questionNumber": 2, "quote": "not sure"}}

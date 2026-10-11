@@ -174,6 +174,32 @@ async def swap_question(
     return True
 
 
+async def reword_question(session: AsyncSession, test: VoiceTest, question: VoiceTestQuestion) -> bool:
+    """Re-preps `question` in place from its source, asked to come out
+    clearer and simpler to hear (the teacher's answer to needs_rewording);
+    its quality counters start over. False when generation gave nothing new."""
+    ctx = await _context(session, test)
+    if ctx is None:
+        return False
+    source = await session.get(DatasetQuestion, question.dataset_question_id) if question.dataset_question_id else None
+    if source is None:  # a written question (or a deleted source): its rubric stands in for the answer
+        source = WrittenQuestion(text=question.original_text, answer="; ".join(question.expected_points or []),
+                                 bloom_level=question.bloom_level, topic_id=question.topic_id,
+                                 subtopic_id=question.subtopic_id, concepts=list(question.concepts or []))
+    if not (source.answer or "").strip():
+        return False
+    instruction = ("Students found this question hard to follow when they heard it. Make it clearer and simpler "
+                   "to hear: same concept and level, shorter sentences, everyday words. "
+                   f"Original question: {question.original_text!r}. Current spoken wording: {question.spoken_text!r}.")
+    [prepped] = await _prep(test, ctx, [source], instruction=instruction)
+    text = ((prepped or {}).get("reworded_text") or "").strip()
+    if not text or text == (source.text or "").strip():  # unchanged = generation could not reword it
+        return False
+    for key, value in _fields(source, prepped).items():
+        setattr(question, key, value)
+    return True
+
+
 def _key(question) -> str:
     """Candidate id sent to generation: the dataset row id, or a stable key for a written question."""
     return str(question.id) if question.id else f"written-{question.bloom_level.value}"
@@ -290,7 +316,8 @@ async def _pick(session, test, dataset_ids, level, exclude: set[str]) -> Dataset
     return None
 
 
-async def _prep(test: VoiceTest, ctx: dict, questions: list[DatasetQuestion]) -> list[dict | None]:
+async def _prep(test: VoiceTest, ctx: dict, questions: list[DatasetQuestion],
+                instruction: str | None = None) -> list[dict | None]:
     """generation's rewording per question (same order), None where it
     gave nothing back - the caller then drops that question."""
     payload = {
@@ -301,6 +328,7 @@ async def _prep(test: VoiceTest, ctx: dict, questions: list[DatasetQuestion]) ->
             "topic_id": str(q.topic_id) if q.topic_id else None,
             "subtopic_id": str(q.subtopic_id) if q.subtopic_id else None,
             "concepts": list(q.concepts or []), "difficulty": q.difficulty.value if q.difficulty else None,
+            **({"instruction": instruction} if instruction else {}),
         } for q in questions],
     }
     try:
@@ -407,5 +435,17 @@ def _fields(question: DatasetQuestion, prepped: dict | None) -> dict:
         "expected_points": _strings(prepped.get("expected_points")),
         "misconceptions": _strings(prepped.get("misconceptions")),
         "hints": _strings(prepped.get("hints")),
+        "easier_version": _easier(prepped.get("easier")),
         "status": VoiceTestQuestionStatus.DRAFT,
+        # a new wording starts the quality loop over (ai_assessor.py's _count_confusion)
+        "asked_count": 0, "confused_count": 0, "needs_rewording": False,
     }
+
+
+def _easier(value) -> dict | None:
+    """generation's easier version, kept only when complete (None for e.g. a written question it had none for)."""
+    if not isinstance(value, dict) or not (value.get("spoken_text") or "").strip():
+        return None
+    easier = {"spoken_text": value["spoken_text"].strip(), **{key: _strings(value.get(key))
+              for key in ("expected_points", "misconceptions", "hints")}}
+    return easier if easier["expected_points"] and easier["hints"] else None

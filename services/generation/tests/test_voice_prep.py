@@ -4,7 +4,16 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from src.services.voice_prep import PrepRequest, _problems, _Rewording, _Verdict, _Verdicts, prep_questions, spoken
+from src.services.voice_prep import (
+    PrepRequest,
+    _problems,
+    _Rewording,
+    _Verdict,
+    _Verdicts,
+    _Version,
+    prep_questions,
+    spoken,
+)
 
 Q_APPLY = {"id": "q-apply", "text": "A 220 V supply drives a current of 5 A through a heater. Find its resistance.",
            "answer": "R = V/I = 44 Ω", "bloom_level": "APPLY", "topic_id": "t1", "subtopic_id": "s1",
@@ -17,9 +26,17 @@ REQUEST = PrepRequest(grade=10, subject="Science", chapter="Electricity", board=
                       levels=["APPLY", "REMEMBER"], candidates=[Q_REMEMBER, Q_EXTRA, Q_APPLY])
 
 
+def version(text, points=("e1", "e2")):
+    return _Version(reworded_text=text, spoken_text=text, expected_points=list(points),
+                    misconceptions=["m1", "m2"], hints=["key idea", "smaller question"])
+
+
+EASIER = version("A heater takes 5 A from a 220 V plug point. Which law links these to its resistance?")
+
+
 def rewording(text, **kw):
     return _Rewording(reworded_text=text, spoken_text=kw.get("spoken", text), expected_points=["p1", "p2"],
-                      misconceptions=["m1", "m2"], hints=["gentle", "stronger"])
+                      misconceptions=["m1", "m2"], hints=["gentle", "stronger"], easier=kw.get("easier", EASIER))
 
 
 GOOD_APPLY = rewording("A heater is connected to a 220 V plug point. The current is 5 A. What is its resistance?")
@@ -39,7 +56,7 @@ class FakeLLM:
 
 
 def ok(*idx):
-    return [_Verdict(index=i, answer_to_reworded="a", ok=True, problem="") for i in idx]
+    return [_Verdict(index=i, answer_to_reworded="a", ok=True, problem="", easier_ok=True) for i in idx]
 
 
 @pytest.mark.asyncio
@@ -58,7 +75,7 @@ async def test_happy_path_one_question_per_level_in_order_with_rubric():
 
 @pytest.mark.asyncio
 async def test_verify_failure_regenerates_once_then_falls_back_to_original_wording_keeping_the_rubric():
-    bad = _Verdict(index=0, answer_to_reworded="x", ok=False, problem="answer changed")
+    bad = _Verdict(index=0, answer_to_reworded="x", ok=False, problem="answer changed", easier_ok=False)
     llm = FakeLLM([GOOD_APPLY, GOOD_REMEMBER, GOOD_APPLY],
                   [_Verdicts(verdicts=[bad] + ok(1)), _Verdicts(verdicts=[bad])])
     result = await prep_questions(llm, REQUEST, generation_model="gen", verify_model="ver")
@@ -73,7 +90,7 @@ async def test_verify_failure_regenerates_once_then_falls_back_to_original_wordi
 
 @pytest.mark.asyncio
 async def test_a_regenerated_item_that_passes_is_used():
-    bad = _Verdict(index=1, answer_to_reworded="x", ok=False, problem="too easy now")
+    bad = _Verdict(index=1, answer_to_reworded="x", ok=False, problem="too easy now", easier_ok=False)
     fixed = rewording("What do we mean by resistivity?")
     llm = FakeLLM([GOOD_APPLY, GOOD_REMEMBER, fixed], [_Verdicts(verdicts=ok(0) + [bad]), _Verdicts(verdicts=ok(1))])
     result = await prep_questions(llm, REQUEST, generation_model="gen", verify_model="ver")
@@ -173,3 +190,57 @@ def test_prompts_carry_the_voice_first_rules():
     assert "do not add or drop any part" not in prompt
     verify = VERIFY_SYSTEM.format(board="CBSE", grade=10, subject="Science")
     assert "fewer items" in verify and "Self-contained" in verify and "Answerable by speaking" in verify
+
+
+@pytest.mark.asyncio
+async def test_every_question_carries_its_easier_version_with_its_own_rubric():
+    llm = FakeLLM([GOOD_APPLY, GOOD_REMEMBER.model_copy(update={"easier": version("What does resistivity depend on?")})],
+                  [_Verdicts(verdicts=ok(0, 1))])
+    result = await prep_questions(llm, REQUEST, generation_model="gen", verify_model="ver")
+    easier = result.questions[0].easier
+    assert easier.spoken_text == EASIER.spoken_text and easier.expected_points == ["e1", "e2"]
+    assert easier.hints == ["key idea", "smaller question"] and easier.misconceptions == ["m1", "m2"]
+    assert result.questions[1].easier.spoken_text == "What does resistivity depend on?"
+    assert '"easier": {' in llm.calls[2][2]  # the verifier sees it
+
+
+@pytest.mark.asyncio
+async def test_an_easier_version_failing_code_checks_or_the_verifier_is_null_but_the_question_stays():
+    adds_a_number = version("Define resistivity for a 3 m wire.")
+    rejected = [_Verdict(index=0, answer_to_reworded="a", ok=True, problem="", easier_ok=False)] + ok(1)
+    llm = FakeLLM([GOOD_APPLY, GOOD_REMEMBER.model_copy(update={"easier": adds_a_number})], [_Verdicts(verdicts=rejected)])
+    result = await prep_questions(llm, REQUEST, generation_model="gen", verify_model="ver")
+    assert [q.reworded_text for q in result.questions] == [GOOD_APPLY.reworded_text, GOOD_REMEMBER.reworded_text]
+    assert [q.easier for q in result.questions] == [None, None]
+    assert '"easier": null' in llm.calls[2][2]  # code-rejected easier never reaches the verifier
+    assert len(llm.calls) == 3                   # and causes no retry
+
+
+def test_code_checks_apply_to_the_easier_version():
+    from src.services.voice_prep import _without_bad_easier
+    orig = Q_APPLY["text"]
+    assert _without_bad_easier(orig, GOOD_APPLY).easier == EASIER
+    for bad in (version("A heater takes 5 A on 230 V. What is its resistance?"),
+                version("Write the law that links 220 V and 5 A."),
+                version("What is its resistance?", points=("a", "b", "c", "d")),
+                EASIER.model_copy(update={"hints": ["only one"]})):
+        assert _without_bad_easier(orig, GOOD_APPLY.model_copy(update={"easier": bad})).easier is None
+
+
+def test_prompts_ask_for_a_nudge_ladder_and_an_easier_version():
+    from src.services.voice_prep import GENERATE_SYSTEM, VERIFY_SYSTEM
+    prompt = GENERATE_SYSTEM.format(board="CBSE", grade=10, subject="Science")
+    assert "Hint 1 points the student to the key concept" in prompt and "smaller, easier sub-question" in prompt
+    assert "one notch more supported" in prompt and "one Bloom level lower" in prompt
+    assert "If `instruction` is given" in prompt
+    verify = VERIFY_SYSTEM.format(board="CBSE", grade=10, subject="Science")
+    assert "easier_ok=true only if" in verify
+
+
+@pytest.mark.asyncio
+async def test_an_instruction_reaches_the_generator():
+    request = PrepRequest(grade=10, subject="Science", chapter="Electricity", levels=["APPLY"],
+                          candidates=[{**Q_APPLY, "instruction": "Make it clearer to hear."}])
+    llm = FakeLLM([GOOD_APPLY], [_Verdicts(verdicts=ok(0))])
+    await prep_questions(llm, request, generation_model="gen", verify_model="ver")
+    assert '"instruction": "Make it clearer to hear."' in llm.calls[0][2]

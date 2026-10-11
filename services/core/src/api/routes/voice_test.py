@@ -96,10 +96,15 @@ def _question_out(question: VoiceTestQuestion) -> VoiceTestQuestionOut:
         misconceptions=question.misconceptions or [],
         hints=question.hints or [],
         status=question.status,
+        needs_rewording=question.needs_rewording,
+        asked_count=question.asked_count,
+        confused_count=question.confused_count,
+        has_easier_version=question.easier_version is not None,
     )
 
 
-async def _editable_question(session: AsyncSession, test_id: str, question_id: str, user: User) -> tuple[VoiceTest, VoiceTestQuestion]:
+async def _editable_question(session: AsyncSession, test_id: str, question_id: str, user: User,
+                             after_attempts: bool = False) -> tuple[VoiceTest, VoiceTestQuestion]:
     test = await get_test_for_teacher(session, test_id, user)
     try:
         question = await session.get(VoiceTestQuestion, uuid.UUID(question_id))
@@ -107,7 +112,7 @@ async def _editable_question(session: AsyncSession, test_id: str, question_id: s
         question = None
     if question is None or question.voice_test_id != test.id:
         raise NotFoundError("Question not found.")
-    if test.completed_count:
+    if test.completed_count and not after_attempts:
         # every student must be asked the same questions
         raise ConflictError("Students have already taken this test - its questions can't change now.")
     return test, question
@@ -288,6 +293,23 @@ async def swap_test_question(
     test, question = await _editable_question(session, test_id, question_id, user)
     if not await voice_test_prep.swap_question(session, test, question, user):
         raise ConflictError("No other question of this Bloom level is available for this chapter.")
+    await session.commit()
+    return _question_out(question)
+
+
+@router.post("/tests/{test_id}/questions/{question_id}/reword", summary="Re-word a question students found confusing")
+async def reword_test_question(
+    test_id: str,
+    question_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> VoiceTestQuestionOut:
+    """Allowed after students took the test - needs_rewording only ever comes
+    from their attempts; students from now on hear the clearer wording."""
+    test, question = await _editable_question(session, test_id, question_id, user, after_attempts=True)
+    if not await voice_test_prep.reword_question(session, test, question):
+        raise ConflictError("Couldn't re-word this question right now. Try again, or swap it.")
     await session.commit()
     return _question_out(question)
 

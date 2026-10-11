@@ -55,6 +55,11 @@ class VoiceTestQuestionOut(CamelModel):
     misconceptions: list[str]
     hints: list[str]
     status: VoiceTestQuestionStatus
+    # quality loop across students (ai_assessor.py's _count_confusion) - reword when flagged
+    needs_rewording: bool = False
+    asked_count: int = 0
+    confused_count: int = 0
+    has_easier_version: bool = False
 
 
 class VoiceTestQuestionListOut(CamelModel):

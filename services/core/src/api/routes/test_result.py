@@ -7,8 +7,17 @@ from shared.errors import NotFoundError
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.bloom import BloomScore
 from src.api.schemas.common import ListEnvelope
-from src.api.schemas.test_result import ClassTestResultOut, StudentTestResultOut
+from src.api.schemas.test_result import (
+    AnswerHighlights,
+    AnswerQuote,
+    ClassTestResultOut,
+    StudentAnswerOut,
+    StudentTestResultDetailOut,
+    StudentTestResultOut,
+)
 from src.domain.models import (
+    AiAssessorSession,
+    AiAssessorSessionRecord,
     BloomLevel,
     Chapter,
     Role,
@@ -17,8 +26,10 @@ from src.domain.models import (
     Topic,
     User,
     VoiceTest,
+    VoiceTestQuestion,
 )
 from src.repositories.lookups import get_test_for_teacher
+from src.services.evaluation_service import _normalize_bloom_label
 
 router = APIRouter(prefix="/api/v1", tags=["test-results"])
 
@@ -111,7 +122,7 @@ async def get_student_result(
     student_id: str,
     user: User = Depends(require_role(Role.TEACHER)),
     session: AsyncSession = Depends(get_db_session),
-) -> StudentTestResultOut:
+) -> StudentTestResultDetailOut:
     test = await get_test_for_teacher(session, test_id, user, ready=True)
     result = await session.execute(
         select(StudentTestResult).where(
@@ -121,9 +132,62 @@ async def get_student_result(
     student_result = result.scalar_one_or_none()
     if student_result is None:
         raise NotFoundError("Student didn't attempt this Test, or isn't in your class.")
-    return StudentTestResultOut(
+    answers = await _answers(session, test, student_result.student_id)
+    scored = [a for a in answers if a.score is not None and a.quote]
+    best = max(scored, key=lambda a: a.score, default=None)
+    weakest = min(scored, key=lambda a: a.score, default=None)
+    return StudentTestResultDetailOut(
         test_id=str(test.id),
         student_id=student_id,
         mastery_percent=student_result.mastery_percent,
         bloom_performance=await _bloom_performance_for(session, [student_result.id]),
+        answers=answers,
+        highlights=AnswerHighlights(
+            best=AnswerQuote(question_number=best.question_number, quote=best.quote) if best else None,
+            weakest=(AnswerQuote(question_number=weakest.question_number, quote=weakest.quote)
+                     if weakest and weakest.score < best.score else None),
+        ),
     )
+
+
+MAX_QUOTE = 160
+
+
+async def _answers(session: AsyncSession, test: VoiceTest, student_id) -> list[StudentAnswerOut]:
+    """Per question, from the student's latest graded session record:
+    colearner's finish answers (version, nudges, first answer) joined with
+    the grader's qa_transcripts (score) by question number."""
+    records = (await session.execute(
+        select(AiAssessorSessionRecord)
+        .join(AiAssessorSession, AiAssessorSession.id == AiAssessorSessionRecord.session_id)
+        .where(AiAssessorSession.test_id == test.id, AiAssessorSession.student_id == student_id,
+               AiAssessorSessionRecord.needs_review.is_(False))
+        .order_by(AiAssessorSessionRecord.created_at.desc())
+    )).scalars().all()
+    record = next((r for r in records if (r.report or {}).get("qa_transcripts")), None)
+    if record is None:
+        return []
+    questions = {q.order: q for q in (await session.execute(
+        select(VoiceTestQuestion).where(VoiceTestQuestion.voice_test_id == test.id))).scalars()}
+    asked = {a.get("question_number"): a for a in record.answers or [] if isinstance(a, dict)}
+    graded = {g.get("question_number"): g for g in record.report["qa_transcripts"] if isinstance(g, dict)}
+    out = []
+    for number in sorted(n for n in asked.keys() | graded.keys() if isinstance(n, int)):
+        a, g, q = asked.get(number, {}), graded.get(number, {}), questions.get(number)
+        version = "easier" if a.get("version") == "easier" else "standard"
+        if q is None:
+            text = str(g.get("question_asked") or "")
+        else:
+            text = q.easier_version["spoken_text"] if version == "easier" and q.easier_version else q.spoken_text
+        quote = " ".join(str(a.get("first_answer") or g.get("student_response") or "").split())
+        score = g.get("score_percent")
+        out.append(StudentAnswerOut(
+            question_number=number,
+            bloom_level=q.bloom_level if q else _normalize_bloom_label(g.get("blooms_attribute")),
+            question_text=text,
+            version=version,
+            nudges_used=int(a.get("hints_used") or g.get("hints_used") or 0),
+            score=round(score) if isinstance(score, (int, float)) else None,
+            quote=quote if len(quote) <= MAX_QUOTE else quote[:MAX_QUOTE - 1].rstrip() + "…",
+        ))
+    return out

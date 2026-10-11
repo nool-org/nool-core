@@ -1,7 +1,8 @@
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError
@@ -33,6 +34,7 @@ from src.domain.models import (
     VoiceTestQuestion,
     Role,
     StudentTestResult,
+    StudentTestResultBloomScore,
     VoiceTestTargetStudent,
 )
 from src.repositories import get_session
@@ -136,9 +138,38 @@ async def _colearner_config(
         config["questions"] = [{
             "id": str(q.id), "order": q.order, "bloom_level": q.bloom_level.value, "spoken_text": q.spoken_text,
             "expected_points": q.expected_points or [], "misconceptions": q.misconceptions or [],
-            "hints": q.hints or [],
+            "hints": q.hints or [], "easier": q.easier_version,
         } for q in questions]
+    student = await db.get(User, ai_session.student_id)
+    if student and (first_name := (student.display_name or "").split()[:1]):
+        config["student_name"] = first_name[0].title()
+    if student_context := await _student_context(db, ai_session):
+        config["student_context"] = student_context
     return config, num_questions
+
+
+async def _student_context(db: AsyncSession, ai_session: AiAssessorSession) -> str | None:
+    """One line on the student's last earlier voice test, for Milo to pitch
+    the session: "Last test: strong at X, found Y hard." None without one."""
+    query = (select(StudentTestResult.id).join(VoiceTest, VoiceTest.id == StudentTestResult.test_id)
+             .where(StudentTestResult.student_id == ai_session.student_id)
+             .order_by(VoiceTest.created_at.desc()).limit(1))
+    if ai_session.test_id is not None:
+        query = query.where(StudentTestResult.test_id != ai_session.test_id)
+    last_result = await db.scalar(query)
+    if last_result is None:
+        return None
+    scores = sorted((await db.execute(
+        select(StudentTestResultBloomScore.percent, StudentTestResultBloomScore.bloom_level).where(
+            StudentTestResultBloomScore.student_test_result_id == last_result,
+            StudentTestResultBloomScore.percent.is_not(None))
+    )).all(), key=lambda row: row[0])
+    if not scores:
+        return None
+    best, weakest = scores[-1][1].value.lower(), scores[0][1].value.lower()
+    if len(scores) == 1:
+        return f"Last test: scored {scores[0][0]}% on {best} questions."
+    return f"Last test: strong at {best} questions, found {weakest} questions hard."[:300]
 
 
 def _store_record(db: AsyncSession, ai_session: AiAssessorSession, result: dict, needs_review: bool = False):
@@ -164,6 +195,33 @@ def _awaiting_review(test_id, student_id):
     )
 
 
+async def _count_confusion(db: AsyncSession, test_id, result: dict) -> None:
+    """The quality loop across students: every question this session asked
+    counts once in asked_count, and in confused_count when the student asked
+    for it again twice, went silent, or never answered. Once asked twice and
+    confusing at least half the time it is flagged needs_rewording for the
+    teacher. Single UPDATEs, so concurrent finishes never lose a count."""
+    # asked = answered, or Milo got to it (transcript turns carry its number) - not the ones time ran out on
+    reached = {t.get("question_number") for t in result.get("transcript") or result.get("turns") or []
+               if isinstance(t, dict)}
+    confused: dict[uuid.UUID, bool] = {}
+    for a in result.get("answers") or []:
+        if not isinstance(a, dict) or not (a.get("first_answer") or a.get("question_number") in reached):
+            continue
+        try:
+            question_id = uuid.UUID(str(a.get("question_id")))
+        except ValueError:
+            continue
+        confused[question_id] = confused.get(question_id, False) or (
+            int(a.get("repeat_requests") or 0) >= 2 or int(a.get("silences") or 0) >= 1 or not a.get("first_answer"))
+    for question_id, was_confused in confused.items():
+        asked = VoiceTestQuestion.asked_count + 1
+        confusions = VoiceTestQuestion.confused_count + int(was_confused)
+        await db.execute(update(VoiceTestQuestion).where(
+            VoiceTestQuestion.id == question_id, VoiceTestQuestion.voice_test_id == test_id,
+        ).values(asked_count=asked, confused_count=confusions, needs_rewording=(asked >= 2) & (confusions * 2 >= asked)))
+
+
 async def _record_completion(
     ai_session: AiAssessorSession, bloom_levels: list[BloomLevel], result: dict,
     answered: int, num_questions: int, hints_used: int = 0,
@@ -176,6 +234,8 @@ async def _record_completion(
     report = result.get("report")
     grading_error = isinstance(report, dict) and bool(report.get("grading_error"))
     async with get_session() as completion_db:
+        if ai_session.test_id is not None:
+            await _count_confusion(completion_db, ai_session.test_id, result)
         if grading_error:
             logger.warning("ai_assessor_grading_failed_needs_review", extra={
                 "session_id": str(ai_session.id), "test_id": str(ai_session.test_id),

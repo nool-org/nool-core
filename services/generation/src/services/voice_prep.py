@@ -16,6 +16,10 @@ grader. Same LlamaIndex Workflow shape as gap_fill.py:
   (reworded_text = original_text, spoken_text derived in code) and, if its
   last draft had a well-formed rubric, that rubric. Core treats an unchanged
   reworded_text as "could not be made spoken" and drops the question.
+- every question also gets an `easier` version (same concept, one notch more
+  supported) from the same call, held to the same code checks and checked by
+  the verifier; a failing easier version comes back null - never sinking the
+  question itself.
 
 Stateless: core sends the candidates already chosen per Bloom level.
 """
@@ -56,6 +60,7 @@ class Candidate(BaseModel):
     subtopic_id: str | None = Field(default=None, max_length=100)
     concepts: list[str] = Field(default_factory=list, max_length=20)
     difficulty: Difficulty | None = None
+    instruction: str | None = Field(default=None, max_length=MAX_TEXT)  # e.g. a teacher's "make it clearer"
 
 
 class PrepRequest(BaseModel):
@@ -85,6 +90,13 @@ class PrepRequest(BaseModel):
         return out
 
 
+class EasierVersion(BaseModel):
+    spoken_text: str
+    expected_points: list[str]
+    misconceptions: list[str]
+    hints: list[str]
+
+
 class PreppedQuestion(BaseModel):
     order: int
     dataset_question_id: str
@@ -98,6 +110,7 @@ class PreppedQuestion(BaseModel):
     expected_points: list[str]
     misconceptions: list[str]
     hints: list[str]
+    easier: EasierVersion | None = None
 
 
 class PrepResult(BaseModel):
@@ -105,12 +118,16 @@ class PrepResult(BaseModel):
 
 
 # ---- LLM output shapes ---------------------------------------------------
-class _Rewording(BaseModel):
-    reworded_text: str = Field(description="the question asked a new way for speech, same concept and level")
+class _Version(BaseModel):
+    reworded_text: str = Field(description="the question asked a new way for speech")
     spoken_text: str = Field(description="reworded_text as Milo says it aloud: formulas and symbols in words")
-    expected_points: list[str] = Field(description="2-4 points a full answer must contain")
+    expected_points: list[str] = Field(description="2-4 points a full answer must contain (2-3 when easier)")
     misconceptions: list[str] = Field(description="2-3 common wrong ideas students have on this question")
-    hints: list[str] = Field(description="exactly 2: a gentle nudge, then a stronger one; never the answer")
+    hints: list[str] = Field(description="exactly 2: point to the key idea, then a smaller sub-question; never the answer")
+
+
+class _Rewording(_Version):
+    easier: _Version | None = Field(description="the same question one notch more supported, for a stuck student")
 
 
 class _Verdict(BaseModel):
@@ -118,6 +135,7 @@ class _Verdict(BaseModel):
     answer_to_reworded: str = Field(description="your own short answer to the reworded question")
     ok: bool
     problem: str = Field(description="empty when ok; otherwise what is wrong, specifically")
+    easier_ok: bool = Field(description="the easier version passes check 8; false when there is none")
 
 
 class _Verdicts(BaseModel):
@@ -153,8 +171,14 @@ Also write:
   If it now asks for two or three items, list the main ones and end with "Any two or three of these are enough.";
   if it asks how to find something, the points are the steps of reasoning, not the full calculation.
 - misconceptions: 2 or 3 common wrong ideas students of this class have about this question.
-- hints: exactly 2. First a gentle nudge, then a stronger one. A hint never states the answer
-  or any part of it; for a multi-part question, not even one part's answer.
+- hints: exactly 2, a nudge ladder. Hint 1 points the student to the key concept or idea to think
+  about, without naming the answer. Hint 2 is a smaller, easier sub-question that leads toward it.
+  A hint never states the answer or any part of it; for a multi-part question, not even one part's answer.
+- easier: the SAME question one notch more supported, for a student who is stuck. Same concept and
+  topic; simpler words and a more concrete ask; it may be one Bloom level lower. Every rule above
+  applies to it too. It has its own reworded_text, spoken_text, expected_points (2 or 3),
+  misconceptions (2 or 3) and hints (exactly 2, the same nudge ladder).
+If `instruction` is given, follow it.
 If `feedback` is given, your previous attempt was rejected for that reason - fix it."""
 
 VERIFY_SYSTEM = """You are a strict {board} Class {grade} {subject} teacher checking reworded voice-test questions.
@@ -169,6 +193,10 @@ Then ok=true only if ALL hold:
 5. spoken_text says the same thing as reworded_text, with symbols and formulas in words.
 6. expected_points agree with the dataset answer and match what the REWORDED question asks.
 7. No hint states the answer or any part of it (for a multi-part question, any one part's answer counts).
+   Hint 1 points to the key idea; hint 2 is a smaller sub-question that leads toward the answer.
+`ok` is about the reworded question only. Separately, easier_ok=true only if the `easier` version
+8. asks about the same concept and topic, is simpler (it may be one Bloom level lower), meets 3-7 above,
+   and its expected_points agree with the dataset answer for what it asks.
 If not ok, say precisely what is wrong in `problem`."""
 
 
@@ -197,7 +225,7 @@ def _has_word(text: str, word: str) -> bool:
 _MARKS = re.compile(r"[(\[]\s*\d+\s*(?:marks?)?\s*[)\]]\s*$", re.IGNORECASE)  # "(2)", "[3 marks]" at the end
 
 
-def _problems(original: str, draft: _Rewording) -> str | None:
+def _problems(original: str, draft: _Version, max_points: int = 4) -> str | None:
     """Everything that can be checked without a model; None when clean."""
     original = _MARKS.sub("", original.strip())
     text = draft.reworded_text.strip()
@@ -220,12 +248,19 @@ def _problems(original: str, draft: _Rewording) -> str | None:
     banned = [w for w in BANNED_WORDS if _has_word(text, w) and not _has_word(original, w)]
     if banned:
         return f"use simple Indian classroom English; avoid: {', '.join(banned)}"
-    return _rubric_problem(draft)
+    return _rubric_problem(draft, max_points)
 
 
-def _rubric_problem(draft: _Rewording) -> str | None:
-    if not 2 <= len(_clean(draft.expected_points)) <= 4:
-        return "expected_points must have 2 to 4 items"
+def _without_bad_easier(original: str, draft: _Rewording) -> _Rewording:
+    """The same code checks for the easier version; a failing one is dropped, not the question."""
+    if draft.easier is None or _problems(original, draft.easier, max_points=3) is None:
+        return draft
+    return draft.model_copy(update={"easier": None})
+
+
+def _rubric_problem(draft: _Version, max_points: int = 4) -> str | None:
+    if not 2 <= len(_clean(draft.expected_points)) <= max_points:
+        return f"expected_points must have 2 to {max_points} items"
     if not 2 <= len(_clean(draft.misconceptions)) <= 3:
         return "misconceptions must have 2 or 3 items"
     if len(_clean(draft.hints)) != 2:
@@ -295,6 +330,7 @@ class VoicePrepWorkflow(Workflow):
                 "question": c.text, "answer": c.answer, "bloom_level": c.bloom_level,
                 **({"difficulty": c.difficulty} if c.difficulty else {}),
                 **({"concepts": c.concepts} if c.concepts else {}),
+                **({"instruction": c.instruction} if c.instruction else {}),
                 **({"feedback": ev.feedback[i]} if i in ev.feedback else {}),
             }
             try:
@@ -322,7 +358,7 @@ class VoicePrepWorkflow(Workflow):
             if problem:
                 feedback[i] = problem
             else:
-                clean[i] = d
+                clean[i] = _without_bad_easier(picked[i].text, d)
         if clean:
             payload = {"items": [{
                 "index": i, "original": picked[i].text, "dataset_answer": picked[i].answer,
@@ -338,10 +374,11 @@ class VoicePrepWorkflow(Workflow):
                 logger.warning("voice_prep_verify_failed", extra={"items": len(clean), "error": type(exc).__name__})
                 verdicts = _Verdicts(verdicts=[])
             ok = {v.index for v in verdicts.verdicts if v.ok}
+            easier_ok = {v.index for v in verdicts.verdicts if v.easier_ok}
             problems = {v.index: v.problem for v in verdicts.verdicts if not v.ok}
             for i, d in clean.items():
                 if i in ok:
-                    accepted[i] = d
+                    accepted[i] = d if i in easier_ok else d.model_copy(update={"easier": None})
                 else:
                     feedback[i] = problems.get(i) or "not verified"
         failed = [i for i in ev.indexes if i not in accepted]
@@ -369,6 +406,10 @@ def _result(i: int, c: Candidate, accepted: _Rewording | None, last: _Rewording 
         expected_points=_clean(rubric.expected_points) if rubric else [],
         misconceptions=_clean(rubric.misconceptions) if rubric else [],
         hints=_clean(rubric.hints) if rubric else [],
+        easier=EasierVersion(
+            spoken_text=accepted.easier.spoken_text.strip(), expected_points=_clean(accepted.easier.expected_points),
+            misconceptions=_clean(accepted.easier.misconceptions), hints=_clean(accepted.easier.hints),
+        ) if accepted and accepted.easier else None,
     )
 
 
