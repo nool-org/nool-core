@@ -4,6 +4,9 @@
 # nginx/conf.d/default.conf directly. Only ${UPPERCASE} vars that are set
 # in the container env are substituted; nginx's own $vars pass through.
 # Routes/timeouts mirror nginx/conf.d/default.conf - keep them in step.
+#
+# TLS is terminated by Caddy (caddy/Caddyfile), the only public listener;
+# this server is plain :80 on the Compose network and publishes no ports.
 
 map $http_x_request_id $req_id {
     default   $http_x_request_id;
@@ -19,6 +22,15 @@ map $http_origin $cors_origin {
     default "";
     include /etc/nginx/cors_origins.map;
 }
+
+# Only Caddy reaches this server (no published ports), and Caddy replaces
+# any client-sent X-Forwarded-For with the real client address - so take
+# the client IP from it for limit_req and logs. Private ranges = the
+# Compose network, whatever subnet Docker picked.
+set_real_ip_from 10.0.0.0/8;
+set_real_ip_from 172.16.0.0/12;
+set_real_ip_from 192.168.0.0/16;
+real_ip_header X-Forwarded-For;
 
 # Per client IP. A whole school can sit behind one NAT address, so the
 # general limit is generous; /auth/ (password login) is the strict one.
@@ -38,38 +50,10 @@ upstream colearner_service {
     server colearner:8000;
 }
 
-# :80 - ACME http-01 challenges + plain /health (container healthcheck);
-# everything else goes to https.
 server {
     listen 80;
-    server_name _;
-
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
-
-    location = /health {
-        access_log off;
-        default_type application/json;
-        return 200 '{"status":"ok"}';
-    }
-
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl;
-    http2 on;
     server_tokens off;
-    server_name ${NGINX_SERVER_NAME};
-
-    ssl_certificate     ${NGINX_SSL_CERT};
-    ssl_certificate_key ${NGINX_SSL_KEY};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 1d;
+    server_name _;
 
     # All proxy_set_header at server level: a location that sets any of its
     # own would silently drop every inherited one. Upgrade/Connection are
@@ -78,7 +62,7 @@ server {
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
     proxy_set_header X-Request-ID $req_id;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;

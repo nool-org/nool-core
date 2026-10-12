@@ -177,26 +177,21 @@ grader prompt, schema or model; see `services/colearner/evals/README.md`.
 
 ## Deploying (production)
 
-Production uses `compose.prod.yml` (see `compose.prod.yml` for the exact
-services, images and settings) instead of `compose.override.yml`. Intended
-usage:
+Production uses `compose.prod.yml` instead of `compose.override.yml`:
+Caddy (automatic Let's Encrypt TLS, `caddy/Caddyfile`) is the only public
+listener and proxies to nginx; migrations run as the one-shot `migrate`
+service before core starts; the `backup` service takes a nightly
+`pg_dump`. Every `.env` key is in `.env.production.example`.
 
-1. Provision managed PostgreSQL and put its credentials, the Firebase
-   service account, `OPENAI_API_KEY`, `NOOL_KG_BASE_URL`
-   and the asset storage settings into the server's environment / `.env`
-   (never into the repo).
-2. Build and start: `docker compose -f compose.yml -f compose.prod.yml up -d --build`.
-3. Run migrations: `./scripts/migrate.sh` (see `database/README.md`).
-4. Check readiness: `/health`, `/auth/ready` and `/api/ready` through
-   NGINX, and `docker compose ps` for the internal services (colearner,
-   generation, kg are not exposed; their `/ready` reports 503 until their
-   keys/config are present).
-5. Keep colearner at **one replica** (in-memory session state) and keep
-   `PLAYGROUND_ENABLED` unset.
+The full server runbook (Hostinger VPS, firewall, DNS, Firebase production
+project, first Super Admin, backups, updates/rollback, monitoring and the
+pre-launch checklist) is `docs/DEPLOY_HOSTINGER.md`.
 
-Roll back by redeploying the previous image tag / git revision with the
-same command; if the rollback crosses a migration, downgrade it first
-(`./scripts/migrate.sh downgrade -1`, see `database/README.md`).
+Keep colearner at **one replica** (in-memory session state);
+`ENVIRONMENT=production` disables the playground regardless of
+`PLAYGROUND_ENABLED`. The pilot runs PostgreSQL in Docker on the server;
+moving to managed PostgreSQL later is a config change (see the runbook's
+"Later: managed PostgreSQL").
 
 ## Linting / type-checking
 

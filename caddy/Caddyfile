@@ -1,0 +1,37 @@
+# Public TLS entry point for compose.prod.yml - the only container that
+# publishes host ports (80/443). Caddy obtains and renews Let's Encrypt
+# certificates for each site below on its own (certs persist in the
+# caddy_data volume), redirects http -> https (308), and serves HTTP/3.
+# {$VAR} values come from .env via compose.prod.yml - see
+# .env.production.example. Dev never uses this file.
+#
+# reverse_proxy passes WebSocket upgrades through and sets
+# X-Forwarded-For/-Proto itself (ignoring any client-sent copies), which
+# nginx's real_ip settings rely on for per-client rate limits.
+
+{
+	email {$ACME_EMAIL}
+	# Fixed IPv4 address (container-local) for compose.prod.yml's healthcheck.
+	admin 127.0.0.1:2019
+}
+
+(hsts) {
+	header Strict-Transport-Security "max-age=31536000"
+}
+
+# App + admin consoles' API calls. nginx keeps routing, CORS, rate limits
+# and security headers (incl. HSTS) - nothing is duplicated here.
+{$API_DOMAIN} {
+	reverse_proxy nginx:80
+}
+
+# Admin consoles (Next.js) - compose.prod.yml's "admin" profile.
+{$SCHOOL_ADMIN_DOMAIN} {
+	import hsts
+	reverse_proxy school-admin:3000
+}
+
+{$SUPER_ADMIN_DOMAIN} {
+	import hsts
+	reverse_proxy super-admin:3000
+}

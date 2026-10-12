@@ -1,30 +1,18 @@
 # Production overlay - use INSTEAD of compose.override.yml:
 #
 #   docker compose -f compose.yml -f compose.prod.yml up -d --build
+#   docker compose -f compose.yml -f compose.prod.yml --profile admin up -d      # + admin consoles
 #   docker compose -f compose.yml -f compose.prod.yml --profile kg-local up -d   # + local nool-kg
 #
 # What changes vs dev: code comes from the images (no source bind-mounts, no
-# --reload - the Dockerfiles' own CMD runs), only nginx publishes host ports
-# (80/443, TLS), migrations run as a one-shot "migrate" service before core
-# starts, and a "backup" service takes a nightly pg_dump.
+# --reload - the Dockerfiles' own CMD runs), only Caddy publishes host ports
+# (80/443, automatic Let's Encrypt TLS - see caddy/Caddyfile) in front of
+# nginx, migrations run as a one-shot "migrate" service before core starts,
+# a "backup" service takes a nightly pg_dump, and the colearner playground
+# is forced off. No azurite (dev-only, compose.override.yml).
 #
-# Extra .env keys (all optional except the TLS files existing):
-#   NGINX_SERVER_NAME        api.example.in (default "_")
-#   NGINX_CERTS_DIR          host dir mounted at /etc/nginx/certs (default ./secrets/tls)
-#   NGINX_SSL_CERT / _KEY    paths inside that mount (default fullchain.pem / privkey.pem)
-#   ACME_WEBROOT             host dir served at /.well-known/acme-challenge/ (default ./secrets/acme-webroot)
-#   NGINX_CORS_ORIGINS       "https://admin.example.in https://pm.example.in" - browser origins allowed
-#   NGINX_API_RATE/_BURST, NGINX_AUTH_RATE/_BURST   per-IP limit_req settings
-#   NGINX_HTTP_PORT / NGINX_HTTPS_PORT              host ports (default 80 / 443)
-#   BACKUP_HOUR_UTC, BACKUP_KEEP_DAYS               nightly dump time / retention
-#   NOOL_KG_BASE_URL, NOOL_KG_API_KEY, FALKORDB_*   see the nool-kg service below
-#
-# Let's Encrypt (host certbot, webroot mode):
-#   certbot certonly --webroot -w "$ACME_WEBROOT" -d api.example.in
-#   NGINX_CERTS_DIR=/etc/letsencrypt
-#   NGINX_SSL_CERT=/etc/nginx/certs/live/api.example.in/fullchain.pem
-#   NGINX_SSL_KEY=/etc/nginx/certs/live/api.example.in/privkey.pem
-#   renew deploy hook: docker compose -f compose.yml -f compose.prod.yml exec nginx nginx -s reload
+# Every .env key is listed in .env.production.example; the step-by-step
+# server runbook is docs/DEPLOY_HOSTINGER.md.
 
 services:
   postgres:
@@ -32,6 +20,10 @@ services:
 
   jaeger:
     ports: !reset []
+    environment:
+      # In-memory store, internal only (no published port) - cap it so a
+      # long-running server doesn't grow it without bound.
+      MEMORY_MAX_TRACES: ${JAEGER_MAX_TRACES:-20000}
 
   migrate:
     # Same image/env as core; alembic.ini lives in /app/database - this is
@@ -99,6 +91,7 @@ services:
     command: !reset null
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      PLAYGROUND_ENABLED: "false"
     volumes: !override
       - ${FIREBASE_CREDENTIALS_HOST_PATH:-./secrets/firebase-service-account.json}:/app/secrets/firebase-service-account.json:ro
     ports: !reset []
@@ -118,13 +111,9 @@ services:
       - nool_network
 
   nginx:
-    ports: !override
-      - "${NGINX_HTTP_PORT:-80}:80"
-      - "${NGINX_HTTPS_PORT:-443}:443"
+    # Internal only - Caddy below is the public entry point and proxies here.
+    ports: !reset []
     environment:
-      NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-_}
-      NGINX_SSL_CERT: ${NGINX_SSL_CERT:-/etc/nginx/certs/fullchain.pem}
-      NGINX_SSL_KEY: ${NGINX_SSL_KEY:-/etc/nginx/certs/privkey.pem}
       NGINX_CORS_ORIGINS: ${NGINX_CORS_ORIGINS:-}
       NGINX_API_RATE: ${NGINX_API_RATE:-30r/s}
       NGINX_API_BURST: ${NGINX_API_BURST:-60}
@@ -136,8 +125,57 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/templates:/etc/nginx/templates:ro
       - ./nginx/docker-entrypoint.d/15-cors-origins.sh:/docker-entrypoint.d/15-cors-origins.sh:ro
-      - ${NGINX_CERTS_DIR:-./secrets/tls}:/etc/nginx/certs:ro
-      - ${ACME_WEBROOT:-./secrets/acme-webroot}:/var/www/certbot:ro
+
+  # TLS termination + http->https redirect for every public hostname - see
+  # caddy/Caddyfile. The only service with host ports.
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN in .env}
+      SCHOOL_ADMIN_DOMAIN: ${SCHOOL_ADMIN_DOMAIN:?set SCHOOL_ADMIN_DOMAIN in .env}
+      SUPER_ADMIN_DOMAIN: ${SUPER_ADMIN_DOMAIN:?set SUPER_ADMIN_DOMAIN in .env}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates + ACME account - must persist, or every restart
+      # re-issues and soon hits Let's Encrypt's rate limits.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      nginx:
+        condition: service_healthy
+    healthcheck:
+      # Caddy's admin API - bound to 127.0.0.1 inside the container only
+      # (global options in caddy/Caddyfile).
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - nool_network
+
+  # Admin consoles - images built in their own repos (nool-school-admin,
+  # nool-super-admin: `docker compose build` there with the production
+  # NEXT_PUBLIC_* values, which are baked in at build time). Only started
+  # with --profile admin; reached solely through Caddy, no host ports.
+  school-admin:
+    image: nool-school-admin-web:latest
+    profiles: ["admin"]
+    restart: unless-stopped
+    networks:
+      - nool_network
+
+  super-admin:
+    image: nool-super-admin-web:latest
+    profiles: ["admin"]
+    restart: unless-stopped
+    networks:
+      - nool_network
 
   backup:
     # Same image as postgres so pg_dump's major version matches the server.
@@ -165,3 +203,7 @@ services:
 volumes:
   postgres_backups:
     name: nool_core_postgres_backups
+  caddy_data:
+    name: nool_core_caddy_data
+  caddy_config:
+    name: nool_core_caddy_config

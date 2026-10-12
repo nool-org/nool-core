@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Smoke check for a running compose.prod.yml stack, through nginx only.
+# Smoke check for a running compose.prod.yml stack, through Caddy + nginx.
 #
-#   ./scripts/prod-smoke.sh                                    # localhost 80/443
-#   HTTP=http://127.0.0.1:18080 HTTPS=https://127.0.0.1:18443 ORIGIN=https://admin.example.in ./scripts/prod-smoke.sh
+#   API_DOMAIN=api.example.in ORIGIN=https://admin.example.in ./scripts/prod-smoke.sh
+#   HTTP=http://... HTTPS=https://... ./scripts/prod-smoke.sh   # explicit URLs
 #
-# ORIGIN must be one of NGINX_CORS_ORIGINS. -k: works with a self-signed cert.
+# ORIGIN must be one of NGINX_CORS_ORIGINS. -k: also works before the real
+# Let's Encrypt cert is issued (or with API_DOMAIN=localhost, Caddy's own CA).
 set -uo pipefail
-HTTP=${HTTP:-http://127.0.0.1}
-HTTPS=${HTTPS:-https://127.0.0.1}
+HTTP=${HTTP:-http://${API_DOMAIN:-localhost}}
+HTTPS=${HTTPS:-https://${API_DOMAIN:-localhost}}
 ORIGIN=${ORIGIN:-}
 fail=0
 
@@ -17,8 +18,7 @@ check() {  # name expected actual
 code() { curl -sk -o /dev/null -w '%{http_code}' "$@"; }
 header() { curl -sk -D - -o /dev/null "${@:2}" | tr -d '\r' | grep -i "^$1:" | cut -d' ' -f2-; }
 
-check "http /health"              200 "$(code "$HTTP/health")"
-check "http redirects to https"   301 "$(code "$HTTP/api/v1/x")"
+check "http redirects to https"   308 "$(code "$HTTP/api/v1/x")"
 check "https /health"             200 "$(code "$HTTPS/health")"
 check "auth /health"              200 "$(code "$HTTPS/auth/health")"
 check "core needs auth"           401 "$(code "$HTTPS/api/v1/admin/schools")"
