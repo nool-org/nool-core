@@ -519,6 +519,7 @@ async def test_class_summary(db_session):
     assert by_name["Kid 0"].practised_today and by_name["Kid 0"].streak_days == 2
     assert by_name["Kid 0"].last_practised_on == today
     assert not by_name["Kid 1"].practised_today and by_name["Kid 1"].last_practised_on is None
+    assert (by_name["Kid 1"].answered_today, by_name["Kid 1"].items_today) == (0, 0)  # never opened today
     assert by_name["Kid 2"].last_practised_on == today - timedelta(days=2) and by_name["Kid 2"].streak_days == 0
     # Asha got everything wrong: every current-chapter topic she practised is 100% struggling
     assert summary.weakest_topics and all(w.struggling_percent == 100 for w in summary.weakest_topics)

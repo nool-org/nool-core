@@ -629,12 +629,20 @@ async def class_summary(session: AsyncSession, class_id: uuid.UUID, day: date) -
         if reason:
             slipping.append({"student_id": str(student_id), "name": name, "reason": reason})
 
+    # today's progress for students who started but haven't finished
+    progress = {sid: (answered, total) for sid, answered, total in (await session.execute(
+        select(DailyPracticeSession.student_id, func.count(DailyPracticeItem.answered_at), func.count(DailyPracticeItem.id))
+        .join(DailyPracticeItem, DailyPracticeItem.session_id == DailyPracticeSession.id)
+        .where(DailyPracticeSession.student_id.in_(ids), DailyPracticeSession.practice_date == day)
+        .group_by(DailyPracticeSession.student_id))).all()} if ids else {}
+
     return {
         "date": day,
         "current_chapter": {"id": str(chapter.id), "name": chapter.name} if chapter else None,
         "student_count": len(students),
         "practised_count": sum(day in dates[s] for s in ids),
         "students": [{"id": str(s), "name": name, "practised_today": day in dates[s],
+                      "answered_today": progress.get(s, (0, 0))[0], "items_today": progress.get(s, (0, 0))[1],
                       "streak_days": streak_days(dates[s], day),
                       "last_practised_on": max(dates[s], default=None)} for s, name in students],
         "weakest_topics": weakest,

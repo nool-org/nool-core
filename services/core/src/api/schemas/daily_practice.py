@@ -98,6 +98,8 @@ class SummaryStudentOut(CamelModel):
     id: str
     name: str
     practised_today: bool
+    answered_today: int = 0  # questions answered in today's set (in progress when < items_today)
+    items_today: int = 0
     streak_days: int
     last_practised_on: dt.date | None
 
