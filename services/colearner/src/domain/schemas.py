@@ -66,6 +66,12 @@ class SessionConfig(BaseModel):
         max_length=300,
         description="One line about the student's last test, e.g. \"Last test: strong at Remember, found Apply hard.\""
     )
+    student_focus: Optional[str] = Field(
+        default=None,
+        max_length=600,
+        description="How the student did on this chapter's topic quizzes, e.g. \"Found Apply hard on Ohm's law "
+                    "(still hard after homework). Has mastered: Current, Power.\""
+    )
     questions: Optional[List[LiveQuestion]] = Field(
         default=None,
         max_length=10,

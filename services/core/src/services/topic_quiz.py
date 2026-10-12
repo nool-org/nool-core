@@ -383,6 +383,37 @@ async def build_homework(quiz_id: uuid.UUID) -> None:
         logger.exception("topic_quiz_homework_failed", extra={"quiz_id": str(quiz_id)})
 
 
+# ------------------------------------------------------------------ co-learner
+FOCUS_MAX = 600  # colearner's SessionConfig.student_focus
+
+
+async def chapter_focus(session: AsyncSession, student: User, chapter_id) -> str | None:
+    """One line for Milo on how the student did on the chapter's topic
+    quizzes - where they found a thinking skill hard (and whether it still is
+    after homework) and what they've mastered. None before any quiz."""
+    if chapter_id is None:
+        return None
+    hard, mastered = [], []
+    for loop in await loop_of(session, student, chapter_id):
+        latest = loop.recheck if loop.recheck and loop.recheck.outcome else loop.quiz
+        if latest is None or latest.outcome is None:
+            continue
+        name = daily_practice.tidy(loop.topic.name)
+        if loop.stage == "mastered":
+            mastered.append(name)
+            continue
+        levels = " and ".join(level.title() for level in (latest.analysis or {}).get("lagging", [])[:2]) or "it"
+        note = {"needs_teacher": " (still hard after homework)", "recheck": " (homework done)"}.get(loop.stage, "")
+        hard.append(f"found {levels} hard on {name}{note}")
+    parts = []
+    if hard:
+        line = "; ".join(hard)
+        parts.append(line[0].upper() + line[1:] + ".")
+    if mastered:
+        parts.append(f"Has mastered: {', '.join(mastered)}.")
+    return " ".join(parts)[:FOCUS_MAX] or None
+
+
 # ------------------------------------------------------------------ teacher
 async def class_topic_summary(session: AsyncSession, class_id: uuid.UUID, chapter_id: uuid.UUID) -> list[dict]:
     """Per taught topic of the chapter: how many students quizzed, their

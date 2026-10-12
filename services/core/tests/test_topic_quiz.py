@@ -333,3 +333,23 @@ async def test_a_spoken_answer_counts_at_its_level_and_feeds_the_analysis(db_ses
     assert a.per_bloom[U] == 67 and a.lagging == [U] and a.outcome == "homework"  # 2 MCQs right, spoken 30
     [missed] = calls[0]["missed"]
     assert missed["question"].startswith("(answered aloud)") and missed["chosen"] == "current goes up I think"
+
+
+async def test_chapter_focus_tells_milo_what_was_hard_and_what_is_mastered(db_session, monkeypatch):
+    s = await _seed(db_session)
+    assert await service.chapter_focus(db_session, s.student, s.electricity.id) is None  # no quiz yet
+    for topic in (s.ohm, s.power, s.current):
+        await _teach(db_session, s, topic)
+        await _pools(db_session, topic)
+    _stub_analysis(monkeypatch, [])
+    ohm = await _start(db_session, s, s.ohm)
+    await _answer(db_session, s, ohm, {R, U})  # Apply and Analyze lag
+    await _finish(db_session, s, ohm)
+    power = await _start(db_session, s, s.power)
+    await _answer(db_session, s, power, {R, U, A, AN})
+    await _finish(db_session, s, power)
+    await _start(db_session, s, s.current)  # opened, not finished: not mentioned
+
+    focus = await service.chapter_focus(db_session, s.student, s.electricity.id)
+    assert focus == "Found Apply and Analyze hard on Ohm's law. Has mastered: Power."
+    assert await service.chapter_focus(db_session, s.student, s.light.id) is None

@@ -38,7 +38,7 @@ from src.domain.models import (
     VoiceTestTargetStudent,
 )
 from src.repositories import get_session
-from src.services import ai_usage
+from src.services import ai_usage, topic_quiz
 from src.services.colearner_client import create_realtime_call, finish_realtime_call
 from src.api.routes.gamification import apply_xp, session_xp
 from src.services.evaluation_service import evaluate_colearner_session, topic_scores
@@ -146,6 +146,8 @@ async def _colearner_config(
         config["student_name"] = first_name[0].title()
     if student_context := await _student_context(db, ai_session):
         config["student_context"] = student_context
+    if test and student and (focus := await topic_quiz.chapter_focus(db, student, test.chapter_id)):
+        config["student_focus"] = focus
     return config, num_questions
 
 

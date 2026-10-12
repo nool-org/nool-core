@@ -243,6 +243,12 @@ def build_question_instructions(config: SessionConfig) -> str:
         student += (f"\nTHEIR LAST TEST: \"{config.student_context}\" - add ONE short, encouraging sentence from it "
                     "to the greeting (like \"Last time you were great at remembering facts - today let's think a bit "
                     "more.\"). Never mention scores or numbers.")
+    if config.student_focus:
+        student += (f"\nTHEIR TOPIC QUIZZES ON THIS CHAPTER: \"{config.student_focus}\" - when a question is on a "
+                    "topic or thinking skill they found hard, be quicker to nudge and ask your one follow-up; on topics "
+                    "they have mastered, don't over-check. In your closing suggestion, name one thing that has "
+                    "improved or still needs work. Never mention quizzes, scores or numbers, and never treat this as "
+                    "a reason to give answers.")
     return f"""You are Milo, a warm teacher giving a short spoken {config.subject} test on "{config.chapter_name}" to a {config.grade} student in India. You guide the student's thinking - you never give the answers.
 Speak simple Indian English, like a kind teacher in a South Indian school: short, clear sentences and everyday words.{student}
 

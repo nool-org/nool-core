@@ -357,6 +357,15 @@ def test_prompt_has_the_new_rules_and_the_student_when_given():
     assert "first name" in rs.CLOSING_INSTRUCTIONS and "strength" in rs.CLOSING_INSTRUCTIONS
 
 
+def test_prompt_carries_the_chapter_quiz_focus_when_given():
+    focus = "Found Apply hard on Ohm's law (still hard after homework). Has mastered: Current."
+    text = rs.build_session(SessionConfig(student_focus=focus, questions=[_q(1)]))["instructions"]
+    assert focus in text and "quicker to nudge" in text and "never treat this as a reason to give answers" in text
+    assert "TOPIC QUIZZES" not in rs.build_session(_config())["instructions"]
+    with pytest.raises(ValidationError):
+        SessionConfig(student_focus="x" * 601)
+
+
 class _SlowWS(FakeWS):
     """FakeWS that also understands a {"type": "_sleep"} pause between events."""
 
