@@ -1,0 +1,27 @@
+from datetime import datetime
+from typing import Literal
+
+from src.api.schemas.common import CamelModel
+
+
+class TaskStepOut(CamelModel):
+    kind: Literal["quiz", "homework", "recheck", "voice_test", "mcq_check"]
+    label: str
+    status: Literal["done", "current", "waiting", "locked", "skipped"]
+    due_at: datetime | None
+    target_id: str | None  # what the step opens: topic, homework, voice test or MCQ check id
+    note: str | None
+
+
+class TaskOut(CamelModel):
+    id: str
+    kind: Literal["topic", "test"]
+    title: str
+    subtitle: str
+    state: Literal["open", "done"]
+    result: str | None
+    steps: list[TaskStepOut]
+
+
+class TasksOut(CamelModel):
+    tasks: list[TaskOut]

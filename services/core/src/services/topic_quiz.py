@@ -54,7 +54,7 @@ RECHECK_SIZE = 6
 VOICE_LEVELS = [BloomLevel.UNDERSTAND, BloomLevel.APPLY]  # the 2 spoken answers on a first quiz
 LAGGING_BELOW = daily_practice.GOOD_SCORE  # a level under 70% right is lagging
 HOMEWORK_QUESTIONS = 5
-HOMEWORK_WINDOW_HOURS = 72
+HOMEWORK_WINDOW_HOURS = 12  # topic homework is due the same day
 
 
 # ------------------------------------------------------------------ pure parts

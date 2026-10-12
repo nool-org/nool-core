@@ -38,3 +38,4 @@ class HomeworkQaConfirmationOut(CamelModel):
     # the MCQ check this homework unlocks (its questions are being built) - the app opens it next
     mcq_test_id: str | None = None
     recheck_topic_id: str | None = None  # a topic quiz's homework: its re-check quiz is open now
+    early_bonus_xp: int = 0  # for finishing before the window ran out (student_tasks.EARLY_BONUS)

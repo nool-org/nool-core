@@ -8,11 +8,12 @@ source catalog; this is a single student's own kept-for-later set.
 
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.models import Homework, HomeworkQuestion, PracticeBankEntry, VoiceTest
+from src.domain.models import Chapter, Homework, HomeworkQuestion, PracticeBankEntry, Topic, VoiceTest
 
 
 async def archive_homework_questions(
@@ -27,7 +28,11 @@ async def archive_homework_questions(
     is edited/replaced afterwards (see PracticeBankEntry's docstring on
     why it's a standalone copy).
     """
-    test = await session.get(VoiceTest, homework.test_id)
+    test = await session.get(VoiceTest, homework.test_id) if homework.test_id else None
+    if test is None and homework.topic_id:  # a topic quiz's homework: file it under its topic
+        topic = await session.get(Topic, homework.topic_id)
+        chapter = await session.get(Chapter, topic.chapter_id)
+        test = SimpleNamespace(subject_id=chapter.subject_id, chapter_id=chapter.id, topic_id=topic.id)
 
     existing = await session.execute(
         select(PracticeBankEntry.source_question_id).where(

@@ -42,7 +42,7 @@ from src.domain.models import (
 from src.domain.models.homework import HomeworkAnswer
 from src.services.colearner_insight_client import ColearnerInsightUnavailableError, generate_homework_insight
 from src.services.practice_bank import archive_homework_questions
-from src.services import mcq_test
+from src.services import mcq_test, student_tasks
 
 router = APIRouter(prefix="/api/v1", tags=["homework-student"])
 logger = get_logger(__name__)
@@ -288,12 +288,21 @@ async def confirm_completion(
     guarantee, safe to run again on replay.
     """
     progress = await _progress_in(session, homework_id, user.id)
+    first_time = progress.status != StudentHomeworkStatus.COMPLETED
     progress.qa_completed = True
-    progress.confirmed_at = datetime.now(timezone.utc)
+    # the first completion time stands - it decides the early-finish bonus
+    progress.confirmed_at = progress.confirmed_at if not first_time and progress.confirmed_at else datetime.now(
+        timezone.utc)
     progress.status = StudentHomeworkStatus.COMPLETED
     await session.flush()
 
     hw = await session.get(Homework, homework_id)
+    early_xp = 0
+    if hw is not None and first_time:
+        early_xp = student_tasks.early_bonus_xp(hw.created_at, hw.completion_window_hours, progress.confirmed_at)
+        if early_xp:
+            await mcq_test.award_points(session, user.id, early_xp)
+            await apply_xp(session, user.id, early_xp)
     if hw is not None:
         completed = await session.execute(
             select(func.count()).where(
@@ -322,7 +331,8 @@ async def confirm_completion(
     await session.commit()
     return HomeworkQaConfirmationOut(confirmed_at=progress.confirmed_at,
                                      mcq_test_id=str(mcq_id) if mcq_id else None,
-                                     recheck_topic_id=str(hw.topic_id) if hw is not None and hw.topic_id else None)
+                                     recheck_topic_id=str(hw.topic_id) if hw is not None and hw.topic_id else None,
+                                     early_bonus_xp=early_xp)
 
 
 @router.post("/me/homework/{homework_id}/questions/{question_id}/answer")
