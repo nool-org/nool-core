@@ -1,0 +1,284 @@
+"""Topic quizzes: quiz levels, per-level scores and lagging levels, then the
+loop end to end - quiz -> analysis -> homework -> re-check -> mastered or
+flagged for the teacher - and the teacher's chapter summary.
+
+Real rows against the dev Postgres via db_session (seeded like daily
+practice); the generation service is stubbed - no model calls."""
+
+import pytest
+from fastapi import BackgroundTasks
+from sqlalchemy import select
+
+from shared.errors import ConflictError, NotFoundError
+from src.api.routes import daily_practice as practice_routes
+from src.api.routes import topic_quizzes as routes
+from src.api.schemas.daily_practice import PracticeMcqAnswerIn
+from src.api.schemas.topic_quiz import QuizStartIn
+from src.domain.models import (
+    AssignmentTargetMode,
+    BloomLevel,
+    Homework,
+    HomeworkDifficulty,
+    HomeworkStatus,
+    StudentHomeworkProgress,
+    StudentHomeworkStatus,
+)
+from src.services import topic_quiz as service
+from tests.test_daily_practice import _pool, _seed, _teach
+
+B = BloomLevel
+R, U, A, AN = "REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE"
+
+
+def test_quiz_levels():
+    assert service.quiz_levels(1) == [B.REMEMBER, B.REMEMBER, B.UNDERSTAND, B.UNDERSTAND,
+                                      B.APPLY, B.APPLY, B.ANALYZE, B.ANALYZE]
+    assert service.quiz_levels(2, [A]) == [B.APPLY, B.APPLY, B.REMEMBER, B.UNDERSTAND, B.ANALYZE, B.APPLY]
+    assert service.quiz_levels(2, [AN, A, U]) == [B.ANALYZE, B.ANALYZE, B.APPLY, B.APPLY, B.UNDERSTAND,
+                                                  B.UNDERSTAND]
+
+
+def test_scores_lagging_and_outcome():
+    scores = service.per_bloom([(B.APPLY, False), (B.REMEMBER, True), (B.REMEMBER, False), (B.APPLY, False),
+                                (B.UNDERSTAND, True)])
+    assert scores == {R: 50, U: 100, A: 0}
+    assert service.lagging_levels(scores) == [A, R]
+    assert service.lagging_levels({R: 50, A: 50}) == [R, A]  # tie: the lower level first
+    assert list(service.ordered({A: 0, AN: 0, R: 100, U: 100})) == [R, U, A, AN]  # JSONB's order -> Bloom's
+    assert service.ordered(None) is None
+    assert service.outcome_of(1, []) == service.outcome_of(2, []) == "mastered"
+    assert service.outcome_of(1, [A]) == "homework" and service.outcome_of(2, [A]) == "needs_teacher"
+
+
+async def _pools(db, topic):
+    for level in service.LEVELS:
+        for q in await _pool(db, topic, 4, bloom_level=level):
+            q.text += f" {level.value}"
+    await db.flush()
+
+
+def _stub_analysis(monkeypatch, calls):
+    async def analysis(payload):
+        calls.append(payload)
+        return {"summary": "Good recall.", "lagging_meaning": "Using it is hard.", "need_to_know": ["V = IR"],
+                "next_step": "Do the homework."}
+    monkeypatch.setattr(service.generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(service.generation_client, "quiz_analysis", analysis)
+
+
+async def _answer(db, s, quiz, right_levels):
+    for item in quiz.items:
+        option = 1 if item.bloom_level in right_levels else 0  # pool questions: index 1 is right
+        await practice_routes.answer_my_daily_practice_mcq(quiz.id, item.id, PracticeMcqAnswerIn(option_index=option),
+                                                           user=s.student, session=db)
+
+
+async def _start(db, s, topic, attempt=1):
+    return await routes.start_my_topic_quiz(str(topic.id), QuizStartIn(attempt=attempt), user=s.student, session=db)
+
+
+async def _finish(db, s, quiz, tasks=None):
+    return await routes.finish_my_topic_quiz(quiz.id, background_tasks=tasks or BackgroundTasks(), user=s.student,
+                                             session=db)
+
+
+async def _stage(db, s, topic):
+    loops = (await routes.get_my_topic_loops(None, None, user=s.student, session=db)).topics
+    return next(t for t in loops if t.topic_id == str(topic.id))
+
+
+async def _homework_done(db, s, quiz_id, status=StudentHomeworkStatus.COMPLETED):
+    hw = Homework(test_id=None, topic_id=s.ohm.id, class_id=s.cls.id, gap_topic="Ohm's law", gap_mastery_percent=50,
+                  total_questions=5, difficulty=HomeworkDifficulty.MIXED,
+                  target_mode=AssignmentTargetMode.SPECIFIC_STUDENTS, status=HomeworkStatus.ASSIGNED,
+                  assigned_count=1)
+    db.add(hw)
+    await db.flush()
+    db.add(StudentHomeworkProgress(homework_id=hw.id, student_id=s.student.id, status=status))
+    quiz = await service.own_quiz(db, quiz_id, s.student)
+    quiz.homework_id = hw.id
+    await db.flush()
+    return hw
+
+
+async def test_the_loop_quiz_analysis_homework_recheck_mastered(db_session, monkeypatch):
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    calls = []
+    _stub_analysis(monkeypatch, calls)
+
+    assert (await _stage(db_session, s, s.ohm)).stage == "quiz"
+    quiz = await _start(db_session, s, s.ohm)
+    assert [i.bloom_level for i in quiz.items] == [R, R, U, U, A, A, AN, AN]
+    assert quiz.analysis is None and all(i.options and i.result is None for i in quiz.items)
+    assert (await _start(db_session, s, s.ohm)).id == quiz.id  # the same quiz on a second open
+    with pytest.raises(ConflictError):
+        await _finish(db_session, s, quiz)  # nothing answered yet
+
+    await _answer(db_session, s, quiz, {R, U})
+    tasks = BackgroundTasks()
+    done = await _finish(db_session, s, quiz, tasks)
+    a = done.analysis
+    assert a.score_percent == 50 and a.per_bloom == {R: 100, U: 100, A: 0, AN: 0}
+    assert a.lagging == [A, AN] and a.outcome == "homework" and a.need_to_know == ["V = IR"]
+    assert calls[0]["lagging_level"] == A and len(calls[0]["missed"]) == 4 and calls[0]["attempt"] == 1
+    assert [t.func.__name__ for t in tasks.tasks] == ["build_homework"]
+    again = await _finish(db_session, s, quiz)  # stored: no second analysis
+    assert again.analysis == a and len(calls) == 1
+
+    assert (await _stage(db_session, s, s.ohm)).stage == "homework_pending"
+    with pytest.raises(ConflictError):
+        await _start(db_session, s, s.ohm, attempt=2)
+    hw = await _homework_done(db_session, s, quiz.id, StudentHomeworkStatus.IN_PROGRESS)
+    loop = await _stage(db_session, s, s.ohm)
+    assert loop.stage == "homework" and loop.homework_id == str(hw.id) and loop.quiz_score == 50
+    progress = (await db_session.execute(select(StudentHomeworkProgress).where(
+        StudentHomeworkProgress.homework_id == hw.id))).scalar_one()
+    progress.status = StudentHomeworkStatus.COMPLETED
+    await db_session.flush()
+    assert (await _stage(db_session, s, s.ohm)).stage == "recheck"
+
+    recheck = await _start(db_session, s, s.ohm, attempt=2)
+    assert [i.bloom_level for i in recheck.items] == [A, A, AN, AN, R, U]
+    assert not {i.text for i in recheck.items} & {i.text for i in quiz.items}  # fresh questions
+    await _answer(db_session, s, recheck, {R, U, A, AN})
+    result = (await _finish(db_session, s, recheck)).analysis
+    assert result.outcome == "mastered" and result.previous_per_bloom == a.per_bloom
+    assert calls[1]["attempt"] == 2 and calls[1]["previous_per_bloom"] == a.per_bloom
+    loop = await _stage(db_session, s, s.ohm)
+    assert loop.stage == "mastered" and loop.recheck_score == 100
+
+
+async def test_still_weak_after_the_recheck_flags_the_teacher(db_session, monkeypatch):
+    s = await _seed(db_session, students=2)
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    _stub_analysis(monkeypatch, [])
+    quiz = await _start(db_session, s, s.ohm)
+    await _answer(db_session, s, quiz, {R, U, AN})
+    await _finish(db_session, s, quiz)
+    await _homework_done(db_session, s, quiz.id)
+    recheck = await _start(db_session, s, s.ohm, attempt=2)
+    await _answer(db_session, s, recheck, {R, U, AN})
+    assert (await _finish(db_session, s, recheck)).analysis.outcome == "needs_teacher"
+    assert (await _stage(db_session, s, s.ohm)).stage == "needs_teacher"
+
+    summary = (await routes.get_class_topic_quizzes(str(s.cls.id), str(s.electricity.id), user=s.teacher,
+                                                    session=db_session)).topics
+    [ohm] = summary
+    assert (ohm.student_count, ohm.quizzed, ohm.mastered, ohm.average_percent) == (2, 1, 0, 75)
+    assert ohm.weakest_level == A and ohm.per_bloom[A] == 0
+    assert [(n.name, n.lagging) for n in ohm.needs_teacher] == [("Kid 0", A)]
+
+
+async def test_nothing_lagging_is_mastered_at_once_without_homework(db_session, monkeypatch):
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    monkeypatch.setattr(service.generation_client, "is_configured", lambda: False)
+
+    async def down(payload):
+        raise service.generation_client.GenerationServiceUnavailableError("down")
+    monkeypatch.setattr(service.generation_client, "quiz_analysis", down)
+    quiz = await _start(db_session, s, s.ohm)
+    await _answer(db_session, s, quiz, {R, U, A, AN})
+    tasks = BackgroundTasks()
+    a = (await _finish(db_session, s, quiz, tasks)).analysis
+    assert a.outcome == "mastered" and a.lagging == [] and "sorted" in a.summary  # plain-words fallback
+    assert tasks.tasks == []
+    assert (await _stage(db_session, s, s.ohm)).stage == "mastered"
+
+
+async def test_only_taught_topics_and_own_quizzes(db_session):
+    s = await _seed(db_session, students=2)
+    with pytest.raises(NotFoundError):
+        await _start(db_session, s, s.ohm)  # not taught yet
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    quiz = await _start(db_session, s, s.ohm)
+    with pytest.raises(NotFoundError):
+        await routes.get_my_topic_quiz(quiz.id, user=s.students[1], session=db_session)
+    with pytest.raises(NotFoundError):  # a daily practice session isn't a topic quiz
+        daily = await practice_routes.get_my_daily_practice(user=s.student, session=db_session)
+        await routes.get_my_topic_quiz(daily.session_id or "nope", user=s.student, session=db_session)
+
+
+async def test_lagging_quiz_builds_personal_homework_on_the_lagging_levels(db_session, monkeypatch):
+    import contextlib
+
+    from src.services import homework_builder, push
+    from src.services.homework_builder import QuestionDraft
+
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    _stub_analysis(monkeypatch, [])
+    quiz = await _start(db_session, s, s.ohm)
+    await _answer(db_session, s, quiz, {R, U, AN})
+    await _finish(db_session, s, quiz)
+
+    class Proxy:  # the background task's own session -> the test's, commit = flush
+        def __getattr__(self, name):
+            return getattr(db_session, name)
+
+        async def commit(self):
+            await db_session.flush()
+
+    @contextlib.asynccontextmanager
+    async def own_session():
+        yield Proxy()
+
+    asked, sent = {}, []
+
+    async def build(session, **kw):
+        asked.update(kw)
+        return [QuestionDraft(bloom_level=level, text=f"q {n}", answer="a", dataset_id=s.dataset.id)
+                for n, level in enumerate(lv for lv, k in kw["bloom_weights"].items() for _ in range(k))]
+
+    async def dataset(*_a, **_k):
+        return s.dataset.id
+
+    async def notify(session, ids, title, body, data=None):
+        sent.append((ids, title, data))
+
+    monkeypatch.setattr("src.repositories.get_session", own_session)
+    monkeypatch.setattr(homework_builder, "build_homework_questions", build)
+    monkeypatch.setattr(homework_builder, "grounding_dataset_id", dataset)
+    monkeypatch.setattr(push, "notify", notify)
+    row = await service.own_quiz(db_session, quiz.id, s.student)
+    await service.build_homework(row.id)
+
+    assert asked["bloom_weights"] == {B.APPLY: 5} and asked["focus"].topic_id == s.ohm.id
+    hw = await db_session.get(Homework, row.homework_id)
+    assert hw.topic_id == s.ohm.id and hw.test_id is None and hw.total_questions == 5
+    assert sent == [([s.student.id], "Homework ready: Ohm's law", {"type": "homework", "homeworkId": str(hw.id)})]
+    loop = await _stage(db_session, s, s.ohm)
+    assert loop.stage == "homework" and loop.homework_id == str(hw.id)
+    await service.build_homework(row.id)  # once only
+    assert len(sent) == 1
+
+
+async def test_each_question_is_on_its_own_bloom_level_generated_when_the_pool_has_none(db_session, monkeypatch):
+    from types import SimpleNamespace
+
+    from tests.test_daily_practice import _generation
+
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)
+    for q in await _pool(db_session, s.ohm, 6, bloom_level=B.REMEMBER):  # only Remember in the pool
+        q.text += " r"
+    calls = SimpleNamespace(generate=[], explain=[])
+    _generation(monkeypatch, calls)
+    quiz = await _start(db_session, s, s.ohm)
+    assert [i.bloom_level for i in quiz.items] == [R, R, U, U, A, A, AN, AN]
+    assert [slot["bloom_level"] for slot in calls.generate[0]["slots"]] == [U, U, A, A, AN, AN]
+
+    # generation down: another level's question rather than none
+    s2 = await _seed(db_session)
+    await _teach(db_session, s2, s2.ohm)
+    await _pool(db_session, s2.ohm, 8, bloom_level=B.REMEMBER)
+    _generation(monkeypatch, calls, generate=False)
+    quiz = await routes.start_my_topic_quiz(str(s2.ohm.id), QuizStartIn(attempt=1), user=s2.student,
+                                            session=db_session)
+    assert [i.bloom_level for i in quiz.items] == [R] * 8

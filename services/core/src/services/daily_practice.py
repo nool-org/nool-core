@@ -160,12 +160,15 @@ async def _seen(session: AsyncSession, student_id: uuid.UUID, today: date) -> se
 
 
 async def _from_pool(session: AsyncSession, topic: Topic, kind: str, level: BloomLevel,
-                     exclude: set[uuid.UUID]) -> PracticeQuestion | None:
-    """The least used pool question on the topic, the slot's Bloom level first."""
+                     exclude: set[uuid.UUID], exact: bool = False) -> PracticeQuestion | None:
+    """The least used pool question on the topic, the slot's Bloom level first
+    (only that level when `exact`)."""
+    query = select(PracticeQuestion).where(PracticeQuestion.topic_id == topic.id, PracticeQuestion.kind == kind,
+                                           PracticeQuestion.id.not_in(list(exclude)))
+    if exact:
+        query = query.where(PracticeQuestion.bloom_level == level)
     return (await session.execute(
-        select(PracticeQuestion).where(PracticeQuestion.topic_id == topic.id, PracticeQuestion.kind == kind,
-                                       PracticeQuestion.id.not_in(list(exclude)))
-        .order_by((PracticeQuestion.bloom_level == level).desc(), PracticeQuestion.used_count,
+        query.order_by((PracticeQuestion.bloom_level == level).desc(), PracticeQuestion.used_count,
                   PracticeQuestion.created_at, PracticeQuestion.id).limit(1))).scalar_one_or_none()
 
 
@@ -285,18 +288,20 @@ async def _prepare_voice(session: AsyncSession, questions: list[PracticeQuestion
 
 
 async def _fill(session: AsyncSession, student: User, school_class: SchoolClass, slots: list[Slot],
-                today: date, seed: str) -> list[tuple[Slot, PracticeQuestion]]:
+                today: date, seed: str, exact_level: bool = False) -> list[tuple[Slot, PracticeQuestion]]:
     """A question per slot: pool, then bank import, then generation. A voice
     slot with no speakable question on its topic becomes an MCQ; a slot
-    nothing can fill is dropped."""
+    nothing can fill is dropped. `exact_level` (topic quizzes, which score
+    per Bloom level): pool and bank only at the slot's own level, generation
+    for the rest, and only then a question of another level."""
     exclude = await _seen(session, student.id, today)
     dataset_ids = [d.id for d in await visible_datasets(session, student) if d.type == DatasetType.QA]
     picked: dict[int, PracticeQuestion] = {}
     for i, slot in enumerate(slots):
         for kind in dict.fromkeys([slot.kind, "mcq"]):
-            q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude)
+            q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact_level)
             if q is None and await _import_bank(session, dataset_ids, slot.topic, kind):
-                q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude)
+                q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact_level)
             if q is not None:
                 slots[i] = replace(slot, kind=kind)
                 picked[i] = q
@@ -309,6 +314,14 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
                                      [replace(slots[i], kind="mcq") for i in mine], seed)).items():
             slots[mine[n]] = replace(slots[mine[n]], kind="mcq")
             picked[mine[n]] = q
+            exclude.add(q.id)
+    if exact_level:  # generation couldn't help: any level beats no question
+        for i in [i for i in range(len(slots)) if i not in picked]:
+            q = await _from_pool(session, slots[i].topic, "mcq", slots[i].bloom_level, exclude)
+            if q is not None:
+                slots[i] = replace(slots[i], kind="mcq")
+                picked[i] = q
+                exclude.add(q.id)
     chosen = [(slots[i], picked[i]) for i in sorted(picked)]
     questions = [q for _, q in chosen]
     await _explain(questions, {s.topic.id: s.topic.name for s, _ in chosen})
@@ -392,8 +405,8 @@ async def ensure_today(session: AsyncSession, student: User) -> tuple[DailyPract
         return None, "no_topics_taught"
     today = today_ist()
     practice = (await session.execute(select(DailyPracticeSession).where(
-        DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today))
-    ).scalar_one_or_none()
+        DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today,
+        DailyPracticeSession.topic_id.is_(None)))).scalar_one_or_none()
     if practice is not None:
         new, items = await _newly_taught(session, practice, taught)
         if not new:
@@ -410,11 +423,12 @@ async def ensure_today(session: AsyncSession, student: User) -> tuple[DailyPract
     created = (await session.execute(pg_insert(DailyPracticeSession).values(
         id=uuid.uuid4(), student_id=student.id, practice_date=today, chapter_id=taught[0][0].chapter_id,
         status="open", xp_awarded=0,
-    ).on_conflict_do_nothing(index_elements=["student_id", "practice_date"])
+    ).on_conflict_do_nothing(index_elements=["student_id", "practice_date"],
+                             index_where=DailyPracticeSession.topic_id.is_(None))
         .returning(DailyPracticeSession.id))).scalar_one_or_none()
     practice = (await session.execute(select(DailyPracticeSession).where(
-        DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today)
-        .execution_options(populate_existing=True))).scalar_one()
+        DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today,
+        DailyPracticeSession.topic_id.is_(None)).execution_options(populate_existing=True))).scalar_one()
     if created is None:
         return practice, None
 

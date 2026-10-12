@@ -1,7 +1,9 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, false, func
+from sqlalchemy import (
+    Boolean, Date, DateTime, ForeignKey, Index, Integer, SmallInteger, String, Text, UniqueConstraint, false, func, text,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -70,10 +72,16 @@ class PracticeQuestion(IdMixin, Base):
 
 
 class DailyPracticeSession(IdMixin, Base):
-    """One student's practice for one day."""
+    """One student's practice for one day - or, with a topic, a topic quiz
+    (attempt 1) or its re-check (attempt 2): see services/topic_quiz.py."""
 
     __tablename__ = "daily_practice_sessions"
-    __table_args__ = (UniqueConstraint("student_id", "practice_date", name="uq_daily_practice_sessions_student_date"),)
+    __table_args__ = (
+        Index("uq_daily_practice_sessions_student_date", "student_id", "practice_date", unique=True,
+              postgresql_where=text("topic_id IS NULL")),
+        Index("uq_topic_quizzes_student_topic_attempt", "student_id", "topic_id", "attempt", unique=True,
+              postgresql_where=text("topic_id IS NOT NULL")),
+    )
 
     student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     practice_date: Mapped[date] = mapped_column(Date)
@@ -82,6 +90,15 @@ class DailyPracticeSession(IdMixin, Base):
     xp_awarded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # topic quizzes only
+    topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"), nullable=True)
+    attempt: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)  # 1 quiz | 2 re-check
+    score_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    per_bloom: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # level -> percent
+    analysis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)  # homework | mastered | needs_teacher
+    homework_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("homework.id", ondelete="SET NULL"), nullable=True)
 
 
 class DailyPracticeItem(IdMixin, Base):

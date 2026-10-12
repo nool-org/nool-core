@@ -24,6 +24,7 @@ from src.api.schemas.student_homework import (
 )
 from src.domain.models import (
     Chapter,
+    DailyPracticeSession,
     Homework,
     HomeworkQuestion,
     HomeworkStatus,
@@ -144,10 +145,12 @@ async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student
             "connection_prompt": hw.insight_connection_prompt,
         }
 
-    test = await session.get(VoiceTest, hw.test_id)
-    chapter = await session.get(Chapter, test.chapter_id) if test else None
-    subject = await session.get(Subject, test.subject_id) if test else None
-    school_class = await session.get(SchoolClass, test.class_id) if test else None
+    test = await session.get(VoiceTest, hw.test_id) if hw.test_id else None
+    topic = await session.get(Topic, hw.topic_id) if hw.topic_id else None
+    chapter_id = test.chapter_id if test else topic.chapter_id if topic else None
+    chapter = await session.get(Chapter, chapter_id) if chapter_id else None
+    subject = await session.get(Subject, chapter.subject_id) if chapter else None
+    school_class = await session.get(SchoolClass, hw.class_id)
 
     weak_bloom_level = "UNDERSTAND"
     result_row = await session.execute(
@@ -155,7 +158,11 @@ async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student
             StudentTestResult.test_id == hw.test_id, StudentTestResult.student_id == student_id
         )
     )
-    test_result = result_row.scalar_one_or_none()
+    test_result = result_row.scalar_one_or_none() if test else None
+    if hw.topic_id is not None:  # a topic quiz's homework: its weakest level
+        lagging = (await session.execute(select(DailyPracticeSession.analysis).where(
+            DailyPracticeSession.homework_id == hw.id))).scalar_one_or_none() or {}
+        weak_bloom_level = (lagging.get("lagging") or [weak_bloom_level])[0]
     if test_result is not None:
         scores_row = await session.execute(
             select(StudentTestResultBloomScore).where(
@@ -208,9 +215,13 @@ async def get_homework_context(
 
     token = authorization.split(" ", 1)[-1].strip() if authorization else None
     insight = await _ensure_insight_generated(session, hw, user.id, token)
-    chapter_id = (await session.execute(select(VoiceTest.chapter_id).where(VoiceTest.id == hw.test_id))).scalar()
-    topic_id = (await session.execute(select(Topic.id).where(
-        Topic.chapter_id == chapter_id, Topic.name == hw.gap_topic).limit(1))).scalar() if chapter_id else None
+    if hw.topic_id is not None:
+        topic_id = hw.topic_id
+        chapter_id = (await session.execute(select(Topic.chapter_id).where(Topic.id == topic_id))).scalar()
+    else:
+        chapter_id = (await session.execute(select(VoiceTest.chapter_id).where(VoiceTest.id == hw.test_id))).scalar()
+        topic_id = (await session.execute(select(Topic.id).where(
+            Topic.chapter_id == chapter_id, Topic.name == hw.gap_topic).limit(1))).scalar() if chapter_id else None
     return HomeworkLearningContextOut(
         homework_id=str(hw.id),
         topic_label=hw.gap_topic,
@@ -310,7 +321,8 @@ async def confirm_completion(
 
     await session.commit()
     return HomeworkQaConfirmationOut(confirmed_at=progress.confirmed_at,
-                                     mcq_test_id=str(mcq_id) if mcq_id else None)
+                                     mcq_test_id=str(mcq_id) if mcq_id else None,
+                                     recheck_topic_id=str(hw.topic_id) if hw is not None and hw.topic_id else None)
 
 
 @router.post("/me/homework/{homework_id}/questions/{question_id}/answer")

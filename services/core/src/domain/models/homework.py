@@ -41,7 +41,9 @@ class StudentHomeworkStatus(str, Enum):
 class Homework(IdMixin, TimestampMixin, Base):
     __tablename__ = "homework"
 
-    test_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("voice_tests.id"))
+    # the voice test it follows up - or, for a topic quiz's homework, None and topic_id set
+    test_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("voice_tests.id"), nullable=True)
+    topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"), nullable=True)
     class_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("classes.id"))
     gap_topic: Mapped[str] = mapped_column(Text)
     gap_mastery_percent: Mapped[int] = mapped_column(Integer)

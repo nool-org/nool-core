@@ -37,3 +37,4 @@ class HomeworkQaConfirmationOut(CamelModel):
     confirmed_at: datetime
     # the MCQ check this homework unlocks (its questions are being built) - the app opens it next
     mcq_test_id: str | None = None
+    recheck_topic_id: str | None = None  # a topic quiz's homework: its re-check quiz is open now

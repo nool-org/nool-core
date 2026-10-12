@@ -153,7 +153,7 @@ async def get_chapter_progress(
 
 
 async def _notify_taught(session: AsyncSession, class_id: uuid.UUID, topic: Topic) -> None:
-    """Tells the class's students practice on today's lesson is ready -
+    """Tells the class's students the quiz on today's lesson is ready -
     once per lesson: skipped when another topic was marked in the last 30
     minutes (a teacher ticks several topics in a row)."""
     recent = (await session.execute(select(ClassTopicProgress.id).where(
@@ -163,9 +163,9 @@ async def _notify_taught(session: AsyncSession, class_id: uuid.UUID, topic: Topi
         return
     student_ids = (await session.execute(
         select(StudentProfile.user_id).where(StudentProfile.class_id == class_id))).scalars().all()
-    await push.notify(session, student_ids, "New practice is ready",
-                      f"Your teacher just taught {daily_practice.tidy(topic.name)}. Try a few questions.",
-                      {"type": "daily_practice"})
+    await push.notify(session, student_ids, "New topic quiz",
+                      f"Your teacher just taught {daily_practice.tidy(topic.name)}. Take the quiz.",
+                      {"type": "topic_quiz", "topicId": str(topic.id)})
 
 
 @router.put("/classes/{class_id}/topics/{topic_id}/taught")

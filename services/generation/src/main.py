@@ -8,8 +8,8 @@ from shared.logging import RequestContextMiddleware, configure_logging, get_logg
 from shared.tracing import configure_tracing
 from shared.observability import configure_observability
 
-from src.api.routes import (gap_fill, health, mcq_explain, paper_answer_key, paper_copilot, revision_cards,
-                            teacher_assistant, voice_prep)
+from src.api.routes import (gap_fill, health, mcq_explain, paper_answer_key, paper_copilot, quiz_analysis,
+                            revision_cards, teacher_assistant, voice_prep)
 from src.config.settings import get_settings
 from src.services import cost
 from src.services.llm import OpenAIStructured
@@ -69,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(teacher_assistant.router)
     app.include_router(mcq_explain.router)
     app.include_router(revision_cards.router)
+    app.include_router(quiz_analysis.router)
 
     return app
 

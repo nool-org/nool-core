@@ -103,8 +103,8 @@ async def _bank(db, s, topic, mcq=0, voice=0):
     await db.flush()
 
 
-async def _pool(db, topic, n, kind="mcq", **kw):
-    rows = [PracticeQuestion(chapter_id=topic.chapter_id, topic_id=topic.id, bloom_level=B.UNDERSTAND, kind=kind,
+async def _pool(db, topic, n, kind="mcq", bloom_level=B.UNDERSTAND, **kw):
+    rows = [PracticeQuestion(chapter_id=topic.chapter_id, topic_id=topic.id, bloom_level=bloom_level, kind=kind,
                              text=f"{topic.name} pool {kind} {i}",
                              options=["a", "b", "c", "d"] if kind == "mcq" else None,
                              correct_index=1 if kind == "mcq" else None, explanation="why" if kind == "mcq" else None,
@@ -653,9 +653,9 @@ async def test_marking_a_topic_taught_today_notifies_the_class_once_per_lesson(d
     await db_session.flush()
     await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher, session=db_session)
     [call] = sent
-    assert call["user_ids"] == {k.id for k in s.students} and call["title"] == "New practice is ready"
-    assert call["body"] == "Your teacher just taught Ohm's law. Try a few questions."
-    assert call["data"] == {"type": "daily_practice"}
+    assert call["user_ids"] == {k.id for k in s.students} and call["title"] == "New topic quiz"
+    assert call["body"] == "Your teacher just taught Ohm's law. Take the quiz."
+    assert call["data"] == {"type": "topic_quiz", "topicId": str(s.ohm.id)}
     await routes.set_topic_taught(cid, str(s.power.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher,
                                   session=db_session)
     assert len(sent) == 1  # Ohm's law was marked within 30 minutes

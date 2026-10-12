@@ -63,6 +63,13 @@ async def revision_cards(payload: dict) -> dict:
     return await _post("/v1/revision/cards", payload, VOICE_TEST_PREP_TIMEOUT_SECONDS, "revision_cards")
 
 
+async def quiz_analysis(payload: dict) -> dict:
+    """POST /v1/quiz/analysis - {grade, subject, chapter, topic, attempt, per_bloom,
+    previous_per_bloom, lagging_level, missed: [{bloom_level, question, chosen, correct}]} ->
+    {summary, lagging_meaning, need_to_know, next_step}."""
+    return await _post("/v1/quiz/analysis", payload, GAP_FILL_TIMEOUT_SECONDS, "topic_quiz_analysis")
+
+
 async def transcribe(audio_base64: str, mime_type: str, prompt: str, language: str = "en") -> str:
     """POST /v1/transcribe (gpt-4o-mini-transcribe) - the recognised text, stripped.
     language "auto" for students' answers, which may mix English with Indian languages."""
