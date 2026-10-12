@@ -83,6 +83,13 @@ class FirebaseIdentityProvider:
         if not self._project_id:
             raise FirebaseNotConfiguredError("Firebase project is not configured.")
         try:
+            # The default app is process-wide: if another provider instance in this process (e.g. a
+            # dev auto-reload building the app twice) already started it, reuse it instead of failing.
+            self._app = firebase_admin.get_app()
+            return self._app
+        except ValueError:
+            pass
+        try:
             options = {"projectId": self._project_id}
             if self._credentials_path:
                 cred = credentials.Certificate(self._credentials_path)

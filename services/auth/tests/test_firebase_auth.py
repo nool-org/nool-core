@@ -141,3 +141,17 @@ def test_authenticate_with_password_maps_network_failure_to_upstream_error(monke
 
     with pytest.raises(IdentityProviderUnavailableError):
         provider.authenticate_with_password("a@example.com", "correct-password")
+
+
+def test_get_app_reuses_the_default_app_another_provider_already_started(monkeypatch):
+    import firebase_admin
+
+    existing = object()
+    monkeypatch.setattr(firebase_admin, "get_app", lambda *a: existing)
+
+    def must_not_init(*a, **k):
+        raise AssertionError("initialize_app must not run twice in one process")
+
+    monkeypatch.setattr(firebase_admin, "initialize_app", must_not_init)
+    provider = FirebaseIdentityProvider(project_id="test-project", credentials_path=None)
+    assert provider._get_app() is existing  # noqa: SLF001
