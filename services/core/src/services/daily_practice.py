@@ -49,7 +49,7 @@ from src.domain.models import (
     User,
 )
 from src.repositories.dataset_access import visible_datasets
-from src.services import generation_client
+from src.services import ai_context, generation_client
 from src.services.homework_builder import _sections
 from src.services.mcq_test import award_points, correct_index, explanation_of, strip_inline_options
 from src.services.question_selector import text_only_filter
@@ -223,7 +223,8 @@ async def _generate(session: AsyncSession, school_class: SchoolClass, chapter_id
         "avoid": [],
     }
     try:
-        result = await generation_client.generate_mcq(payload)
+        with ai_context.feature("daily_practice_mcq"):
+            result = await generation_client.generate_mcq(payload)
     except generation_client.GenerationServiceUnavailableError:
         logger.warning("daily_practice_generation_unavailable", extra={"chapter_id": str(chapter_id)})
         return {}
@@ -256,7 +257,8 @@ async def _explain(questions: list[PracticeQuestion], topic_names: dict) -> None
     items = [{"question_number": n, "text": q.text, "options": q.options, "correct_index": q.correct_index,
               "concept": topic_names.get(q.topic_id, "")} for n, q in enumerate(todo, start=1)]
     try:
-        body = await generation_client.explain_mcq({"items": items})
+        with ai_context.feature("daily_practice_mcq"):
+            body = await generation_client.explain_mcq({"items": items})
     except generation_client.GenerationServiceUnavailableError:
         logger.warning("daily_practice_explain_unavailable", extra={"count": len(items)})
         return

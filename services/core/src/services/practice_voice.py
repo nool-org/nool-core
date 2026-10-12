@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import AppError, ValidationError
 from src.domain.models import Chapter, DatasetQuestion, PracticeQuestion, Subject, Topic, User
-from src.services import colearner_client, generation_client
+from src.services import ai_context, colearner_client, generation_client
 from src.services.paper_copilot import _decode_audio  # base64 + 5 MB check, shared with voice notes
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,8 @@ async def prepare_voice_questions(session: AsyncSession, questions: list[Practic
         } for q in rows],
     }
     try:
-        out = await generation_client.prep_voice_test(payload)
+        with ai_context.feature("practice_voice_prep"):
+            out = await generation_client.prep_voice_test(payload)
         by_id = {str(p.get("dataset_question_id")): p for p in out.get("questions") or [] if isinstance(p, dict)}
     except Exception as exc:  # unavailable, or an unusable response
         logger.warning("practice_voice_prep_failed", extra={"reason": str(exc), "questions": len(rows)})

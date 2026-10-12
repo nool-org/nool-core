@@ -267,9 +267,11 @@ async def grade_answer(
     transcript: str,
     subject: Optional[str] = None,
     client: Optional[Any] = None,
+    caller: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """{score 0-100, good, add} for one spoken answer. Empty transcript -> EMPTY_ANSWER,
-    no model call. Raises on any failure (no key, API error, refusal) - never fakes a grade."""
+    no model call. Raises on any failure (no key, API error, refusal) - never fakes a grade.
+    `caller` (Core's feature/student ids) tags the grade_answer_cost log line."""
     if not transcript.strip():
         return dict(EMPTY_ANSWER)
     client = client or _get_client()
@@ -286,7 +288,7 @@ async def grade_answer(
         response_format=ANSWER_RESPONSE_FORMAT,
     )
     if usage := getattr(resp, "usage", None):
-        logger.info("grade_answer_cost", extra=_cost_metrics(usage))
+        logger.info("grade_answer_cost", extra={"cost": {**_cost_metrics(usage), **(caller or {})}})
     msg = resp.choices[0].message
     if getattr(msg, "refusal", None):
         raise RuntimeError(f"grader refused: {msg.refusal}")

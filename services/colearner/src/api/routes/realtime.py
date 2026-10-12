@@ -1,13 +1,16 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from shared.auth import AuthenticatedUser
 
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, nool_caller
 from src.domain.schemas import SessionConfig
 from src.services import realtime_service
 
 router = APIRouter(prefix="/api/v1", tags=["colearner-realtime"])
+logger = logging.getLogger(__name__)
 
 
 MAX_SDP_CHARS = 20_000  # a browser/RN WebRTC offer is ~3-8k
@@ -32,7 +35,8 @@ class FinishCallIn(BaseModel):
 
 
 @router.post("/colearner/realtime/calls", response_model=CreateCallOut, summary="Start a live voice call")
-async def create_call(body: CreateCallIn, _user: AuthenticatedUser = Depends(get_current_user)) -> CreateCallOut:
+async def create_call(body: CreateCallIn, _user: AuthenticatedUser = Depends(get_current_user),
+                      caller: dict = Depends(nool_caller)) -> CreateCallOut:
     """WebRTC 'unified interface': the client's SDP offer in, OpenAI's SDP
     answer out. See realtime_service's module docstring."""
     try:
@@ -41,6 +45,9 @@ async def create_call(body: CreateCallIn, _user: AuthenticatedUser = Depends(get
         )
     except realtime_service.RealtimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # joins realtime_call_cost (logged by call_id at hang-up) to the student - scripts/cost_report.py
+    logger.info("realtime_call_started call_id=%s owner_ref=%s student=%s school=%s feature=%s", call_id,
+                body.owner_ref, caller.get("student", ""), caller.get("school", ""), caller.get("feature", ""))
     return CreateCallOut(sdp=answer, call_id=call_id)
 
 

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from shared.auth import AuthenticatedUser
 from shared.errors import AppError
 
-from src.api.deps import get_current_user
+from src.api.deps import get_current_user, nool_caller
 from src.domain.schemas import SessionConfig
 from src.services.evaluation import grade_transcript
 from src.services.evaluation.grader import grade_answer
@@ -29,7 +29,8 @@ class RegradeIn(BaseModel):
 
 
 @router.post("/colearner/regrade", summary="Re-run the grader on a stored transcript")
-async def regrade(body: RegradeIn, _user: AuthenticatedUser = Depends(get_current_user)) -> dict:
+async def regrade(body: RegradeIn, _user: AuthenticatedUser = Depends(get_current_user),
+                  caller: dict = Depends(nool_caller)) -> dict:
     """Returns the C2 report, exactly as a live finish would - on failure it
     carries `grading_error` (the caller decides what to do)."""
     turns = [{**t, "role": t.get("role"), "content": str(t.get("content") or t.get("text") or ""),
@@ -37,7 +38,10 @@ async def regrade(body: RegradeIn, _user: AuthenticatedUser = Depends(get_curren
              for t in body.transcript if isinstance(t, dict)]
     answers = {a.get("question_number"): a for a in body.answers if isinstance(a, dict)}
     rubric = build_rubric(body.config.questions, answers)
-    return await grade_transcript(SessionState("regrade", body.config), _transcript_text(turns), rubric=rubric)
+    session = SessionState("regrade", body.config)
+    report = await grade_transcript(session, _transcript_text(turns), rubric=rubric)
+    logger.info("regrade_cost", extra={"cost": {"usd": round(session.total_cost_usd, 6), **caller}})
+    return report
 
 
 class GradeAnswerIn(BaseModel):
@@ -61,11 +65,12 @@ class GradingUnavailableError(AppError):
 
 
 @router.post("/colearner/grade-answer", response_model=GradeAnswerOut, summary="Grade one short spoken answer")
-async def grade_one_answer(body: GradeAnswerIn, _user: AuthenticatedUser = Depends(get_current_user)) -> GradeAnswerOut:
+async def grade_one_answer(body: GradeAnswerIn, _user: AuthenticatedUser = Depends(get_current_user),
+                           caller: dict = Depends(nool_caller)) -> GradeAnswerOut:
     """503 when the model call fails - the caller keeps the transcript ungraded."""
     try:
         return GradeAnswerOut(**await grade_answer(body.question, body.expected_points, body.misconceptions,
-                                                   body.transcript, body.subject))
+                                                   body.transcript, body.subject, caller=caller))
     except Exception as exc:
         logger.warning("grade_answer_failed", extra={"reason": f"{type(exc).__name__}: {exc}"})
         raise GradingUnavailableError("Could not grade this answer.") from exc

@@ -6,7 +6,7 @@ from opentelemetry import trace
 
 from .context import get_request_id
 
-_EXTRA_FIELDS = ("route", "method", "status", "duration_ms", "reason", "error", "event", "uid")
+_EXTRA_FIELDS = ("route", "method", "status", "duration_ms", "reason", "error", "event", "uid", "cost")
 
 
 class JSONFormatter(logging.Formatter):

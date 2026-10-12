@@ -46,7 +46,7 @@ from src.domain.models.question_paper import PaperDifficultyLevel
 from src.domain.models.voice_test import VoiceTestPrepStatus
 from src.repositories import get_session
 from src.repositories.dataset_access import visible_datasets
-from src.services import generation_client, kg_client
+from src.services import ai_context, generation_client, kg_client
 from src.services.question_selector import Slot, select_questions
 
 logger = logging.getLogger(__name__)
@@ -432,7 +432,8 @@ async def _write_for_levels(session: AsyncSession, test: VoiceTest, levels: list
         "style": "spoken",  # short, single question - it is asked aloud
     }
     try:
-        result = await generation_client.gap_fill(payload)
+        with ai_context.feature("voice_prep"):
+            result = await generation_client.gap_fill(payload)
     except Exception as exc:  # unavailable or unusable - the level is skipped, as before
         logger.warning("voice_test_prep_write_failed", extra={"test_id": str(test.id), "reason": str(exc)})
         return []

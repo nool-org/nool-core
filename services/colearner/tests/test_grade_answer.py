@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 
 from src.api.routes import regrade
@@ -38,23 +39,34 @@ def test_parsed_result_with_score_capped_to_range():
     assert low["score"] == 0
 
 
+def test_cost_log_line_carries_the_caller(caplog):
+    client = _FakeClient({"score_percent": 50, "good": "", "add": ""})
+    with caplog.at_level(logging.INFO):
+        asyncio.run(grader.grade_answer("Q?", [], [], "x", client=client,
+                                        caller={"feature": "practice_grade", "student": "s-1"}))
+    [cost] = [r.cost for r in caplog.records if r.getMessage() == "grade_answer_cost"]
+    assert cost["feature"] == "practice_grade" and cost["student"] == "s-1"
+    assert cost["turn_cost_usd"] == round((100 * 0.25 + 20 * 2.00) / 1e6, 6)
+
+
 def test_route_requires_auth(client):
     assert client.post("/api/v1/colearner/grade-answer", json=_BODY).status_code == 401
 
 
 def test_route_returns_the_grade_and_503_on_failure(client, monkeypatch):
     monkeypatch.setattr("src.api.deps.verify_token", lambda token: object())
-    headers = {"Authorization": "Bearer t"}
+    headers = {"Authorization": "Bearer t", "X-Nool-Feature": "practice_grade", "X-Nool-Student": "s-1"}
 
-    async def fake(question, expected_points, misconceptions, transcript, subject):
+    async def fake(question, expected_points, misconceptions, transcript, subject, caller):
         assert (question, transcript, subject) == (_BODY["question"], "speed changes", "Science")
+        assert caller == {"feature": "practice_grade", "student": "s-1"}
         return {"score": 70, "good": "g", "add": "a"}
 
     monkeypatch.setattr(regrade, "grade_answer", fake)
     resp = client.post("/api/v1/colearner/grade-answer", json=_BODY, headers=headers)
     assert resp.status_code == 200 and resp.json() == {"score": 70, "good": "g", "add": "a"}
 
-    async def broken(*args):
+    async def broken(*args, **kwargs):
         raise RuntimeError("no key")
 
     monkeypatch.setattr(regrade, "grade_answer", broken)

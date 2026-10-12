@@ -11,6 +11,7 @@ from shared.errors import ForbiddenError, UnauthorizedError
 from src.domain.models import Feature, Role, School, SchoolStatus, Subscription, SubscriptionStatus, User
 from src.repositories import get_by_firebase_uid, get_session
 from src.repositories.subscription_repository import get_active_plan
+from src.services import ai_context
 from src.services.feature_entitlements import is_feature_enabled
 
 # A subscription in either of these states means the school's billing
@@ -94,6 +95,7 @@ async def get_current_app_user(
                 raise ForbiddenError(
                     "This school's subscription is no longer active. Contact your platform administrator."
                 )
+    ai_context.set_caller(app_user)  # labels this request's AI calls for the cost logs
     return app_user
 
 

@@ -15,10 +15,10 @@ async def answer_key(payload: dict) -> dict:
     """POST /v1/paper/answer-key - {board, grade, subject, items: [{id, text, question_type, marks,
     options, bloom_level, reference_answer, reference_solution}]} -> {items: [{id, answer,
     marking_points: [{point, marks}]}], failed_ids}."""
-    return await _post("/v1/paper/answer-key", payload, ANSWER_KEY_TIMEOUT_SECONDS)
+    return await _post("/v1/paper/answer-key", payload, ANSWER_KEY_TIMEOUT_SECONDS, "paper")
 
 
 async def gap_fill(payload: dict) -> dict:
     """POST /v1/homework/gap-fill - the generic "write verified questions for these
     (bloom, difficulty) slots from this textbook text" path, reused for Set B."""
-    return await _post("/v1/homework/gap-fill", payload, GAP_FILL_TIMEOUT_SECONDS)
+    return await _post("/v1/homework/gap-fill", payload, GAP_FILL_TIMEOUT_SECONDS, "paper")

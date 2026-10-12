@@ -15,6 +15,7 @@ import httpx
 from shared.errors import AppError
 
 from src.config.settings import get_settings
+from src.services import ai_context
 
 
 class ColearnerUnavailableError(AppError):
@@ -29,10 +30,12 @@ def _http_base() -> str:
     return settings.colearner_service_url.rstrip("/")
 
 
-async def _realtime_post(path: str, body: dict, *, token: str, timeout: float) -> dict:
+async def _realtime_post(path: str, body: dict, *, token: str, timeout: float, feature: str) -> dict:
+    """`feature` (+ the caller's ids) go as X-Nool-* headers for colearner's cost logs - see ai_context.py."""
     try:
         async with httpx.AsyncClient(base_url=_http_base(), timeout=timeout) as client:
-            response = await client.post(path, json=body, headers={"Authorization": f"Bearer {token}"})
+            response = await client.post(path, json=body,
+                                         headers={"Authorization": f"Bearer {token}", **ai_context.headers(feature)})
     except httpx.HTTPError as exc:
         raise ColearnerUnavailableError("Could not reach the colearner service.") from exc
     if response.status_code == 404:
@@ -47,6 +50,7 @@ async def create_realtime_call(*, sdp: str, config: dict, owner_ref: str, token:
     return await _realtime_post(
         "/api/v1/colearner/realtime/calls",
         {"sdp": sdp, "config": config, "owner_ref": owner_ref}, token=token, timeout=30.0,
+        feature="voice_test",
     )
 
 
@@ -55,7 +59,7 @@ async def finish_realtime_call(*, call_id: str, owner_ref: str, token: str) -> d
     LLM call, hence the longer timeout."""
     return await _realtime_post(
         f"/api/v1/colearner/realtime/calls/{call_id}/finish",
-        {"owner_ref": owner_ref}, token=token, timeout=90.0,
+        {"owner_ref": owner_ref}, token=token, timeout=90.0, feature="voice_test",
     )
 
 
@@ -65,6 +69,7 @@ async def regrade_transcript(*, config: dict, transcript: list, answers: list, t
     return await _realtime_post(
         "/api/v1/colearner/regrade",
         {"config": config, "transcript": transcript, "answers": answers}, token=token, timeout=90.0,
+        feature="voice_regrade",
     )
 
 
@@ -75,5 +80,5 @@ async def grade_answer(*, question: str, expected_points: list[str], misconcepti
     return await _realtime_post(
         "/api/v1/colearner/grade-answer",
         {"question": question, "expected_points": expected_points, "misconceptions": misconceptions,
-         "transcript": transcript, "subject": subject}, token=token, timeout=30.0,
+         "transcript": transcript, "subject": subject}, token=token, timeout=30.0, feature="practice_grade",
     )

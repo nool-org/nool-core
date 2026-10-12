@@ -1,4 +1,4 @@
-from fastapi import Header
+from fastapi import Header, Request
 
 from shared.auth import AuthenticatedUser, verify_token
 from shared.errors import UnauthorizedError
@@ -21,6 +21,13 @@ def _extract_bearer_token(authorization: str | None) -> str:
     if not token:
         raise UnauthorizedError("Missing or malformed Authorization header.")
     return token
+
+
+def nool_caller(request: Request) -> dict[str, str]:
+    """Core's X-Nool-* headers (feature, student, teacher, school) - context
+    for the cost log lines only, never trusted for anything else."""
+    found = {k: (request.headers.get(f"x-nool-{k}") or "")[:64] for k in ("feature", "student", "teacher", "school")}
+    return {k: v for k, v in found.items() if v}
 
 
 def get_current_user(authorization: str | None = Header(default=None)) -> AuthenticatedUser:

@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from src.config.settings import get_settings
+from src.services.cost import log_transcription_usage
 
 MODEL = "gpt-4o-mini-transcribe"
 MAX_AUDIO_BYTES = 5 * 1024 * 1024
@@ -51,6 +52,7 @@ class OpenAITranscriber:
         result = await self.client.audio.transcriptions.create(
             model=MODEL, file=(filename, audio), prompt=prompt or None, **extra,
         )
+        log_transcription_usage(MODEL, getattr(result, "usage", None))
         return result.text
 
 

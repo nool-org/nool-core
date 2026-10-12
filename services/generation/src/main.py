@@ -9,6 +9,7 @@ from shared.observability import configure_observability
 
 from src.api.routes import gap_fill, health, mcq_explain, paper_answer_key, paper_copilot, teacher_assistant, voice_prep
 from src.config.settings import get_settings
+from src.services import cost
 from src.services.llm import OpenAIStructured
 
 
@@ -28,6 +29,16 @@ def create_app() -> FastAPI:
     app = FastAPI(title="nool-core Generation Service", lifespan=lifespan)
 
     app.add_middleware(RequestContextMiddleware)
+
+    @app.middleware("http")
+    async def cost_caller(request, call_next):
+        """Binds Core's X-Nool-* caller headers for this request's cost log lines."""
+        token = cost.caller.set(cost.caller_of(request.headers, request.url.path))
+        try:
+            return await call_next(request)
+        finally:
+            cost.caller.reset(token)
+
     register_exception_handlers(app)
     configure_tracing(app, settings.service_name, settings.otel_exporter_otlp_endpoint)
     configure_observability(app, settings)
