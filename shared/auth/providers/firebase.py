@@ -1,3 +1,5 @@
+import threading
+
 import firebase_admin
 import httpx
 from firebase_admin import auth as firebase_auth
@@ -28,6 +30,12 @@ _EVENT_TOKEN_VERIFIED = "auth.token_verified"
 _EVENT_TOKEN_VERIFICATION_FAILED = "auth.token_verification_failed"
 _EVENT_PASSWORD_AUTH_SUCCEEDED = "auth.password_auth_succeeded"
 _EVENT_PASSWORD_AUTH_FAILED = "auth.password_auth_failed"
+
+# Token checks run in worker threads, so a burst of requests right after a
+# (re)start would all try to start the process-wide default app at once -
+# all but one failing with "default app already exists" (500 -> the app
+# signs the user out). One at a time; the rest reuse the started app.
+_init_lock = threading.Lock()
 
 
 class FirebaseNotConfiguredError(AppError):
@@ -82,6 +90,12 @@ class FirebaseIdentityProvider:
             return self._app
         if not self._project_id:
             raise FirebaseNotConfiguredError("Firebase project is not configured.")
+        with _init_lock:
+            return self._start_app()
+
+    def _start_app(self) -> firebase_admin.App:
+        if self._app is not None:
+            return self._app
         try:
             # The default app is process-wide: if another provider instance in this process (e.g. a
             # dev auto-reload building the app twice) already started it, reuse it instead of failing.

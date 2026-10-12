@@ -155,3 +155,44 @@ def test_get_app_reuses_the_default_app_another_provider_already_started(monkeyp
     monkeypatch.setattr(firebase_admin, "initialize_app", must_not_init)
     provider = FirebaseIdentityProvider(project_id="test-project", credentials_path=None)
     assert provider._get_app() is existing  # noqa: SLF001
+
+
+def test_a_burst_of_first_requests_starts_firebase_once(monkeypatch):
+    """Right after a restart the app fires several requests at once; each
+    used to start the default app and all but one got 'already exists' (500)."""
+    import threading
+    import time
+
+    import firebase_admin
+
+    started = []
+
+    def get_app():
+        if not started:
+            raise ValueError("no default app")
+        return started[0]
+
+    def initialize_app(*_a, **_k):
+        time.sleep(0.05)  # widen the race window
+        if started:
+            raise ValueError("The default Firebase app already exists.")
+        started.append(object())
+        return started[0]
+
+    monkeypatch.setattr(firebase_admin, "get_app", get_app)
+    monkeypatch.setattr(firebase_admin, "initialize_app", initialize_app)
+    providers = [FirebaseIdentityProvider(project_id="p", credentials_path=None) for _ in range(20)]
+    errors, apps = [], []
+
+    def first_request(provider):
+        try:
+            apps.append(provider._get_app())
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=first_request, args=(p,)) for p in providers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and len(started) == 1 and all(a is started[0] for a in apps)

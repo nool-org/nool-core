@@ -128,7 +128,7 @@ def read_env(env_file):
 
 def db_config(env_file):
     env = read_env(env_file)
-    return {"host": "localhost", "port": int(env.get("POSTGRES_PORT_HOST", 5432)), "user": env["POSTGRES_USER"],
+    return {"host": "127.0.0.1", "port": int(env.get("POSTGRES_PORT_HOST", 5432)), "user": env["POSTGRES_USER"],
             "password": env["POSTGRES_PASSWORD"], "dbname": env["POSTGRES_DB"]}
 
 
