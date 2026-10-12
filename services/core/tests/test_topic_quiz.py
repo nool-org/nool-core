@@ -47,6 +47,17 @@ def test_quiz_slots_add_two_spoken_answers():
     assert len(service.quiz_slots(2, [A])) == 8
 
 
+def test_maths_quiz_mixes_in_its_own_question_types():
+    first = service.quiz_slots(1, subject="Mathematics")
+    assert first == [("mcq", B.REMEMBER)] * 2 + [("mcq", B.UNDERSTAND)] * 2 + [("mcq", B.APPLY)] * 2 + [
+        ("who_is_right", B.ANALYZE), ("fix_steps", B.EVALUATE), ("make_your_own", B.CREATE), ("voice", B.UNDERSTAND)]
+    recheck = service.quiz_slots(2, ["CREATE", "APPLY"], subject="Mathematics")
+    assert [k for k, _ in recheck] == ["mcq"] * 4 + ["make_your_own", "voice"]
+    assert recheck[0] == ("mcq", B.APPLY)
+    assert [k for k, _ in service.quiz_slots(2, ["APPLY"], subject="Mathematics")][-2] == "who_is_right"
+    assert service.quiz_slots(1, subject="Science") == service.quiz_slots(1)  # no mix: unchanged
+
+
 def test_scores_lagging_and_outcome():
     scores = service.per_bloom([(B.APPLY, False), (B.REMEMBER, True), (B.REMEMBER, False), (B.APPLY, False),
                                 (B.UNDERSTAND, True)])
@@ -353,3 +364,54 @@ async def test_chapter_focus_tells_milo_what_was_hard_and_what_is_mastered(db_se
     focus = await service.chapter_focus(db_session, s.student, s.electricity.id)
     assert focus == "Found Apply and Analyze hard on Ohm's law. Has mastered: Power."
     assert await service.chapter_focus(db_session, s.student, s.light.id) is None
+
+
+async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, monkeypatch):
+    from src.api.schemas.daily_practice import PracticeResponseIn
+    from src.domain.models import Chapter, PracticeQuestion, Subject
+    from tests.test_question_types import FIX, MINE, WHO
+
+    s = await _seed(db_session)
+    (await db_session.get(Subject, (await db_session.get(Chapter, s.ohm.chapter_id)).subject_id)).name = "Mathematics"
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    calls = []
+    _stub_analysis(monkeypatch, calls)
+    asked = []
+
+    async def special_questions(payload):
+        asked.append(payload)
+        return {"questions": [
+            {"slot_index": 0, "kind": "who_is_right", "bloom_level": "ANALYZE", "text": "Can 6ⁿ end in 0?", "spec": WHO},
+            {"slot_index": 1, "kind": "fix_steps", "bloom_level": "EVALUATE", "text": FIX["problem"], "spec": FIX},
+            {"slot_index": 2, "kind": "make_your_own", "bloom_level": "CREATE", "text": "HCF 6, LCM 36?",
+             "spec": {**MINE, "example": ["6", "30"]}},  # its own example fails: dropped, becomes an MCQ
+        ]}
+
+    monkeypatch.setattr(service.daily_practice.generation_client, "special_questions", special_questions)
+    quiz = await _start(db_session, s, s.ohm)
+    assert [i.kind for i in quiz.items] == ["mcq"] * 6 + ["who_is_right", "fix_steps", "mcq", "voice"]
+    assert [sl["kind"] for sl in asked[0]["slots"]] == ["who_is_right", "fix_steps", "make_your_own"]
+    assert "pair_hcf_lcm" in {c["kind"] for c in asked[0]["checks"]} and asked[0]["subject"] == "Mathematics"
+    who = next(i for i in quiz.items if i.kind == "who_is_right")
+    assert who.spec["reasons"] == ["6 is even", "6ⁿ has no factor 5", "Powers of 6 end in 6"]
+    assert "correct" not in str(who.spec)  # never the answer before answering
+    stored = (await db_session.execute(service.select(PracticeQuestion).where(
+        PracticeQuestion.topic_id == s.ohm.id, PracticeQuestion.kind == "who_is_right"))).scalar_one()
+    assert stored.origin == "generated"  # kept in the shared pool for the next student
+
+    await _answer(db_session, s, quiz, {R, U, A, AN})  # the dropped make_your_own fell back to an Analyze MCQ
+    fix = next(i for i in quiz.items if i.kind == "fix_steps")
+    for item, response in ((who, {"pick": 1, "reason": 1}), (fix, {"step": 0, "fix": 0})):
+        out = await practice_routes.answer_my_practice_response(quiz.id, item.id, PracticeResponseIn(response=response),
+                                                                 user=s.student, session=db_session)
+        assert out.result.reveal["explanation"]
+    assert out.result.score == 0 and out.result.message == "Milo's mistake is in step 3."
+    again = await practice_routes.answer_my_practice_response(quiz.id, fix.id, PracticeResponseIn(
+        response={"step": 2, "fix": 0}), user=s.student, session=db_session)
+    assert again.result.score == 0  # the first answer counts
+
+    a = (await _finish(db_session, s, quiz)).analysis
+    assert a.per_bloom["ANALYZE"] == 100 and a.per_bloom["EVALUATE"] == 0 and "EVALUATE" in a.lagging
+    assert list(a.per_bloom) == ["REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE", "EVALUATE"]  # Bloom order
+    assert any(m["question"].startswith("(fix steps)") for m in calls[0]["missed"])

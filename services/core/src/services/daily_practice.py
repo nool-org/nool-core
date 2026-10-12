@@ -51,7 +51,7 @@ from src.domain.models import (
     User,
 )
 from src.repositories.dataset_access import visible_datasets
-from src.services import ai_context, generation_client
+from src.services import ai_context, answer_checks, generation_client, question_types
 from src.services.homework_builder import _sections
 from src.services.mcq_test import award_points, correct_index, explanation_of, strip_inline_options
 from src.services.question_selector import text_only_filter
@@ -255,6 +255,60 @@ async def _generate(session: AsyncSession, school_class: SchoolClass, chapter_id
     return made
 
 
+async def _generate_special(session: AsyncSession, school_class: SchoolClass, slots: list[Slot],
+                            indexes: list[int]) -> dict[int, PracticeQuestion]:
+    """who_is_right / make_your_own / fix_steps questions written by the
+    generation service for these slots (by index), kept in the pool only if
+    their spec holds together (question_types.validate - a make_your_own's
+    own example must pass its check). Best effort: the rest become MCQs."""
+    if not indexes or not generation_client.is_configured():
+        return {}
+    made: dict[int, PracticeQuestion] = {}
+    for topic_id in dict.fromkeys(slots[i].topic.id for i in indexes):
+        mine = [i for i in indexes if slots[i].topic.id == topic_id]
+        topic = slots[mine[0]].topic
+        chapter = await session.get(Chapter, topic.chapter_id)
+        subject = await session.get(Subject, chapter.subject_id) if chapter else None
+        _, sections = await _sections(session, SimpleNamespace(chapter_id=topic.chapter_id), topic.id)
+        if not sections:
+            continue
+        avoid = (await session.execute(select(PracticeQuestion.text).where(
+            PracticeQuestion.topic_id == topic.id, PracticeQuestion.kind.in_(question_types.KINDS))
+            .order_by(PracticeQuestion.created_at.desc()).limit(20))).scalars().all()
+        payload = {
+            "grade": school_class.grade, "subject": subject.name if subject else "Science",
+            "chapter": chapter.name if chapter else "", "topic": tidy(topic.name),
+            "context": "\n\n".join(f"{s['title']}\n{s['text']}" for s in sections),
+            "slots": [{"kind": slots[i].kind, "bloom_level": slots[i].bloom_level.value} for i in mine],
+            "checks": [{"kind": k, "describe": c.describe} for k, c in answer_checks.KINDS.items()],
+            "avoid": list(avoid),
+        }
+        try:
+            with ai_context.feature("special_questions"):
+                body = await generation_client.special_questions(payload)
+        except generation_client.GenerationServiceUnavailableError:
+            logger.warning("special_questions_unavailable", extra={"topic_id": str(topic.id)})
+            continue
+        for g in body.get("questions", []):
+            n = g.get("slot_index", -1)
+            if not 0 <= n < len(mine) or mine[n] in made or g.get("kind") != slots[mine[n]].kind:
+                continue
+            try:
+                question_types.validate(g["kind"], g.get("spec") or {})
+            except question_types.SpecError as exc:
+                logger.warning("special_question_rejected", extra={"kind": g["kind"], "reason": str(exc)})
+                continue
+            slot = slots[mine[n]]
+            made[mine[n]] = PracticeQuestion(
+                chapter_id=topic.chapter_id, topic_id=topic.id, bloom_level=slot.bloom_level, kind=slot.kind,
+                text=g["text"], spec=g["spec"], options=None, correct_index=None,
+                explanation=g["spec"].get("explanation") or None, expected_points=[], misconceptions=[],
+                origin="generated", used_count=0)
+    session.add_all(made.values())
+    await session.flush()
+    return made
+
+
 async def _explain(questions: list[PracticeQuestion], topic_names: dict) -> None:
     """One batched generation call writes the "why" and hint of every MCQ
     lacking them; kept on the pool row so it's written once. Best effort -
@@ -298,16 +352,21 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
     dataset_ids = [d.id for d in await visible_datasets(session, student) if d.type == DatasetType.QA]
     picked: dict[int, PracticeQuestion] = {}
     for i, slot in enumerate(slots):
-        for kind in dict.fromkeys([slot.kind, "mcq"]):
+        # a who_is_right/make_your_own/fix_steps slot waits for generation before it settles for an MCQ
+        for kind in [slot.kind] if slot.kind in question_types.KINDS else dict.fromkeys([slot.kind, "mcq"]):
             exact = exact_level and kind == "mcq"  # spoken questions are few: any level, scored at its own
             q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact)
-            if q is None and await _import_bank(session, dataset_ids, slot.topic, kind):
+            if q is None and kind in ("mcq", "voice") and await _import_bank(session, dataset_ids, slot.topic, kind):
                 q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact)
             if q is not None:
                 slots[i] = replace(slot, kind=kind)
                 picked[i] = q
                 exclude.add(q.id)
                 break
+    special = [i for i in range(len(slots)) if i not in picked and slots[i].kind in question_types.KINDS]
+    for i, q in (await _generate_special(session, school_class, slots, special)).items():
+        picked[i] = q
+        exclude.add(q.id)
     open_slots = [i for i in range(len(slots)) if i not in picked]
     for chapter_id in dict.fromkeys(slots[i].topic.chapter_id for i in open_slots):
         mine = [i for i in open_slots if slots[i].topic.chapter_id == chapter_id]
@@ -602,6 +661,23 @@ async def answer_mcq(session: AsyncSession, item: DailyPracticeItem, question: P
     return {"correct": bool(item.correct), "correct_index": question.correct_index,
             "explanation": explanation(question), "xp_awarded": item.xp_awarded,
             "combo": await combo_of(session, item)}
+
+
+async def answer_special(session: AsyncSession, item: DailyPracticeItem, question: PracticeQuestion,
+                         response: dict) -> None:
+    """Marks the first answer to a who_is_right / make_your_own / fix_steps
+    item (question_types.grade); a repeat keeps the stored one. Caller commits."""
+    if item.kind not in question_types.KINDS:
+        raise ValidationError("This question is answered another way.")
+    await session.execute(select(DailyPracticeItem).where(DailyPracticeItem.id == item.id).with_for_update()
+                          .execution_options(populate_existing=True))
+    if item.answered_at is not None:
+        return
+    graded = question_types.grade(item.kind, question.spec or {}, response)
+    item.response = response
+    item.feedback = {"message": graded["message"], "mistake": graded["mistake"]}
+    item.answered_at = datetime.now(timezone.utc)
+    await record_item_result(session, item, score=graded["score"], correct=graded["correct"])
 
 
 def explanation(question: PracticeQuestion) -> str:

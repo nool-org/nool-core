@@ -22,6 +22,9 @@ from src.api.schemas.daily_practice import (
     PracticeItemOut,
     PracticeMcqAnswerIn,
     PracticeMcqAnswerOut,
+    PracticeResponseIn,
+    PracticeResponseOut,
+    SpecialResultOut,
     TopicProgressOut,
     TopicTaughtIn,
     VoiceFeedbackOut,
@@ -30,18 +33,25 @@ from src.api.schemas.daily_practice import (
 from src.domain.models import Chapter, ClassTopicProgress, Role, StudentProfile, Topic, User
 from src.repositories.lookups import get_class_in_school
 from src.repositories.roster_repository import teaches_class, teaches_class_subject
-from src.services import daily_practice, push, revision_cards
+from src.services import daily_practice, push, question_types, revision_cards
 
 router = APIRouter(prefix="/api/v1", tags=["daily-practice"])
 NOTIFY_QUIET_MINUTES = 30
 
 
 # ------------------------------------------------------------------ student
+def _special_result(item, question) -> SpecialResultOut:
+    return SpecialResultOut(score=item.score or 0, correct=bool(item.correct),
+                            message=(item.feedback or {}).get("message", ""), response=item.response or {},
+                            reveal=question_types.reveal(item.kind, question.spec or {}))
+
+
 def _item_out(item, question, topic_name) -> PracticeItemOut:
     result = None
     if item.answered_at is not None:
         result = (McqResultOut(correct=bool(item.correct), correct_index=question.correct_index,
                                explanation=daily_practice.explanation(question)) if item.kind == "mcq"
+                  else _special_result(item, question) if item.kind in question_types.KINDS
                   else VoiceResultOut(transcript=item.transcript, score=item.score,
                                       feedback=VoiceFeedbackOut(**(item.feedback or {}))))
     return PracticeItemOut(
@@ -49,6 +59,7 @@ def _item_out(item, question, topic_name) -> PracticeItemOut:
         bloom_level=item.bloom_level.value, review=item.review, text=question.text,
         # never the answer of an unanswered question: correct_index stays server-side
         options=question.options if item.kind == "mcq" else None,
+        spec=question_types.public(item.kind, question.spec or {}) if item.kind in question_types.KINDS else None,
         answered=item.answered_at is not None, result=result)
 
 
@@ -88,6 +99,22 @@ async def answer_my_daily_practice_mcq(
     result = await daily_practice.answer_mcq(session, item, question, body.option_index, body.elapsed_ms)
     await session.commit()
     return PracticeMcqAnswerOut.model_validate(result)
+
+
+@router.post("/me/daily-practice/{session_id}/items/{item_id}/response")
+async def answer_my_practice_response(
+    session_id: str,
+    item_id: str,
+    body: PracticeResponseIn,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> PracticeResponseOut:
+    """Answers a who_is_right / make_your_own / fix_steps item - the first
+    answer counts; a repeat returns the stored result."""
+    _, item, question = await daily_practice.load_item_for_student(session, session_id, item_id, user)
+    await daily_practice.answer_special(session, item, question, body.response)
+    await session.commit()
+    return PracticeResponseOut(result=_special_result(item, question), xp_awarded=item.xp_awarded or 0)
 
 
 @router.post("/me/daily-practice/{session_id}/complete")

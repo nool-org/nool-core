@@ -28,17 +28,27 @@ class VoiceResultOut(CamelModel):
     feedback: VoiceFeedbackOut
 
 
+class SpecialResultOut(CamelModel):
+    """who_is_right / make_your_own / fix_steps (services/question_types.py)."""
+    score: int
+    correct: bool
+    message: str  # what the answer shows ("HCF(6, 30) is 6 and the LCM is 30, not 36.")
+    response: dict  # what the student did
+    reveal: dict  # the right choice / an example answer, and the explanation
+
+
 class PracticeItemOut(CamelModel):
     id: str
     order: int
-    kind: Literal["mcq", "voice"]
+    kind: Literal["mcq", "voice", "who_is_right", "make_your_own", "fix_steps"]
     topic_name: str | None
     bloom_level: str
     review: bool
     text: str
     options: list[str] | None
+    spec: dict | None = None  # the special kinds' question parts - never which choice is right
     answered: bool
-    result: McqResultOut | VoiceResultOut | None
+    result: McqResultOut | VoiceResultOut | SpecialResultOut | None
 
 
 class DailyPracticeTodayOut(CamelModel):
@@ -57,6 +67,15 @@ class DailyPracticeTodayOut(CamelModel):
 class PracticeMcqAnswerIn(CamelModel):
     option_index: int = Field(ge=0, le=3)
     elapsed_ms: int | None = Field(default=None, ge=0)
+
+
+class PracticeResponseIn(CamelModel):
+    response: dict  # who_is_right {pick, reason}; fix_steps {step, fix}; make_your_own {values: [str]}
+
+
+class PracticeResponseOut(CamelModel):
+    result: SpecialResultOut
+    xp_awarded: int
 
 
 class PracticeMcqAnswerOut(CamelModel):

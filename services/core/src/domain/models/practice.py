@@ -56,8 +56,10 @@ class PracticeQuestion(IdMixin, Base):
     chapter_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chapters.id"))
     topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"), nullable=True)
     bloom_level: Mapped[BloomLevel] = mapped_column(SAEnum(BloomLevel, name="bloom_level", create_type=False))
-    kind: Mapped[str] = mapped_column(String(10))  # mcq | voice
+    kind: Mapped[str] = mapped_column(String(20))  # mcq | voice | who_is_right | make_your_own | fix_steps
     text: Mapped[str] = mapped_column(Text)
+    # the type's details (services/question_types.py) - characters and reasons, check and fields, steps and fixes
+    spec: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     options: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     correct_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -111,7 +113,7 @@ class DailyPracticeItem(IdMixin, Base):
         UUID(as_uuid=True), ForeignKey("daily_practice_sessions.id", ondelete="CASCADE"))
     order: Mapped[int] = mapped_column(Integer)
     practice_question_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("practice_questions.id"))
-    kind: Mapped[str] = mapped_column(String(10))
+    kind: Mapped[str] = mapped_column(String(20))
     topic_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("topics.id"), nullable=True)
     bloom_level: Mapped[BloomLevel] = mapped_column(SAEnum(BloomLevel, name="bloom_level", create_type=False))
     review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())  # earlier-chapter review
@@ -120,6 +122,8 @@ class DailyPracticeItem(IdMixin, Base):
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # recorded answers: text only, audio not kept
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     feedback: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {"good": str, "add": str}
+    # what the student did on a who_is_right / make_your_own / fix_steps question (question_types.py)
+    response: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     xp_awarded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

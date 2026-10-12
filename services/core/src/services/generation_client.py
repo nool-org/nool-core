@@ -70,6 +70,13 @@ async def quiz_analysis(payload: dict) -> dict:
     return await _post("/v1/quiz/analysis", payload, GAP_FILL_TIMEOUT_SECONDS, "topic_quiz_analysis")
 
 
+async def special_questions(payload: dict) -> dict:
+    """POST /v1/questions/special - {grade, subject, chapter, topic, context, slots: [{kind, bloom_level}],
+    checks: [{kind, describe}], avoid} -> {questions: [{slot_index, kind, bloom_level, text, spec}]}
+    (who_is_right / make_your_own / fix_steps; see core's services/question_types.py)."""
+    return await _post("/v1/questions/special", payload, GAP_FILL_TIMEOUT_SECONDS, "special_questions")
+
+
 async def transcribe(audio_base64: str, mime_type: str, prompt: str, language: str = "en") -> str:
     """POST /v1/transcribe (gpt-4o-mini-transcribe) - the recognised text, stripped.
     language "auto" for students' answers, which may mix English with Indian languages."""

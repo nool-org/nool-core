@@ -43,12 +43,19 @@ from src.domain.models import (
     Topic,
     User,
 )
-from src.services import ai_context, daily_practice, generation_client, push
+from src.services import ai_context, daily_practice, generation_client, push, question_types
 from src.services.daily_practice import Slot
 
 logger = logging.getLogger(__name__)
 
-LEVELS = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND, BloomLevel.APPLY, BloomLevel.ANALYZE]
+LEVELS = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND, BloomLevel.APPLY, BloomLevel.ANALYZE]  # MCQ levels
+SCORED = [*LEVELS, BloomLevel.EVALUATE, BloomLevel.CREATE]  # what the analysis can report on
+# Per subject, the question types a quiz adds after its MCQs, each at its level (question_types.py).
+# Maths swaps its Analyze MCQs for these - they test reasoning MCQs can't.
+QUIZ_MIX: dict[str, list[tuple[str, BloomLevel]]] = {
+    "Mathematics": [("who_is_right", BloomLevel.ANALYZE), ("fix_steps", BloomLevel.EVALUATE),
+                    ("make_your_own", BloomLevel.CREATE)],
+}
 PER_LEVEL = 2  # first quiz: 8 questions
 RECHECK_SIZE = 6
 VOICE_LEVELS = [BloomLevel.UNDERSTAND, BloomLevel.APPLY]  # the 2 spoken answers on a first quiz
@@ -71,19 +78,37 @@ def quiz_levels(attempt: int, lagging: list[str] | None = None) -> list[BloomLev
     return levels[:RECHECK_SIZE]
 
 
-def quiz_slots(attempt: int, lagging: list[str] | None = None) -> list[tuple[str, BloomLevel]]:
-    """(kind, level) per question: the MCQs, then 2 spoken answers - on a
-    re-check, on the weakest levels (a spoken answer shows understanding best)."""
-    mcqs = [("mcq", level) for level in quiz_levels(attempt, lagging)]
+def quiz_slots(attempt: int, lagging: list[str] | None = None, subject: str | None = None) -> list[tuple[str, BloomLevel]]:
+    """(kind, level) per question: the MCQs, the subject's own question types
+    (QUIZ_MIX), then spoken answers - on a re-check, on the weakest levels
+    (a spoken answer shows understanding best).
+
+    Without a mix: 8 MCQs (2 per level) + 2 spoken; re-check 6 + 2.
+    With one (Maths): 6 MCQs (no Analyze) + the mix + 1 spoken; on a re-check,
+    MCQs on the lagging MCQ levels + the mix types whose level lags (else the
+    first) + 1 spoken."""
+    mix = QUIZ_MIX.get(subject or "", [])
     weak = [BloomLevel(v) for v in (lagging or [])] if attempt == 2 else []
-    voice = list(dict.fromkeys(weak + VOICE_LEVELS))[:2]
-    return mcqs + [("voice", level) for level in voice]
+    if not mix:
+        mcqs = [("mcq", level) for level in quiz_levels(attempt, lagging)]
+        voice = list(dict.fromkeys(weak + VOICE_LEVELS))[:2]
+        return mcqs + [("voice", level) for level in voice]
+    mixed_levels = {level for _, level in mix}
+    if attempt == 1:
+        mcq_levels = [level for level in LEVELS if level not in mixed_levels for _ in range(PER_LEVEL)]
+        extra = list(mix)
+    else:
+        mcq_weak = [v for v in (lagging or []) if BloomLevel(v) in LEVELS and BloomLevel(v) not in mixed_levels]
+        mcq_levels = [lv for lv in quiz_levels(2, mcq_weak) if lv not in mixed_levels][:4]
+        extra = [(k, lv) for k, lv in mix if lv in weak] or mix[:1]
+    voice = list(dict.fromkeys([lv for lv in weak if lv in VOICE_LEVELS] + VOICE_LEVELS))[:1]
+    return [("mcq", level) for level in mcq_levels] + extra + [("voice", level) for level in voice]
 
 
 def per_bloom(answers: list[tuple[BloomLevel, bool]]) -> dict[str, int]:
     """Percent right per level, in Bloom order."""
     out = {}
-    for level in LEVELS:
+    for level in SCORED:
         marks = [right for lv, right in answers if lv == level]
         if marks:
             out[level.value] = round(100 * sum(marks) / len(marks))
@@ -94,12 +119,12 @@ def ordered(scores: dict | None) -> dict[str, int] | None:
     """Per-level scores in Bloom order - JSONB doesn't keep key order."""
     if scores is None:
         return None
-    return {level.value: scores[level.value] for level in LEVELS if level.value in scores}
+    return {level.value: scores[level.value] for level in SCORED if level.value in scores}
 
 
 def lagging_levels(scores: dict[str, int]) -> list[str]:
     """Levels under LAGGING_BELOW, weakest first (the lower Bloom level on a tie)."""
-    order = [level.value for level in LEVELS]
+    order = [level.value for level in SCORED]
     return sorted((k for k, v in scores.items() if v < LAGGING_BELOW), key=lambda k: (scores[k], order.index(k)))
 
 
@@ -248,7 +273,9 @@ async def start(session: AsyncSession, student: User, topic_id: str, attempt: in
         DailyPracticeSession.attempt == attempt).execution_options(populate_existing=True))).scalar_one()
     if created is None:  # a concurrent first open built it
         return quiz
-    slots = [Slot(topic, kind, level) for kind, level in quiz_slots(attempt, lagging)]
+    chapter = await session.get(Chapter, topic.chapter_id)
+    subject = await session.get(Subject, chapter.subject_id) if chapter else None
+    slots = [Slot(topic, kind, level) for kind, level in quiz_slots(attempt, lagging, subject.name if subject else None)]
     # ponytail: holds the row through the LLM calls on a cold pool, as daily practice does
     with ai_context.feature("topic_quiz_mcq"):
         chosen = await daily_practice._fill(session, student, school_class, slots, daily_practice.today_ist(),
@@ -288,6 +315,10 @@ async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: To
     missed += [{"bloom_level": item.bloom_level.value, "question": f"(answered aloud) {q.text}",
                 "chosen": (item.transcript or "")[:500], "correct": "; ".join(q.expected_points or [])[:500]}
                for item, q, _ in items if item.kind == "voice" and item.answered_at and not item.correct]
+    missed += [{"bloom_level": item.bloom_level.value, "question": f"({item.kind.replace('_', ' ')}) {q.text}",
+                "chosen": f"{(item.feedback or {}).get('message', '')} [mistake: {(item.feedback or {}).get('mistake')}]"[:500],
+                "correct": (q.spec or {}).get("explanation", "")[:500]}
+               for item, q, _ in items if item.kind in question_types.KINDS and item.answered_at and not item.correct]
     name = daily_practice.tidy(topic.name)
     try:
         with ai_context.feature("topic_quiz_analysis"):
