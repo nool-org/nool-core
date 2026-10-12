@@ -7,7 +7,9 @@
   first open: 6 MCQs + 2 recorded (voice) answers - 3 on the most recently
   taught topics, 2 on topics due for review, 2 on the weakest, and 1 review
   of an earlier chapter's weak/due topic (else the current chapter's).
-  Never a question the student got in the last 14 days.
+  Never a question the student got in the last 14 days. Topics taught
+  later that day rebuild an unstarted set or add up to 4 MCQs to a started
+  one (twice a day at most).
 - Questions come from a shared pool (PracticeQuestion): pool rows first,
   then the question bank (imported into the pool), then MCQs written by the
   generation service. MCQ explanations/hints are written once per batch and
@@ -25,7 +27,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,6 +69,9 @@ COMPLETION_XP = 10
 VOICE_MAX_CHARS = 200  # a bank question short enough to read out and answer aloud
 BANK_IMPORT_LIMIT = 10  # bank questions moved into the pool per topic and kind at a time
 IDLE_DAYS, DROP_POINTS = 3, 15  # "slipping" for the teacher's summary
+EXTENSION_ITEMS, MAX_EXTENSIONS, MAX_ITEMS = 4, 2, 16  # MCQs on topics taught after the day's set was built
+SMALL_WORDS = {"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to"}
+EXTENSION_ORDER = 100  # the n-th extension's items are ordered from n*100+1: told apart without a column
 
 
 def today_ist() -> date:
@@ -316,23 +321,100 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
 
 
 # ------------------------------------------------------------------ session
+def extension_of(order: int) -> int:
+    """0 for the day's first set, n for the n-th extension's items."""
+    return order // EXTENSION_ORDER
+
+
+def latest_extension(items: list[tuple[DailyPracticeItem, PracticeQuestion, str | None]]) -> tuple[int, list[str]]:
+    """(unanswered items of the latest extension, their topic names) - (0, []) if none."""
+    band = max((extension_of(item.order) for item, _, _ in items), default=0)
+    fresh = [(item, name) for item, _, name in items
+             if band and extension_of(item.order) == band and item.answered_at is None]
+    return len(fresh), list(dict.fromkeys(tidy(name) for _, name in fresh if name))
+
+
+def tidy(name: str) -> str:
+    """Title Case for an ALL CAPS textbook heading (as the app's tidyTitle); others unchanged."""
+    if not name.isupper():
+        return name
+    words = name.lower().split(" ")
+    return " ".join(w if n and w in SMALL_WORDS else w[:1].upper() + w[1:] for n, w in enumerate(words))
+
+
+async def _newly_taught(session: AsyncSession, practice: DailyPracticeSession,
+                        taught: list[tuple[ClassTopicProgress, Topic]]) -> tuple[list[Topic], list[DailyPracticeItem]]:
+    """Topics marked taught after the session was built that none of its
+    items is on yet (most recently taught first), and the session's items."""
+    items = list((await session.execute(select(DailyPracticeItem).where(
+        DailyPracticeItem.session_id == practice.id).order_by(DailyPracticeItem.order))).scalars().all())
+    have = {i.topic_id for i in items}
+    return [t for p, t in taught if p.created_at > practice.created_at and t.id not in have], items
+
+
+async def _extend(session: AsyncSession, student: User, school_class: SchoolClass, practice: DailyPracticeSession,
+                  taught: list[tuple[ClassTopicProgress, Topic]], today: date) -> None:
+    """Appends up to 4 MCQs on topics taught since the session was built (at
+    most 2 extensions, 16 items a day) and reopens a completed session -
+    completed_at stays, so complete() won't pay the bonus twice. The row
+    lock makes a concurrent open wait and then find the topics covered."""
+    await session.execute(select(DailyPracticeSession).where(DailyPracticeSession.id == practice.id)
+                          .with_for_update().execution_options(populate_existing=True))
+    new, items = await _newly_taught(session, practice, taught)
+    band = max((extension_of(i.order) for i in items), default=0)
+    room = min(EXTENSION_ITEMS, MAX_ITEMS - len(items))
+    if not new or band >= MAX_EXTENSIONS or room <= 0:
+        return
+    levels = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND, BloomLevel.APPLY]
+    slots = [Slot(new[n % len(new)], "mcq", levels[n // len(new) % 3]) for n in range(room)]
+    # ponytail: a new topic with no question anywhere is retried on every open; store a marker if that bites
+    chosen = await _fill(session, student, school_class, slots, today, f"{practice.id}:{band + 1}")
+    if not chosen:
+        return
+    start = (band + 1) * EXTENSION_ORDER
+    session.add_all([DailyPracticeItem(session_id=practice.id, order=start + n, practice_question_id=q.id,
+                                       kind=q.kind, topic_id=slot.topic.id, bloom_level=q.bloom_level, review=False)
+                     for n, (slot, q) in enumerate(chosen, start=1)])
+    practice.status = "open"
+    await session.flush()
+    logger.info("daily_practice_extended", extra={"student_id": str(student.id), "items": len(chosen)})
+
+
 async def ensure_today(session: AsyncSession, student: User) -> tuple[DailyPracticeSession | None, str | None]:
     """Today's session, built on first call; or (None, empty reason). The
     insert is ON CONFLICT DO NOTHING on (student, date): a concurrent open
     waits for the first one's commit and then reads its session.
-    Caller commits."""
+    Topics taught after it was built: an unstarted session is rebuilt, a
+    started (or completed) one is extended (_extend). Caller commits."""
     school_class = await class_of(session, student.id)
     taught = await taught_topics(session, school_class.id) if school_class else []
     if not taught:
         return None, "no_topics_taught"
     today = today_ist()
+    practice = (await session.execute(select(DailyPracticeSession).where(
+        DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today))
+    ).scalar_one_or_none()
+    if practice is not None:
+        new, items = await _newly_taught(session, practice, taught)
+        if not new:
+            return practice, None
+        if any(i.answered_at is not None for i in items):
+            await _extend(session, student, school_class, practice, taught, today)
+            return practice, None
+        # nothing answered yet: rebuild with the current plan. A concurrent rebuild deletes nothing
+        # and then waits on the insert below, like a concurrent first open.
+        await session.execute(delete(DailyPracticeSession).where(
+            DailyPracticeSession.id == practice.id,
+            ~exists().where(DailyPracticeItem.session_id == practice.id, DailyPracticeItem.answered_at.is_not(None))))
+        session.expunge(practice)
     created = (await session.execute(pg_insert(DailyPracticeSession).values(
         id=uuid.uuid4(), student_id=student.id, practice_date=today, chapter_id=taught[0][0].chapter_id,
         status="open", xp_awarded=0,
     ).on_conflict_do_nothing(index_elements=["student_id", "practice_date"])
         .returning(DailyPracticeSession.id))).scalar_one_or_none()
     practice = (await session.execute(select(DailyPracticeSession).where(
-        DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today))).scalar_one()
+        DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today)
+        .execution_options(populate_existing=True))).scalar_one()
     if created is None:
         return practice, None
 
@@ -527,7 +609,9 @@ async def completed_dates(session: AsyncSession, student_ids, upto: date) -> dic
     out: dict[uuid.UUID, set[date]] = {s: set() for s in student_ids}
     for student_id, day in (await session.execute(
             select(DailyPracticeSession.student_id, DailyPracticeSession.practice_date).where(
-                DailyPracticeSession.student_id.in_(list(out)), DailyPracticeSession.status == "completed",
+                DailyPracticeSession.student_id.in_(list(out)),
+                # an extension reopens a completed day; it still counts
+                or_(DailyPracticeSession.status == "completed", DailyPracticeSession.completed_at.is_not(None)),
                 DailyPracticeSession.practice_date <= upto))).all():
         out[student_id].add(day)
     return out
@@ -540,7 +624,8 @@ async def student_streak(session: AsyncSession, student_id: uuid.UUID) -> int:
 
 async def complete(session: AsyncSession, practice: DailyPracticeSession) -> dict:
     """Closes the session once every item is answered (409 before), adding the
-    completion bonus once; calling again returns the same summary. Mastery
+    completion bonus once (not again after an extension reopened it); calling
+    again returns the same summary. Mastery
     before/after per topic practised: before = from every earlier day's
     answers, after = including this day's. Caller commits."""
     items = await items_of(session, practice.id)
@@ -548,9 +633,14 @@ async def complete(session: AsyncSession, practice: DailyPracticeSession) -> dic
         raise ConflictError("Answer every question first.")
     claimed = (await session.execute(
         update(DailyPracticeSession).where(DailyPracticeSession.id == practice.id,
-                                           DailyPracticeSession.status == "open")
+                                           DailyPracticeSession.status == "open",
+                                           DailyPracticeSession.completed_at.is_(None))
         .values(status="completed", completed_at=datetime.now(timezone.utc))
         .returning(DailyPracticeSession.completed_at))).scalar_one_or_none()
+    if claimed is None and practice.status == "open":  # finished an extension: no second bonus
+        await session.execute(update(DailyPracticeSession).where(DailyPracticeSession.id == practice.id)
+                              .values(status="completed"))
+        practice.status = "completed"
     if claimed is not None:
         practice.status, practice.completed_at = "completed", claimed
         practice.xp_awarded = (practice.xp_awarded or 0) + COMPLETION_XP

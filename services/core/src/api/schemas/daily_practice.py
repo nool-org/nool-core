@@ -50,6 +50,8 @@ class DailyPracticeTodayOut(CamelModel):
     xp_awarded: int
     streak_days: int
     empty_reason: Literal["no_topics_taught", "no_questions"] | None
+    new_items: int = 0  # unanswered items the latest extension added (topics taught after the set was built)
+    new_topics: list[str] = []  # their topics
 
 
 class PracticeMcqAnswerIn(CamelModel):

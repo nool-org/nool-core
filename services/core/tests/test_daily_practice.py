@@ -41,7 +41,7 @@ from src.domain.models import (
     UserStatus,
 )
 from src.services import daily_practice as service
-from src.services import practice_voice
+from src.services import practice_voice, push
 
 B = BloomLevel
 
@@ -230,6 +230,8 @@ def test_mastery_due_and_xp_math():
     days = {today - timedelta(days=n) for n in (1, 2, 3, 5)}
     assert service.streak_days(days, today) == 3 and service.streak_days(days | {today}, today) == 4
     assert service.streak_days({today - timedelta(days=2)}, today) == 0
+    assert service.tidy("2.1 ACIDS, BASES AND SALTS") == "2.1 Acids, Bases and Salts"
+    assert service.tidy("Ohm's law") == "Ohm's law"
 
 
 # ------------------------------------------------------------- the session
@@ -440,7 +442,8 @@ async def test_complete_needs_every_answer_and_is_idempotent(db_session):
     voice = next(i for i in shown.items if i.kind == "voice")
     assert voice.result.score == 80 and voice.result.transcript == "my answer"
     wire = shown.model_dump(by_alias=True, mode="json")
-    assert {"sessionId", "date", "chapter", "status", "items", "xpAwarded", "streakDays", "emptyReason"} == set(wire)
+    assert {"sessionId", "date", "chapter", "status", "items", "xpAwarded", "streakDays", "emptyReason",
+            "newItems", "newTopics"} == set(wire)
     mcq_wire = next(i for i in wire["items"] if i["kind"] == "mcq")
     assert set(mcq_wire["result"]) == {"correct", "correctIndex", "explanation"} and "topicName" in mcq_wire
     assert set(next(i for i in wire["items"] if i["kind"] == "voice")["result"]) == {"transcript", "score", "feedback"}
@@ -534,3 +537,124 @@ async def test_class_summary(db_session):
     earlier = await routes.get_daily_practice_summary(str(s.cls.id), date=today - timedelta(days=20),
                                                       user=s.teacher, session=db_session)
     assert earlier.practised_count == 0 and earlier.slipping == []
+
+
+# ------------------------------------------------- topics taught later today
+async def _backdate(db, out, hours=3):
+    """The set was built earlier today (in a test everything shares one transaction's now())."""
+    practice = await db.get(DailyPracticeSession, uuid.UUID(out.session_id))
+    practice.created_at = datetime.now(timezone.utc) - timedelta(hours=hours)
+    await db.flush()
+
+
+async def test_an_unstarted_set_is_rebuilt_when_a_topic_is_taught_later(db_session):
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.current, 1)
+    for topic in (s.current, s.ohm):
+        await _bank(db_session, s, topic, mcq=6, voice=3)
+    first = await _today(db_session, s.student)
+    assert {i.topic_name for i in first.items} == {"Current"}
+    await _backdate(db_session, first)
+    await _teach(db_session, s, s.ohm)
+    rebuilt = await _today(db_session, s.student)
+    assert rebuilt.session_id != first.session_id and "Ohm's law" in {i.topic_name for i in rebuilt.items}
+    assert len(rebuilt.items) == 8 and rebuilt.new_items == 0 and rebuilt.new_topics == []
+    assert await db_session.get(DailyPracticeSession, uuid.UUID(first.session_id)) is None
+    again = await _today(db_session, s.student)
+    assert again.session_id == rebuilt.session_id
+
+
+async def test_a_completed_set_is_extended_and_reopened_without_a_second_bonus(db_session):
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.current, 1)
+    await _bank(db_session, s, s.current, mcq=10, voice=3)
+    for topic in (s.ohm, s.power):
+        await _bank(db_session, s, topic, mcq=6)
+    out = await _today(db_session, s.student)
+    await _answer_all(db_session, s, out)
+    await routes.complete_my_daily_practice(out.session_id, user=s.student, session=db_session)
+    practice = await db_session.get(DailyPracticeSession, uuid.UUID(out.session_id))
+    completed_at = practice.completed_at
+    await _backdate(db_session, out)
+    unchanged = await _today(db_session, s.student)  # nothing new taught: no extension
+    assert unchanged.status == "completed" and len(unchanged.items) == 8 and unchanged.new_items == 0
+
+    await _teach(db_session, s, s.ohm)
+    await _teach(db_session, s, s.power)
+    extended = await _today(db_session, s.student)
+    assert extended.session_id == out.session_id and extended.status == "open" and extended.streak_days == 1
+    new = extended.items[8:]
+    assert len(extended.items) == 12 and [i.order for i in new] == [101, 102, 103, 104]
+    assert all(i.kind == "mcq" and not i.review and not i.answered for i in new)
+    assert sorted(i.topic_name for i in new) == ["Ohm's law", "Ohm's law", "Power", "Power"]
+    assert extended.new_items == 4 and sorted(extended.new_topics) == ["Ohm's law", "Power"]
+    await _answer(db_session, s.student, extended, new[0], (await _question_of(db_session, new[0].id)).correct_index)
+    assert (await _today(db_session, s.student)).new_items == 3
+
+    for item in new[1:]:
+        await _answer(db_session, s.student, extended, item, (await _question_of(db_session, item.id)).correct_index)
+    points = (await db_session.get(StudentPoints, s.student.id)).points
+    done = await routes.complete_my_daily_practice(out.session_id, user=s.student, session=db_session)
+    assert done.xp_awarded == 10 and {"Ohm's law", "Power"} <= {m.topic_name for m in done.mastery}
+    assert (await db_session.get(StudentPoints, s.student.id)).points == points  # the bonus was paid once
+    assert practice.status == "completed" and practice.completed_at == completed_at
+    final = await _today(db_session, s.student)
+    assert final.status == "completed" and final.new_items == 0 and len(final.items) == 12
+
+
+async def test_at_most_two_extensions_and_16_items_a_day(db_session):
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.current, 1)
+    await _bank(db_session, s, s.current, mcq=8, voice=3)
+    out = await _today(db_session, s.student)
+    first = next(i for i in out.items if i.kind == "mcq")
+    await _answer(db_session, s.student, out, first, 0)
+    await _backdate(db_session, out)
+    extra = [Topic(chapter_id=s.electricity.id, name=f"Extra {n}", text_content="...") for n in range(7)]
+    db_session.add_all(extra)
+    await db_session.flush()
+    for topic in extra[:6]:
+        await _pool(db_session, topic, 2)
+        await _teach(db_session, s, topic)
+    one = await _today(db_session, s.student)
+    assert len(one.items) == 12 and one.new_items == 4 and len(one.new_topics) == 4
+    two = await _today(db_session, s.student)  # the 2 topics the first extension had no room for
+    assert len(two.items) == 16 and [i.order for i in two.items[12:]] == [201, 202, 203, 204]
+    assert two.new_items == 4 and len(two.new_topics) == 2
+    await _pool(db_session, extra[6], 2)
+    await _teach(db_session, s, extra[6])
+    three = await _today(db_session, s.student)
+    assert len(three.items) == 16 and "Extra 6" not in {i.topic_name for i in three.items}
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    calls = []
+
+    async def fake(session, user_ids, title, body, data=None):
+        calls.append({"user_ids": {u for u in user_ids}, "title": title, "body": body, "data": data})
+        return 1
+
+    monkeypatch.setattr(push, "send_push", fake)
+    return calls
+
+
+async def test_marking_a_topic_taught_today_notifies_the_class_once_per_lesson(db_session, sent):
+    s = await _seed(db_session, students=2)
+    cid = str(s.cls.id)
+    yesterday = service.today_ist() - timedelta(days=1)
+    await routes.set_topic_taught(cid, str(s.current.id), TopicTaughtIn(taught=True, taught_on=yesterday),
+                                  user=s.teacher, session=db_session)
+    assert sent == []  # back-dated: not a lesson today
+    for row in (await db_session.execute(select(ClassTopicProgress).where(
+            ClassTopicProgress.class_id == s.cls.id))).scalars().all():
+        row.created_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    await db_session.flush()
+    await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), user=s.teacher, session=db_session)
+    [call] = sent
+    assert call["user_ids"] == {k.id for k in s.students} and call["title"] == "New practice is ready"
+    assert call["body"] == "Your teacher just taught Ohm's law. Try a few questions."
+    assert call["data"] == {"type": "daily_practice"}
+    await routes.set_topic_taught(cid, str(s.power.id), TopicTaughtIn(taught=True), user=s.teacher,
+                                  session=db_session)
+    assert len(sent) == 1  # Ohm's law was marked within 30 minutes

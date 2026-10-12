@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,12 +27,13 @@ from src.api.schemas.daily_practice import (
     VoiceFeedbackOut,
     VoiceResultOut,
 )
-from src.domain.models import Chapter, ClassTopicProgress, Role, Topic, User
+from src.domain.models import Chapter, ClassTopicProgress, Role, StudentProfile, Topic, User
 from src.repositories.lookups import get_class_in_school
 from src.repositories.roster_repository import teaches_class, teaches_class_subject
-from src.services import daily_practice
+from src.services import daily_practice, push
 
 router = APIRouter(prefix="/api/v1", tags=["daily-practice"])
+NOTIFY_QUIET_MINUTES = 30
 
 
 # ------------------------------------------------------------------ student
@@ -60,6 +61,7 @@ async def get_my_daily_practice(
     await session.commit()
     chapter = await session.get(Chapter, practice.chapter_id) if practice and practice.chapter_id else None
     items = await daily_practice.items_of(session, practice.id) if practice else []
+    new_items, new_topics = daily_practice.latest_extension(items)
     return DailyPracticeTodayOut(
         session_id=str(practice.id) if practice else None,
         date=practice.practice_date if practice else daily_practice.today_ist(),
@@ -69,6 +71,8 @@ async def get_my_daily_practice(
         xp_awarded=practice.xp_awarded if practice else 0,
         streak_days=await daily_practice.student_streak(session, user.id),
         empty_reason=empty_reason,
+        new_items=new_items,
+        new_topics=new_topics,
     )
 
 
@@ -148,6 +152,22 @@ async def get_chapter_progress(
                 for n, t in enumerate(topics, start=1)])
 
 
+async def _notify_taught(session: AsyncSession, class_id: uuid.UUID, topic: Topic) -> None:
+    """Tells the class's students practice on today's lesson is ready -
+    once per lesson: skipped when another topic was marked in the last 30
+    minutes (a teacher ticks several topics in a row)."""
+    recent = (await session.execute(select(ClassTopicProgress.id).where(
+        ClassTopicProgress.class_id == class_id, ClassTopicProgress.topic_id != topic.id,
+        ClassTopicProgress.created_at > func.now() - dt.timedelta(minutes=NOTIFY_QUIET_MINUTES)).limit(1))).first()
+    if recent:
+        return
+    student_ids = (await session.execute(
+        select(StudentProfile.user_id).where(StudentProfile.class_id == class_id))).scalars().all()
+    await push.notify(session, student_ids, "New practice is ready",
+                      f"Your teacher just taught {daily_practice.tidy(topic.name)}. Try a few questions.",
+                      {"type": "daily_practice"})
+
+
 @router.put("/classes/{class_id}/topics/{topic_id}/taught")
 async def set_topic_taught(
     class_id: str,
@@ -157,7 +177,8 @@ async def set_topic_taught(
     session: AsyncSession = Depends(get_db_session),
 ) -> TopicProgressOut:
     """taught=true marks (or re-dates) the topic as taught in the class -
-    daily practice then asks about it; taught=false removes the mark."""
+    daily practice then asks about it (today's open sets pick it up, and a
+    mark for today notifies the class); taught=false removes the mark."""
     topic = await _get(session, Topic, topic_id, "Topic")
     chapter = await session.get(Chapter, topic.chapter_id)
     class_uuid = await _teaches(session, user, class_id, chapter.subject_id)
@@ -173,6 +194,8 @@ async def set_topic_taught(
         await session.execute(delete(ClassTopicProgress).where(
             ClassTopicProgress.class_id == class_uuid, ClassTopicProgress.topic_id == topic.id))
     await session.commit()
+    if taught_on == daily_practice.today_ist():
+        await _notify_taught(session, class_uuid, topic)
     order = [t.id for t in await _chapter_topics(session, chapter.id)].index(topic.id) + 1
     return TopicProgressOut(id=str(topic.id), name=topic.name, order=order, taught_on=taught_on)
 
