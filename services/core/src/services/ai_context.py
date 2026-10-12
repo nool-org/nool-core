@@ -1,7 +1,8 @@
 """Who an AI call is for - sent to generation and colearner as X-Nool-*
 headers so their cost log lines (generation_call_cost, grade_answer_cost,
 realtime_call_started) can be summed per feature and per student by
-scripts/cost_report.py. Context only: never used for authorization."""
+scripts/cost_report.py, and so src/services/ai_usage.py can label the row it
+persists for each call. Context only: never used for authorization."""
 
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -29,5 +30,10 @@ def feature(name: str):
         _feature.reset(token)
 
 
+def current(default_feature: str) -> dict[str, str]:
+    """{"Feature", "Student"?, "Teacher"?, "School"?} for the call about to be made."""
+    return {**_caller.get(), "Feature": _feature.get() or default_feature}
+
+
 def headers(default_feature: str) -> dict[str, str]:
-    return {f"X-Nool-{k}": v for k, v in {**_caller.get(), "Feature": _feature.get() or default_feature}.items()}
+    return {f"X-Nool-{k}": v for k, v in current(default_feature).items()}

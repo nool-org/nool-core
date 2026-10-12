@@ -1,3 +1,5 @@
+from pydantic import field_validator
+
 from shared.config import BaseServiceSettings
 
 
@@ -54,6 +56,16 @@ class CoreSettings(BaseServiceSettings):
     # Expo push notifications (src/services/push.py). Off by default so
     # tests and local dev never call out to Expo.
     expo_push_enabled: bool = False
+
+    # Monthly AI spend budget in INR, shown against this month's spend and
+    # projection on the Super Admin's GET /admin/ai-usage/summary. Optional:
+    # unset/blank = no budget (budget.monthlyInr null).
+    ai_monthly_budget_inr: float | None = None
+
+    @field_validator("ai_monthly_budget_inr", mode="before")
+    @classmethod
+    def _blank_budget_is_unset(cls, value):
+        return None if value == "" else value
 
     @property
     def database_url(self) -> str:

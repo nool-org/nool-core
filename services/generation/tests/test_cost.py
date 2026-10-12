@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 from types import SimpleNamespace
 
@@ -44,3 +46,47 @@ def test_each_llm_call_logs_its_cost_with_cores_caller_headers(caplog):
         2000, 1000, 300, 100)
     assert line["usd"] == round((1000 * 0.25 + 1000 * 0.025 + 300 * 2.0) / 1e6, 7)
     assert line["inr"] == round(line["usd"] * cost.USD_TO_INR_RATE, 5)
+
+
+def _usage(input_tokens, cached, output):
+    return SimpleNamespace(input_tokens=input_tokens, input_tokens_details=SimpleNamespace(cached_tokens=cached),
+                           output_tokens=output, output_tokens_details=SimpleNamespace(reasoning_tokens=0))
+
+
+def test_the_requests_calls_are_summed_into_the_x_nool_cost_header():
+    """Two calls (one of them in a child task, like gap-fill's gather) -> one header with the sum."""
+    async def two_calls(*, model, output_type, **_):
+        cost.log_response_usage("gpt-5.1", _usage(1000, 200, 100))
+
+        async def child():  # gather runs it as its own task, with a copy of the context
+            cost.log_response_usage("gpt-5-mini", _usage(500, 0, 50))
+
+        await asyncio.gather(child())
+        return output_type(bullets=["ok"])
+
+    APP.state.llm = two_calls
+    r = TestClient(APP).post("/v1/teacher-assistant/summary", json={"facts": {}})
+    assert r.status_code == 200
+    header = json.loads(r.headers["x-nool-cost"])
+    expected_usd = round(cost.usd("gpt-5.1", input_tokens=1000, cached_input_tokens=200, output_tokens=100)
+                         + cost.usd("gpt-5-mini", input_tokens=500, output_tokens=50), 7)
+    assert header == {"models": ["gpt-5.1", "gpt-5-mini"], "calls": 2, "input_tokens": 1500,
+                      "cached_input_tokens": 200, "output_tokens": 150, "usd": expected_usd}
+    assert " " not in r.headers["x-nool-cost"]  # compact
+
+
+def test_a_failed_request_that_paid_for_a_call_still_returns_its_cost():
+    async def paid_then_broke(*, model, **_):
+        cost.log_response_usage("gpt-5-mini", _usage(100, 0, 10))
+        raise RuntimeError("unparsable")
+
+    APP.state.llm = paid_then_broke
+    r = TestClient(APP, raise_server_exceptions=False).post("/v1/teacher-assistant/summary", json={"facts": {}})
+    assert r.status_code == 500 and r.json()["error"]["code"] == "INTERNAL_ERROR"
+    assert json.loads(r.headers["x-nool-cost"])["calls"] == 1
+
+
+def test_no_model_call_means_no_cost_header():
+    APP.state.llm = None
+    r = TestClient(APP).post("/v1/teacher-assistant/summary", json={"facts": {}})
+    assert r.status_code == 503 and "x-nool-cost" not in r.headers

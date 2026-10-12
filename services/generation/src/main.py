@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from shared.errors import register_exception_handlers
 from shared.logging import RequestContextMiddleware, configure_logging, get_logger
@@ -32,12 +33,28 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def cost_caller(request, call_next):
-        """Binds Core's X-Nool-* caller headers for this request's cost log lines."""
+        """Binds Core's X-Nool-* caller headers for this request's cost log lines,
+        and returns the request's summed spend to Core as X-Nool-Cost - on errors
+        too, since a failed request can still have paid for model calls."""
         token = cost.caller.set(cost.caller_of(request.headers, request.url.path))
+        spend = cost.new_spend()
+        spend_token = cost.spent.set(spend)
         try:
-            return await call_next(request)
+            response = await call_next(request)
+        except Exception:
+            if not spend["calls"]:
+                raise
+            # already logged by RequestContextMiddleware; same envelope as the shared 500 handler
+            response = JSONResponse(status_code=500, content={"error": {
+                "code": "INTERNAL_ERROR", "message": "An unexpected error occurred.",
+                "request_id": request.headers.get("x-request-id"),
+            }})
         finally:
             cost.caller.reset(token)
+            cost.spent.reset(spend_token)
+        if spend["calls"]:
+            response.headers["X-Nool-Cost"] = cost.cost_header(spend)
+        return response
 
     register_exception_handlers(app)
     configure_tracing(app, settings.service_name, settings.otel_exporter_otlp_endpoint)

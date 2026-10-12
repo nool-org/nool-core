@@ -38,6 +38,7 @@ from src.domain.models import (
     VoiceTestTargetStudent,
 )
 from src.repositories import get_session
+from src.services import ai_usage
 from src.services.colearner_client import create_realtime_call, finish_realtime_call
 from src.api.routes.gamification import apply_xp, session_xp
 from src.services.evaluation_service import evaluate_colearner_session, topic_scores
@@ -330,6 +331,9 @@ async def finish_session(
     ai_session, bloom_levels = await _owned_session(db, session_id, app_user)
     num_questions = _question_count(await _test_questions(db, ai_session.test_id), bloom_levels)
     result = await finish_realtime_call(call_id=body.call_id, owner_ref=str(ai_session.id), token=_bearer(authorization))
+    # the whole live call's cost (voice + transcription + grading), persisted once here
+    await ai_usage.record("colearner", "/api/v1/colearner/realtime/calls/finish", "voice_test",
+                          cost=ai_usage.realtime_cost(result.get("cost")))
     answered = min(int(result.get("answered") or 0), num_questions)
     # colearner counts hints server-side per question; the app's own count only adds to it
     hints_used = max(body.hints_used, sum(

@@ -6,12 +6,13 @@ kg_client.py."""
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
 from shared.errors import AppError
 from src.config.settings import get_settings
-from src.services import ai_context
+from src.services import ai_context, ai_usage
 
 logger = logging.getLogger(__name__)
 
@@ -82,15 +83,19 @@ async def teacher_summary(facts: dict) -> list[str]:
 
 
 async def _post(path: str, payload: dict, timeout: float, feature: str) -> dict:
-    """`feature` labels the call in generation's cost log unless ai_context.feature() overrides it."""
+    """`feature` labels the call in generation's cost log unless ai_context.feature() overrides it.
+    Every call - success or failure - is persisted with its cost (ai_usage.record)."""
     base_url = get_settings().generation_service_url
     if not base_url:
         raise GenerationServiceUnavailableError("GENERATION_SERVICE_URL is not configured.")
+    started, response = time.perf_counter(), None
     try:
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout) as client:
             response = await client.post(path, json=payload, headers=ai_context.headers(feature))
             response.raise_for_status()
-            return response.json()
     except httpx.HTTPError as exc:
+        await ai_usage.record("generation", path, feature, started=started, response=response, error=exc)
         logger.warning("generation_service_upstream_error", extra={"path": path, "reason": str(exc)})
         raise GenerationServiceUnavailableError("Could not reach the generation service.") from exc
+    await ai_usage.record("generation", path, feature, started=started, response=response)
+    return response.json()

@@ -3,6 +3,7 @@
 for), summed per feature and per student by scripts/cost_report.py.
 Same shape as colearner's cost_service.py."""
 
+import json
 import logging
 from contextvars import ContextVar
 from typing import Any
@@ -29,6 +30,21 @@ MODEL_PRICING = {
 caller: ContextVar[dict[str, str]] = ContextVar("nool_caller", default={})
 _CALLER_HEADERS = ("feature", "student", "teacher", "school")
 
+# The current request's summed spend (new_spend()), bound by main.py's
+# middleware and returned to Core as the X-Nool-Cost header, which Core
+# persists (services/core/src/services/ai_usage.py). A dict, not a value, so
+# calls made in child tasks (asyncio.gather) add to the same total.
+spent: ContextVar[dict | None] = ContextVar("nool_spent", default=None)
+
+
+def new_spend() -> dict:
+    return {"models": [], "calls": 0, "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "usd": 0.0}
+
+
+def cost_header(spend: dict) -> str:
+    """X-Nool-Cost: compact JSON of the request's summed spend."""
+    return json.dumps({**spend, "usd": round(spend["usd"], 7)}, separators=(",", ":"))
+
 
 def caller_of(headers: Any, endpoint: str) -> dict[str, str]:
     """The caller context from a request's headers (Core sets them; absent = unknown)."""
@@ -51,6 +67,13 @@ def usd(model: str, *, input_tokens: int = 0, cached_input_tokens: int = 0, audi
 def log_call(model: str, reasoning_tokens: int = 0, **usage: Any) -> None:
     """One `generation_call_cost` line: model, tokens, usd/inr + caller context."""
     cost = usd(model, **usage)
+    if (spend := spent.get()) is not None:
+        if model not in spend["models"]:
+            spend["models"].append(model)
+        spend["calls"] += 1
+        for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+            spend[key] += usage.get(key, 0)
+        spend["usd"] += cost or 0.0
     logger.info("generation_call_cost", extra={"cost": {
         "model": model, **caller.get(), **usage, "reasoning_tokens": reasoning_tokens,
         "usd": cost, "inr": None if cost is None else round(cost * USD_TO_INR_RATE, 5),

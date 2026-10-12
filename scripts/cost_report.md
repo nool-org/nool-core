@@ -22,6 +22,12 @@ It needs Python 3.10+ and only the standard library. Days, including the
 `--since`/`--until` bounds, are IST calendar days. Container logs are lost when
 a container is recreated, so save them first if you want the history.
 
+The same costs are also persisted per request in the `ai_usage_events` table
+(Core records each generation/colearner call from its `X-Nool-Cost` response
+header, and each live voice test from its finish payload) and shown to the
+Super Admin at `GET /api/v1/admin/ai-usage/summary` and `/events` - that
+history survives container recreates.
+
 ## What it reads
 
 | Log line | Service | Source |

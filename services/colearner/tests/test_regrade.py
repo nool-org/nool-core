@@ -1,4 +1,7 @@
+import json
+
 from src.api.routes import regrade
+from src.services.cost_service import record_turn_metrics
 
 _BODY = {
     "config": {"grade": "Grade 10", "subject": "Science", "chapter_name": "Electricity", "questions": [
@@ -50,3 +53,19 @@ def test_regrade_uses_the_version_asked(client, monkeypatch):
     assert client.post("/api/v1/colearner/regrade", json=body, headers={"Authorization": "Bearer t"}).status_code == 200
     assert seen["rubric"][0]["version"] == "easier" and seen["rubric"][0]["question"] == "What does V = IR mean?"
     assert seen["rubric"][0]["key_points"] == ["voltage equals current times resistance"]
+
+
+def test_regrade_returns_the_grader_calls_cost_header(client, monkeypatch):
+    monkeypatch.setattr("src.api.deps.verify_token", lambda token: object())
+
+    async def fake_grade(session, transcript, rubric=None):
+        record_turn_metrics(session, {"model_name": "gpt-5-mini", "input_tokens": 900, "cached_input_tokens": 100,
+                                      "output_tokens": 80, "turn_cost_usd": 0.000385})
+        return {"qa_transcripts": [], "session_summary": {}}
+
+    monkeypatch.setattr(regrade, "grade_transcript", fake_grade)
+    resp = client.post("/api/v1/colearner/regrade", json=_BODY, headers={"Authorization": "Bearer t"})
+    assert resp.status_code == 200
+    assert json.loads(resp.headers["x-nool-cost"]) == {
+        "models": ["gpt-5-mini"], "calls": 1, "input_tokens": 900, "cached_input_tokens": 100,
+        "output_tokens": 80, "usd": 0.000385, "inr": round(0.000385 * 86.5, 4)}

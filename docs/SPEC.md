@@ -132,6 +132,7 @@ All business endpoints require a Firebase ID token (`Authorization: Bearer <toke
 **Super Admin â€” School Admins & Catalog**
 - `GET/POST /admin/school-admins`, `POST /admin/school-admins/invite`, `PATCH .../status`, `PATCH .../{id}` (edit), `POST .../{id}/reset-password`
 - `GET /admin/audit-log`
+- `GET /admin/ai-usage/summary`, `/admin/ai-usage/events` (keyset `cursor`), `/admin/ai-usage/filters` — persisted AI cost per request (`ai_usage_events`, written by `src/services/ai_usage.py` from generation/colearner's `X-Nool-Cost` header and the live voice finish payload); budget from `AI_MONTHLY_BUDGET_INR`
 - `GET/POST/PATCH/DELETE /admin/subjects[/{id}]`, nested `/chapters`, nested `/topics`
 - `GET/POST/PATCH /admin/datasets[/{id}]` (no delete)
 

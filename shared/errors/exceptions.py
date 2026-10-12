@@ -6,6 +6,8 @@ class AppError(Exception):
 
     code = "INTERNAL_ERROR"
     status_code = 500
+    # extra response headers (e.g. colearner's X-Nool-Cost on a failed grade)
+    headers: dict[str, str] | None = None
 
     def __init__(
         self,

@@ -57,7 +57,7 @@ def test_route_returns_the_grade_and_503_on_failure(client, monkeypatch):
     monkeypatch.setattr("src.api.deps.verify_token", lambda token: object())
     headers = {"Authorization": "Bearer t", "X-Nool-Feature": "practice_grade", "X-Nool-Student": "s-1"}
 
-    async def fake(question, expected_points, misconceptions, transcript, subject, caller):
+    async def fake(question, expected_points, misconceptions, transcript, subject, caller, metrics):
         assert (question, transcript, subject) == (_BODY["question"], "speed changes", "Science")
         assert caller == {"feature": "practice_grade", "student": "s-1"}
         return {"score": 70, "good": "g", "add": "a"}
@@ -65,9 +65,36 @@ def test_route_returns_the_grade_and_503_on_failure(client, monkeypatch):
     monkeypatch.setattr(regrade, "grade_answer", fake)
     resp = client.post("/api/v1/colearner/grade-answer", json=_BODY, headers=headers)
     assert resp.status_code == 200 and resp.json() == {"score": 70, "good": "g", "add": "a"}
+    assert "x-nool-cost" not in resp.headers  # the fake made no model call
 
     async def broken(*args, **kwargs):
         raise RuntimeError("no key")
 
     monkeypatch.setattr(regrade, "grade_answer", broken)
     assert client.post("/api/v1/colearner/grade-answer", json=_BODY, headers=headers).status_code == 503
+
+
+def test_route_returns_the_calls_cost_header_on_success_and_on_a_billed_failure(client, monkeypatch):
+    monkeypatch.setattr("src.api.deps.verify_token", lambda token: object())
+    headers = {"Authorization": "Bearer t"}
+    monkeypatch.setattr(grader, "_get_client", lambda: _FakeClient({"score_percent": 60, "good": "", "add": ""}))
+    resp = client.post("/api/v1/colearner/grade-answer", json=_BODY, headers=headers)
+    usd = round((100 * 0.25 + 20 * 2.00) / 1e6, 6)
+    assert resp.status_code == 200
+    assert json.loads(resp.headers["x-nool-cost"]) == {
+        "models": ["gpt-5-mini"], "calls": 1, "input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 20,
+        "usd": usd, "inr": round(usd * 86.5, 4)}
+
+    # the model answered (billed) but refused -> 503, still with the cost
+    refusing = _FakeClient({})
+    real_create = refusing.chat.completions.create
+
+    async def refuse(**kwargs):
+        resp = await real_create(**kwargs)
+        resp.choices[0].message.refusal = "no"
+        return resp
+
+    refusing.chat.completions.create = refuse
+    monkeypatch.setattr(grader, "_get_client", lambda: refusing)
+    resp = client.post("/api/v1/colearner/grade-answer", json=_BODY, headers=headers)
+    assert resp.status_code == 503 and json.loads(resp.headers["x-nool-cost"])["calls"] == 1

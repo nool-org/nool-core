@@ -37,6 +37,7 @@ from .homework import (
     StudentHomeworkProgress,
     StudentHomeworkStatus,
 )
+from .ai_usage import AiUsageEvent
 from .import_job import ImportJob, ImportJobType
 from .practice_bank import PracticeBankEntry
 from .reporting import ReportConfiguration, ReportShare
@@ -78,6 +79,7 @@ from .voice_test import (
 __all__ = [
     "Base",
     "AiAssessorSession",
+    "AiUsageEvent",
     "AiAssessorSessionBloomLevel",
     "AiAssessorSessionRecord",
     "AssistantMessage",

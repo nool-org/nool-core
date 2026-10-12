@@ -1,4 +1,5 @@
-from typing import Any, Dict, Optional
+import json
+from typing import Any, Dict, List, Optional
 
 from src.services.session_store import SessionState
 
@@ -110,3 +111,22 @@ def record_turn_metrics(session: SessionState, turn_metrics: Dict[str, Any]) -> 
     """Appends turn metrics and adds the cost to the session total."""
     session.turn_metrics.append(turn_metrics)
     session.total_cost_usd += turn_metrics.get("turn_cost_usd", 0.0)
+
+
+def cost_header(turn_metrics: List[Dict[str, Any]]) -> Optional[str]:
+    """X-Nool-Cost for a request's text-model calls (the grader's turn metrics) -
+    same compact JSON as generation's, persisted by Core (services/core/src/services/ai_usage.py).
+    None when no call was made."""
+    if not turn_metrics:
+        return None
+    models: List[str] = []
+    for m in turn_metrics:
+        if m.get("model_name") and m["model_name"] not in models:
+            models.append(m["model_name"])
+    total = sum(m.get("turn_cost_usd", 0.0) for m in turn_metrics)
+    return json.dumps({
+        "models": models, "calls": len(turn_metrics),
+        **{k: sum(int(m.get(k) or 0) for m in turn_metrics)
+           for k in ("input_tokens", "cached_input_tokens", "output_tokens")},
+        "usd": round(total, 7), "inr": round(total * USD_TO_INR_RATE, 4),
+    }, separators=(",", ":"))

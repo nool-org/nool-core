@@ -12,6 +12,7 @@ from shared.observability import configure_observability
 from src.api.routes import (
     school_question_bank,
     admin,
+    admin_ai_usage,
     admin_catalog,
     ai_assessor,
     assigned_test,
@@ -125,6 +126,7 @@ def create_app() -> FastAPI:
     # Super Admin / School Admin
     app.include_router(admin.router)
     app.include_router(admin_catalog.router)
+    app.include_router(admin_ai_usage.router)
     app.include_router(school_admin.router)
     app.include_router(school_oversight.router)
     app.include_router(school_question_bank.router)

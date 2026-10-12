@@ -105,6 +105,7 @@ services:
       COLEARNER_SERVICE_URL: http://colearner:8000
       GENERATION_SERVICE_URL: http://generation:8000
       ASSET_BASE_URL: ${ASSET_BASE_URL:-http://localhost:10000/devstoreaccount1/question-assets}
+      AI_MONTHLY_BUDGET_INR: ${AI_MONTHLY_BUDGET_INR:-}
     volumes:
       - ${FIREBASE_CREDENTIALS_HOST_PATH:-./secrets/firebase-service-account.json}:/app/secrets/firebase-service-account.json:ro
       # database/migrations is otherwise only COPY'd into the image at
