@@ -299,9 +299,10 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
     picked: dict[int, PracticeQuestion] = {}
     for i, slot in enumerate(slots):
         for kind in dict.fromkeys([slot.kind, "mcq"]):
-            q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact_level)
+            exact = exact_level and kind == "mcq"  # spoken questions are few: any level, scored at its own
+            q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact)
             if q is None and await _import_bank(session, dataset_ids, slot.topic, kind):
-                q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact_level)
+                q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact)
             if q is not None:
                 slots[i] = replace(slot, kind=kind)
                 picked[i] = q
@@ -636,14 +637,14 @@ async def student_streak(session: AsyncSession, student_id: uuid.UUID) -> int:
     return streak_days((await completed_dates(session, [student_id], today))[student_id], today)
 
 
-async def complete(session: AsyncSession, practice: DailyPracticeSession) -> dict:
+async def complete(session: AsyncSession, practice: DailyPracticeSession, skippable_voice: bool = False) -> dict:
     """Closes the session once every item is answered (409 before), adding the
     completion bonus once (not again after an extension reopened it); calling
     again returns the same summary. Mastery
     before/after per topic practised: before = from every earlier day's
     answers, after = including this day's. Caller commits."""
     items = await items_of(session, practice.id)
-    if any(item.answered_at is None for item, _, _ in items):
+    if any(item.answered_at is None and not (skippable_voice and item.kind == "voice") for item, _, _ in items):
         raise ConflictError("Answer every question first.")
     claimed = (await session.execute(
         update(DailyPracticeSession).where(DailyPracticeSession.id == practice.id,

@@ -1,6 +1,6 @@
 """Topic quizzes - the learning loop for each topic the teacher marks taught:
 
-    quiz (8 MCQs, 2 per Bloom level) -> analysis (lagging level, what to
+    quiz (8 MCQs, 2 per Bloom level, + 2 spoken answers) -> analysis (lagging level, what to
     know, next step) -> homework on the gaps (assigned at once) -> re-check
     quiz (6 MCQs, weighted to the lagging levels) -> mastered, or flagged
     for the teacher. No third round.
@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 LEVELS = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND, BloomLevel.APPLY, BloomLevel.ANALYZE]
 PER_LEVEL = 2  # first quiz: 8 questions
 RECHECK_SIZE = 6
+VOICE_LEVELS = [BloomLevel.UNDERSTAND, BloomLevel.APPLY]  # the 2 spoken answers on a first quiz
 LAGGING_BELOW = daily_practice.GOOD_SCORE  # a level under 70% right is lagging
 HOMEWORK_QUESTIONS = 5
 HOMEWORK_WINDOW_HOURS = 72
@@ -68,6 +69,15 @@ def quiz_levels(attempt: int, lagging: list[str] | None = None) -> list[BloomLev
     while len(levels) < RECHECK_SIZE:
         levels += weak or LEVELS
     return levels[:RECHECK_SIZE]
+
+
+def quiz_slots(attempt: int, lagging: list[str] | None = None) -> list[tuple[str, BloomLevel]]:
+    """(kind, level) per question: the MCQs, then 2 spoken answers - on a
+    re-check, on the weakest levels (a spoken answer shows understanding best)."""
+    mcqs = [("mcq", level) for level in quiz_levels(attempt, lagging)]
+    weak = [BloomLevel(v) for v in (lagging or [])] if attempt == 2 else []
+    voice = list(dict.fromkeys(weak + VOICE_LEVELS))[:2]
+    return mcqs + [("voice", level) for level in voice]
 
 
 def per_bloom(answers: list[tuple[BloomLevel, bool]]) -> dict[str, int]:
@@ -238,17 +248,16 @@ async def start(session: AsyncSession, student: User, topic_id: str, attempt: in
         DailyPracticeSession.attempt == attempt).execution_options(populate_existing=True))).scalar_one()
     if created is None:  # a concurrent first open built it
         return quiz
-    slots = [Slot(topic, "mcq", level) for level in quiz_levels(attempt, lagging)]
+    slots = [Slot(topic, kind, level) for kind, level in quiz_slots(attempt, lagging)]
     # ponytail: holds the row through the LLM calls on a cold pool, as daily practice does
     with ai_context.feature("topic_quiz_mcq"):
         chosen = await daily_practice._fill(session, student, school_class, slots, daily_practice.today_ist(),
                                             str(quiz.id), exact_level=True)
-    chosen = [(slot, q) for slot, q in chosen if q.kind == "mcq"]
     if not chosen:
         await session.delete(quiz)
         await session.flush()
         raise ConflictError("No questions are ready for this topic yet - try again in a little while.")
-    session.add_all([DailyPracticeItem(session_id=quiz.id, order=order, practice_question_id=q.id, kind="mcq",
+    session.add_all([DailyPracticeItem(session_id=quiz.id, order=order, practice_question_id=q.id, kind=q.kind,
                                        topic_id=topic.id, bloom_level=q.bloom_level)
                      for order, (slot, q) in enumerate(chosen, start=1)])
     await session.flush()
@@ -276,6 +285,9 @@ async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: To
                "chosen": q.options[item.option_index] if item.option_index is not None else "",
                "correct": q.options[q.correct_index]}
               for item, q, _ in items if not item.correct and q.options and q.correct_index is not None]
+    missed += [{"bloom_level": item.bloom_level.value, "question": f"(answered aloud) {q.text}",
+                "chosen": (item.transcript or "")[:500], "correct": "; ".join(q.expected_points or [])[:500]}
+               for item, q, _ in items if item.kind == "voice" and item.answered_at and not item.correct]
     name = daily_practice.tidy(topic.name)
     try:
         with ai_context.feature("topic_quiz_analysis"):
@@ -293,13 +305,14 @@ async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: To
 
 
 async def finish(session: AsyncSession, quiz: DailyPracticeSession) -> dict:
-    """Marks a fully answered quiz (409 before): XP via daily practice's
+    """Marks a quiz with every MCQ answered (409 before): XP via daily practice's
     completion, then per-level scores, the analysis and the outcome - once;
     calling again returns the stored result. Caller commits, then queues
     build_homework when the outcome is "homework"."""
-    completion = await daily_practice.complete(session, quiz)
+    # spoken answers can be skipped (web, no microphone) - they just don't count
+    completion = await daily_practice.complete(session, quiz, skippable_voice=True)
     if quiz.outcome is None:
-        items = await daily_practice.items_of(session, quiz.id)
+        items = [row for row in await daily_practice.items_of(session, quiz.id) if row[0].answered_at is not None]
         scores = per_bloom([(item.bloom_level, bool(item.correct)) for item, _, _ in items])
         lagging = lagging_levels(scores)
         topic = await session.get(Topic, quiz.topic_id)

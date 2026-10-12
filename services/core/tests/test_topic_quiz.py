@@ -38,6 +38,15 @@ def test_quiz_levels():
                                                   B.UNDERSTAND]
 
 
+def test_quiz_slots_add_two_spoken_answers():
+    first = service.quiz_slots(1)
+    assert [k for k, _ in first] == ["mcq"] * 8 + ["voice"] * 2
+    assert [lv for k, lv in first if k == "voice"] == [B.UNDERSTAND, B.APPLY]
+    assert [lv for k, lv in service.quiz_slots(2, [AN, A]) if k == "voice"] == [B.ANALYZE, B.APPLY]
+    assert [lv for k, lv in service.quiz_slots(2, [A]) if k == "voice"] == [B.APPLY, B.UNDERSTAND]
+    assert len(service.quiz_slots(2, [A])) == 8
+
+
 def test_scores_lagging_and_outcome():
     scores = service.per_bloom([(B.APPLY, False), (B.REMEMBER, True), (B.REMEMBER, False), (B.APPLY, False),
                                 (B.UNDERSTAND, True)])
@@ -54,6 +63,9 @@ async def _pools(db, topic):
     for level in service.LEVELS:
         for q in await _pool(db, topic, 4, bloom_level=level):
             q.text += f" {level.value}"
+    for level in service.VOICE_LEVELS + [B.ANALYZE]:
+        for q in await _pool(db, topic, 2, kind="voice", bloom_level=level):
+            q.text += f" {level.value}"
     await db.flush()
 
 
@@ -67,7 +79,9 @@ def _stub_analysis(monkeypatch, calls):
 
 
 async def _answer(db, s, quiz, right_levels):
-    for item in quiz.items:
+    for item in quiz.items:  # MCQs only - spoken answers are skipped (they don't count)
+        if item.kind != "mcq":
+            continue
         option = 1 if item.bloom_level in right_levels else 0  # pool questions: index 1 is right
         await practice_routes.answer_my_daily_practice_mcq(quiz.id, item.id, PracticeMcqAnswerIn(option_index=option),
                                                            user=s.student, session=db)
@@ -110,8 +124,10 @@ async def test_the_loop_quiz_analysis_homework_recheck_mastered(db_session, monk
 
     assert (await _stage(db_session, s, s.ohm)).stage == "quiz"
     quiz = await _start(db_session, s, s.ohm)
-    assert [i.bloom_level for i in quiz.items] == [R, R, U, U, A, A, AN, AN]
-    assert quiz.analysis is None and all(i.options and i.result is None for i in quiz.items)
+    assert [(i.kind, i.bloom_level) for i in quiz.items] == [("mcq", lv) for lv in (R, R, U, U, A, A, AN, AN)] + [
+        ("voice", U), ("voice", A)]
+    assert quiz.analysis is None and all(i.result is None for i in quiz.items)
+    assert all(i.options for i in quiz.items if i.kind == "mcq") and not quiz.items[-1].options
     assert (await _start(db_session, s, s.ohm)).id == quiz.id  # the same quiz on a second open
     with pytest.raises(ConflictError):
         await _finish(db_session, s, quiz)  # nothing answered yet
@@ -140,7 +156,8 @@ async def test_the_loop_quiz_analysis_homework_recheck_mastered(db_session, monk
     assert (await _stage(db_session, s, s.ohm)).stage == "recheck"
 
     recheck = await _start(db_session, s, s.ohm, attempt=2)
-    assert [i.bloom_level for i in recheck.items] == [A, A, AN, AN, R, U]
+    assert [(i.kind, i.bloom_level) for i in recheck.items] == [("mcq", lv) for lv in (A, A, AN, AN, R, U)] + [
+        ("voice", A), ("voice", AN)]
     assert not {i.text for i in recheck.items} & {i.text for i in quiz.items}  # fresh questions
     await _answer(db_session, s, recheck, {R, U, A, AN})
     result = (await _finish(db_session, s, recheck)).analysis
@@ -271,8 +288,10 @@ async def test_each_question_is_on_its_own_bloom_level_generated_when_the_pool_h
     calls = SimpleNamespace(generate=[], explain=[])
     _generation(monkeypatch, calls)
     quiz = await _start(db_session, s, s.ohm)
-    assert [i.bloom_level for i in quiz.items] == [R, R, U, U, A, A, AN, AN]
-    assert [slot["bloom_level"] for slot in calls.generate[0]["slots"]] == [U, U, A, A, AN, AN]
+    # no spoken questions in the pool: those 2 slots become MCQs on their levels too
+    assert [i.bloom_level for i in quiz.items] == [R, R, U, U, A, A, AN, AN, U, A]
+    assert {i.kind for i in quiz.items} == {"mcq"}
+    assert [slot["bloom_level"] for slot in calls.generate[0]["slots"]] == [U, U, A, A, AN, AN, U, A]
 
     # generation down: another level's question rather than none
     s2 = await _seed(db_session)
@@ -281,4 +300,36 @@ async def test_each_question_is_on_its_own_bloom_level_generated_when_the_pool_h
     _generation(monkeypatch, calls, generate=False)
     quiz = await routes.start_my_topic_quiz(str(s2.ohm.id), QuizStartIn(attempt=1), user=s2.student,
                                             session=db_session)
-    assert [i.bloom_level for i in quiz.items] == [R] * 8
+    assert [i.bloom_level for i in quiz.items] == [R] * 8  # the pool's 8: nothing for the last 2 slots
+
+
+async def test_a_spoken_answer_counts_at_its_level_and_feeds_the_analysis(db_session, monkeypatch):
+    import base64
+
+    from src.services import colearner_client, generation_client, practice_voice
+
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    calls = []
+    _stub_analysis(monkeypatch, calls)
+
+    async def transcribe(*_a, **_k):
+        return "current goes up I think"
+
+    async def grade(**_k):
+        return {"score": 30, "good": "You mention current.", "add": "Say how voltage relates to it."}
+
+    monkeypatch.setattr(generation_client, "transcribe", transcribe)
+    monkeypatch.setattr(colearner_client, "grade_answer", grade)
+    quiz = await _start(db_session, s, s.ohm)
+    await _answer(db_session, s, quiz, {R, U, A, AN})
+    spoken = next(i for i in quiz.items if i.kind == "voice" and i.bloom_level == U)
+    await practice_voice.answer_voice_item(db_session, quiz.id, spoken.id, s.student,
+                                           audio_base64=base64.b64encode(b"x" * 2000).decode(),
+                                           mime_type="audio/mp4", token="t")
+    a = (await _finish(db_session, s, quiz)).analysis  # the other spoken answer is skipped
+
+    assert a.per_bloom[U] == 67 and a.lagging == [U] and a.outcome == "homework"  # 2 MCQs right, spoken 30
+    [missed] = calls[0]["missed"]
+    assert missed["question"].startswith("(answered aloud)") and missed["chosen"] == "current goes up I think"
