@@ -424,3 +424,66 @@ def test_no_silence_check_in_while_anyone_is_speaking(monkeypatch, silence_call)
     assert not _silences(ws) and call.progress[1]["silences"] == 0
     call.student_speaking, call.state.is_completed = False, True
     assert not rs._awaiting_answer(call, 1)  # after end_session: never
+
+
+def _marker(item_id, text):
+    return {"type": "conversation.item.added",
+            "item": {"id": item_id, "type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": text}]}}
+
+
+def test_pause_holds_the_clock_up_to_the_cap(monkeypatch):
+    monkeypatch.setattr(rs, "MAX_PAUSE_SECONDS", 100)
+    call = rs.RealtimeCall(call_id="c", owner_ref="u", state=rs.session_store.create_session(_config()))
+    paused, resumed = _marker("p", rs.PAUSED)["item"], _marker("r", rs.RESUMED)["item"]
+
+    async def run():
+        async with asyncio.timeout(10) as call.deadline:
+            start = call.deadline.when()
+            rs._pause_marker(call, paused)
+            rs._pause_marker(call, paused)  # a repeat changes nothing
+            assert call.deadline.when() == pytest.approx(start + 100)
+            call.paused_at -= 30  # paused for 30 s
+            rs._pause_marker(call, resumed)
+            assert call.deadline.when() == pytest.approx(start + 30) and call.paused_at is None
+            rs._pause_marker(call, paused)  # only 70 s of pause left
+            assert call.deadline.when() == pytest.approx(start + 100)
+            call.paused_at -= 500  # far past the cap: the normal limit applies to the rest
+            rs._pause_marker(call, resumed)
+            assert call.deadline.when() == pytest.approx(start + 100) and call.paused_seconds == pytest.approx(100)
+
+    asyncio.run(run())
+    assert call.pauses == 2
+
+
+def test_pause_silences_milo_and_markers_are_never_answers(monkeypatch, silence_call):
+    async def fake_grade(session, transcript, rubric=None, client=None):
+        assert "PAUSED" not in transcript and "RESUMED" not in transcript
+        return {"qa_transcripts": []}
+
+    monkeypatch.setattr(rs, "grade_transcript", fake_grade)
+    events = [
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+        _marker("p1", rs.PAUSED), _STOPPED, _SLEEP,  # paused: no [SILENCE] check-in
+        {"type": "response.created"},  # nothing may talk while paused
+        _marker("r1", rs.RESUMED), *_assistant("a1w", "Welcome back! Question 1 text?"), _STOPPED, _SLEEP,  # re-armed
+        *_user("u1", "Current flows"),
+    ]
+    ws = _SlowWS(events)
+    call, _ = _run_sideband(monkeypatch, ws, _config())
+    assert len(_silences(ws)) == 1 and call.progress[1]["silences"] == 1
+    assert {"type": "response.cancel"} in ws.sent and call.paused_at is None
+    monkeypatch.setitem(rs._calls, call.call_id, call)
+    result = asyncio.run(rs.finish_call(call.call_id, "u1"))
+    assert result["pauses"] == 1
+    assert result["answers"][0]["first_answer"] == "Current flows"
+    assert all(t["text"] not in (rs.PAUSED, rs.RESUMED) for t in result["transcript"])
+    assert "p1" not in call.item_kind and "r1" not in call.item_kind
+
+
+def test_prompts_keep_milo_quiet_while_paused():
+    for config in (_config(), SessionConfig()):
+        text = rs.build_session(config)["instructions"]
+        assert 'If you receive "[PAUSED]", say nothing.' in text
+        assert '"[RESUMED]", say one short welcome back line and repeat the current question exactly.' in text

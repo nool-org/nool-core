@@ -72,6 +72,10 @@ MAX_QUESTION_TOKENS = 400
 MAX_HINTS = 2  # per question
 # Student silent this long after Milo finished speaking a question -> one gentle check-in.
 SILENCE_SECONDS = 12
+# The app pauses the test on an interruption (phone call, app in the background) with
+# "[PAUSED]" and carries on with "[RESUMED]": the clock holds for up to this long in all.
+MAX_PAUSE_SECONDS = 10 * 60
+PAUSED, RESUMED = "[PAUSED]", "[RESUMED]"
 EASIER = "easier"
 STANDARD = "standard"
 
@@ -132,6 +136,8 @@ LIVE VOICE SESSION RULES (this is a real-time spoken call):
 - Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.
 - If you receive "[TIME_UP]", call end_session.
 - If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
+- If you receive "[PAUSED]", say nothing.
+- If you receive "[RESUMED]", say one short welcome back line and repeat the current question exactly.
 """
 
 CLOSING_INSTRUCTIONS = (
@@ -182,6 +188,12 @@ class RealtimeCall:
     # Pending [SILENCE] check-in (see _arm_silence), cancelled as soon as anyone speaks.
     silence_task: asyncio.Task | None = None
     student_speaking: bool = False
+    # Client pauses (see _pause_marker): when the current one began (loop time), the
+    # paused seconds credited to the clock so far, how many, and the live time limit.
+    paused_at: float | None = None
+    paused_seconds: float = 0.0
+    pauses: int = 0
+    deadline: asyncio.Timeout | None = None
 
 
 _calls: dict[str, RealtimeCall] = {}
@@ -236,6 +248,8 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 - If you receive "[SILENCE]", the student has been quiet for a while: warmly say "Take your time. Want a small hint?" (one sentence) and wait.
 - If you receive "[TIME_UP]", call end_session.
 - If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
+- If you receive "[PAUSED]", say nothing.
+- If you receive "[RESUMED]", say one short welcome back line and repeat the current question exactly.
 """
 
 
@@ -320,13 +334,16 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
             # student until they hear it.
             await ws.send(json.dumps({"type": "response.create"}))
             try:
-                await asyncio.wait_for(_record(call, ws), timeout=call_time_limit(call.state.config))
+                async with asyncio.timeout(call_time_limit(call.state.config)) as call.deadline:
+                    await _record(call, ws)
+                call.deadline = None
                 if call.closing_done:  # reply cap hit: hang up once the goodbye has played
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(_record(call, ws), timeout=_GRACE_SECONDS)
             except asyncio.TimeoutError:
                 # Time's up: let the co-learner wrap up in its own voice,
                 # then hang up after a short grace period either way.
+                call.deadline = None
                 logger.info("realtime_call_time_limit call_id=%s", call.call_id)
                 call.time_up = True
                 _cancel_silence(call)
@@ -368,6 +385,8 @@ async def _record(call: RealtimeCall, ws) -> None:
                 spoken = any(c.get("type") == "input_audio" for c in item.get("content") or [])
                 if is_new and item["role"] == "user" and spoken:
                     call.spoken_turns += 1
+                elif is_new and item["role"] == "user":
+                    _pause_marker(call, item)
                 if is_new and call.current:
                     call.item_question[item["id"]] = call.current
                     if item["role"] == "user" and spoken:
@@ -379,6 +398,10 @@ async def _record(call: RealtimeCall, ws) -> None:
             _cancel_silence(call)  # Milo is speaking
         elif kind == "response.created":
             _cancel_silence(call)
+            if call.paused_at is not None and not call.time_up:
+                # the app asks for no reply while paused - but nothing may talk to an empty room
+                await ws.send(json.dumps({"type": "response.cancel"}))
+                continue
             # with prepared questions the final answer is detected at response.done (_questions_done)
             final_answer_in = (not call.state.config.questions
                                and call.spoken_turns >= call.state.config.num_questions + 1)
@@ -487,7 +510,28 @@ def _progress(call: RealtimeCall, n: int) -> dict:
 def _awaiting_answer(call: RealtimeCall, n: int) -> bool:
     """Question n was asked, nobody is talking and its answer is still to come."""
     return (n == call.current and n > 0 and not call.student_speaking and not call.state.is_completed
-            and not call.time_up and not call.forcing_end and _progress(call, n)["first_item"] is None)
+            and call.paused_at is None and not call.time_up and not call.forcing_end and _progress(call, n)["first_item"] is None)
+
+
+def _pause_marker(call: RealtimeCall, item: dict) -> None:
+    """[PAUSED] / [RESUMED] from the app: the test clock holds while paused - for up to
+    MAX_PAUSE_SECONDS in all, then the normal limit applies - and no [SILENCE] check-in fires.
+    Text, never speech, so neither can become an answer (only spoken turns are tagged)."""
+    text = next((c.get("text") for c in item.get("content") or [] if c.get("type") == "input_text"), None)
+    now = asyncio.get_running_loop().time()
+    if text == PAUSED and call.paused_at is None:
+        call.pauses += 1
+        call.paused_at = now
+        _cancel_silence(call)
+        if call.deadline:  # hold the clock for whatever pause allowance is left
+            call.deadline.reschedule(call.deadline.when() + MAX_PAUSE_SECONDS - call.paused_seconds)
+    elif text == RESUMED and call.paused_at is not None:
+        allowance = MAX_PAUSE_SECONDS - call.paused_seconds
+        held = min(now - call.paused_at, allowance)
+        call.paused_seconds += held
+        call.paused_at = None
+        if call.deadline:  # give back the allowance this pause didn't use
+            call.deadline.reschedule(call.deadline.when() - (allowance - held))
 
 
 def _cancel_silence(call: RealtimeCall) -> None:
@@ -746,6 +790,7 @@ async def finish_call(call_id: str, owner_ref: str) -> dict:
             "turns": turns,  # alias kept for older callers
             "answered": answered,
             "model_completed": call.state.is_completed,
+            "pauses": call.pauses,  # interruptions (phone call, app in the background)
             # report's own LLM call is already in total_cost_usd (grade_transcript records it)
             "cost": _cost(call),
         }
