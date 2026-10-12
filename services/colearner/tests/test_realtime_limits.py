@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 
+import pytest
+
 from src.domain.schemas import SessionConfig
 from src.services import realtime_service as rs
 from src.services.session_store import session_store
@@ -46,6 +48,14 @@ def _run_sideband(monkeypatch, ws, config=None):
     return call, hangups
 
 
+def _short_clock(monkeypatch, seconds):
+    """A test clock of `seconds`, running from connect, and short graces."""
+    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", seconds)
+    monkeypatch.setattr(rs, "READY_ALLOWANCE_SECONDS", 0)
+    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(rs, "_CLOSING_GRACE_SECONDS", 0.05)
+
+
 def _done(*outputs):
     return {"type": "response.done", "response": {"output": list(outputs)}}
 
@@ -56,7 +66,22 @@ MESSAGE = {"type": "message"}
 def test_session_config_caps_output_tokens():
     session = rs.build_session(SessionConfig())
     assert session["max_output_tokens"] == rs.MAX_REPLY_TOKENS
-    assert rs.MAX_REPLY_TOKENS <= 17 * 15  # well under the ~14-15 s replies we saw
+    # 220 tokens (~10 s) cut off the ~14-15 s replies we saw; 2 sentences now fit, a runaway stays bounded
+    assert 17 * 15 < rs.MAX_REPLY_TOKENS <= 17 * 40
+
+
+def test_reply_cap_fits_the_longest_question_plus_context():
+    longest = ("Why does a bulb glow brighter when connected in parallel? " * 20)[:1000]  # the schema max
+    config = SessionConfig(questions=[
+        {"id": "q1", "order": 1, "bloom_level": "Understanding", "spoken_text": "Short one?"},
+        {"id": "q2", "order": 2, "bloom_level": "Understanding", "spoken_text": "Short two?", "easier": {"spoken_text": longest}},
+    ])
+    cap = rs.reply_tokens(config)
+    assert rs.build_session(config)["max_output_tokens"] == cap
+    # ~17 audio tokens per second of slow (~12 chars/s) speech + the text, for the question and a context sentence
+    assert cap >= (1000 + 150) / 12 * 17 + (1000 + 150) / 4
+    assert cap <= 17 * 150  # still a bound: ~2.5 min of speech
+    assert rs.reply_tokens(SessionConfig()) == rs.MAX_REPLY_TOKENS
 
 
 def test_time_limit_clamped_to_8_minutes():
@@ -65,8 +90,7 @@ def test_time_limit_clamped_to_8_minutes():
 
 
 def test_time_clamp_applies_to_live_call(monkeypatch):
-    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 0.05)
-    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    _short_clock(monkeypatch, 0.05)
     ws = FakeWS([])
     _, hangups = _run_sideband(monkeypatch, ws, SessionConfig(session_max_time_seconds=3600))
     assert any(m.get("item", {}).get("content", [{}])[0].get("text") == "[TIME_UP]" for m in ws.sent)
@@ -98,9 +122,73 @@ def test_reply_cap_forces_wrap_up_and_hangs_up(monkeypatch, caplog):
     assert cost_log.total_usd == 0 and cost_log.duration_seconds >= 0
 
 
+def test_forced_wrap_up_never_cuts_off_the_reply_still_playing(monkeypatch):
+    # Milo's last reply is still playing when the student's turn starts the reply past the cap:
+    # only that new reply is cancelled - the playing audio is never cleared.
+    events = [_done(MESSAGE) for _ in range(rs.reply_cap(10))] + [
+        {"type": "output_audio_buffer.started"},
+        {"type": "response.created"},
+    ]
+    _short_clock(monkeypatch, 0.05)
+    ws = FakeWS(events)
+    call, _ = _run_sideband(monkeypatch, ws)
+    kinds = [m["type"] for m in ws.sent]
+    assert call.forcing_end and "response.cancel" in kinds
+    assert "output_audio_buffer.clear" not in kinds
+
+
+def test_clock_starts_at_the_first_question_not_at_connect(monkeypatch):
+    monkeypatch.setattr(rs, "READY_ALLOWANCE_SECONDS", 100)
+    call = rs.RealtimeCall(call_id="c", owner_ref="u", state=session_store.create_session(
+        SessionConfig(session_max_time_seconds=300, questions=[{"id": "q1", "order": 1, "bloom_level": "Understanding", "spoken_text": "Q1?"},
+                                                               {"id": "q2", "order": 2, "bloom_level": "Understanding", "spoken_text": "Q2?"}])))
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        # _sideband's absolute cap: the time limit plus the readiness allowance from connect
+        async with asyncio.timeout(rs.call_time_limit(call.state.config) + rs.READY_ALLOWANCE_SECONDS) as call.deadline:
+            connect = loop.time()
+            assert call.deadline.when() == pytest.approx(connect + 400, abs=0.5)
+            await asyncio.sleep(0.05)  # greeting + "yes, I'm ready"
+            rs._tool_output(call, "ask_question", 1)
+            started = loop.time()
+            assert call.deadline.when() == pytest.approx(started + 300, abs=0.05)  # full time from question 1
+            rs._tool_output(call, "ask_question", 2)
+            assert call.deadline.when() == pytest.approx(started + 300, abs=0.05)  # later questions don't extend it
+            # a handshake that drags past the allowance: the absolute cap still holds
+            call.deadline.reschedule(connect + 400)
+            await asyncio.sleep(0)
+            call.deadline.reschedule(loop.time() + 10)
+            rs._start_clock(call)
+            assert call.deadline.when() == pytest.approx(loop.time() + 10, abs=0.05)
+
+    asyncio.run(run())
+
+
+def test_time_up_never_fires_during_the_goodbye(monkeypatch):
+    # end_session lands just before the time limit: the test clock stops, the goodbye
+    # plays out under its own grace and no [TIME_UP] is ever sent.
+    _short_clock(monkeypatch, 0.2)
+    monkeypatch.setattr(rs, "_CLOSING_GRACE_SECONDS", 0.5)
+    ws = FakeWS([
+        {"type": "conversation.item.created",
+         "item": {"id": "u1", "type": "message", "role": "user", "content": [{"type": "input_audio"}]}},
+        {"type": "conversation.item.created",
+         "item": {"id": "u2", "type": "message", "role": "user", "content": [{"type": "input_audio"}]}},
+        {"type": "conversation.item.created",
+         "item": {"id": "u3", "type": "message", "role": "user", "content": [{"type": "input_audio"}]}},
+        _done({"type": "function_call", "name": "end_session", "call_id": "e1"}),
+    ])
+    call, hangups = _run_sideband(monkeypatch, ws, SessionConfig(num_questions=2))
+    texts = [c.get("text") for m in ws.sent for c in m.get("item", {}).get("content") or []]
+    assert call.state.is_completed and call.closing_sent
+    assert "[TIME_UP]" not in texts and not call.time_up
+    assert hangups == ["call_1"]  # the closing grace still hangs up an abandoned call
+    assert (call.ended_at - call.state.created_at).total_seconds() >= 0.4
+
+
 def test_no_cap_below_limit(monkeypatch):
-    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 0.05)
-    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    _short_clock(monkeypatch, 0.05)
     ws = FakeWS([_done(MESSAGE) for _ in range(rs.reply_cap(10) - 1)] + [{"type": "response.created"}])
     call, _ = _run_sideband(monkeypatch, ws)
     assert "response.cancel" not in [m["type"] for m in ws.sent] and not call.forcing_end
@@ -108,8 +196,7 @@ def test_no_cap_below_limit(monkeypatch):
 
 def test_asking_to_exit_early_is_refused_and_the_test_continues(monkeypatch):
     # end_session after only the "ready" turn: refused, the model told to carry on
-    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 0.05)
-    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    _short_clock(monkeypatch, 0.05)
     ws = FakeWS([
         {"type": "conversation.item.created",
          "item": {"id": "u1", "type": "message", "role": "user", "content": [{"type": "input_audio"}]}},

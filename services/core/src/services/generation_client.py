@@ -57,6 +57,12 @@ async def prep_voice_test(payload: dict) -> dict:
     return await _post("/v1/voice-test/prep", payload, VOICE_TEST_PREP_TIMEOUT_SECONDS, "voice_prep")
 
 
+async def revision_cards(payload: dict) -> dict:
+    """POST /v1/revision/cards - {grade, subject, chapter, topic, context} ->
+    {cards: [{kind, title, body, answer}]}, 6-8 cards checked in code."""
+    return await _post("/v1/revision/cards", payload, VOICE_TEST_PREP_TIMEOUT_SECONDS, "revision_cards")
+
+
 async def transcribe(audio_base64: str, mime_type: str, prompt: str, language: str = "en") -> str:
     """POST /v1/transcribe (gpt-4o-mini-transcribe) - the recognised text, stripped.
     language "auto" for students' answers, which may mix English with Indian languages."""

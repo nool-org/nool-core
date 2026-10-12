@@ -28,6 +28,9 @@ class HomeworkLearningContextOut(CamelModel):
     key_idea_title: str
     key_idea_body: str
     connection_prompt: str
+    # for "Revise this topic": the test's chapter, and its topic when topic_label names one
+    chapter_id: str | None = None
+    topic_id: str | None = None
 
 
 class HomeworkQaConfirmationOut(CamelModel):

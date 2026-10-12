@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from src.api.routes.realtime import CreateCallIn, FinishCallIn
 from src.domain.schemas import SessionConfig
 from src.services import realtime_service as rs
-from test_realtime_limits import MESSAGE, FakeWS, _done, _run_sideband
+from test_realtime_limits import MESSAGE, FakeWS, _done, _run_sideband, _short_clock
 
 
 def _q(n, **kw):
@@ -72,8 +72,7 @@ def _session_events():
 
 @pytest.fixture
 def short_call(monkeypatch):
-    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 0.2)
-    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    _short_clock(monkeypatch, 0.2)
 
 
 def test_session_uses_prepared_questions_and_tools():
@@ -99,8 +98,9 @@ def test_instructions_never_carry_the_answers():
 def test_speakerphone_audio_config():
     audio_in = rs.build_session(_config())["audio"]["input"]
     assert audio_in["noise_reduction"] == {"type": "far_field"}
-    assert audio_in["turn_detection"] == {"type": "semantic_vad", "eagerness": "medium"}
-    assert "interrupt_response" not in audio_in["turn_detection"]  # barge-in stays on (default)
+    # speakerphone echo of Milo's own voice must never cut him off - only "Tap to interrupt" does
+    assert audio_in["turn_detection"] == {"type": "semantic_vad", "eagerness": "medium",
+                                          "interrupt_response": False, "create_response": True}
 
 
 def test_fallback_without_questions_keeps_textbook_prompt():
@@ -120,12 +120,11 @@ def test_tool_events_map_answers_and_hints(monkeypatch, short_call):
     assert out["h1"] == {"hint": "hint 2.1"} and out["h2"] == {"hint": "hint 2.2"}
     assert out["h3"]["no_hints_left"] is True and "homework" in out["h3"]["say_instead"]  # cap: 3rd -> move on
     assert "point" not in json.dumps(out)  # no expected points ever reach the model
-    # each tool-only response is followed by our response.create; question replies get the longer cap
+    # each tool-only response is followed by our response.create, capped to fit the longest question
     creates = [m["response"]["max_output_tokens"] for m in ws.sent
                if m["type"] == "response.create" and "max_output_tokens" in m.get("response", {})
                and "instructions" not in m["response"]]
-    assert creates == [rs.MAX_QUESTION_TOKENS, rs.MAX_QUESTION_TOKENS,
-                       rs.MAX_REPLY_TOKENS, rs.MAX_REPLY_TOKENS, rs.MAX_REPLY_TOKENS, rs.MAX_QUESTION_TOKENS]
+    assert creates == [rs.reply_tokens(_config())] * 6
     forced = [m for m in ws.sent if m.get("response", {}).get("tool_choice") == {"type": "function", "name": "end_session"}]
     assert len(forced) == 1 and call.state.is_completed
     assert "response.cancel" not in [m["type"] for m in ws.sent]
@@ -200,7 +199,7 @@ def test_finish_without_questions_keeps_old_shape(monkeypatch, short_call):
 def test_ask_beyond_last_question_says_end():
     call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.session_store.create_session(_config(2)))
     call.current = 2
-    assert "end_session" in rs._tool_output(call, "ask_question", 3)[0]["error"]
+    assert "end_session" in rs._tool_output(call, "ask_question", 3)["error"]
 
 
 def test_request_limits():
@@ -247,8 +246,7 @@ def test_filler_plus_tool_in_one_response_still_gets_spoken(monkeypatch, short_c
     ws = FakeWS(events)
     call, _ = _run_sideband(monkeypatch, ws, _config())
     # c1 (tool only), c2 (filler only), h1 (filler only) need a reply; c3 was read out in the same response
-    assert [m["response"]["max_output_tokens"] for m in _plain_creates(ws)] == [
-        rs.MAX_QUESTION_TOKENS, rs.MAX_QUESTION_TOKENS, rs.MAX_REPLY_TOKENS]
+    assert [m["response"]["max_output_tokens"] for m in _plain_creates(ws)] == [rs.reply_tokens(_config())] * 3
     assert call.item_question["a1b"] == 1 and call.item_question["a2"] == 2 and call.item_question["a2b"] == 3
     assert call.progress[2]["first_item"] == "u2b" and call.item_kind["u2"] == "hint_request"
 
@@ -318,12 +316,12 @@ def _easier_config():
 
 def test_easier_version_is_asked_hinted_and_graded():
     call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.session_store.create_session(_easier_config()))
-    assert rs._tool_output(call, "ask_question", 1, easier=True)[0]["say"] == "Question 1 text?"  # none -> standard
-    assert rs._tool_output(call, "ask_question", 2, easier=True)[0]["say"] == "Easy question 2?"
+    assert rs._tool_output(call, "ask_question", 1, easier=True)["say"] == "Question 1 text?"  # none -> standard
+    assert rs._tool_output(call, "ask_question", 2, easier=True)["say"] == "Easy question 2?"
     call.items["u2"] = {"role": "user", "text": "I don't know"}
     call.item_question["u2"] = 2
     rs._tag_user_turn(call, "u2")
-    assert rs._tool_output(call, "give_hint", 2)[0] == {"hint": "easy hint 1"}
+    assert rs._tool_output(call, "give_hint", 2) == {"hint": "easy hint 1"}
     rubric = rs.question_rubric(call)
     assert [r["version"] for r in rubric] == ["standard", "easier", "standard"]
     assert rubric[1]["question"] == "Easy question 2?" and rubric[1]["key_points"] == ["easy point"]
@@ -381,8 +379,7 @@ def _silences(ws):
 @pytest.fixture
 def silence_call(monkeypatch):
     monkeypatch.setattr(rs, "SILENCE_SECONDS", 0.02)
-    monkeypatch.setattr(rs, "MAX_CALL_SECONDS", 1.0)
-    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    _short_clock(monkeypatch, 1.0)
 
 
 def test_silence_check_in_once_per_question_and_counted_in_payload(monkeypatch, silence_call):

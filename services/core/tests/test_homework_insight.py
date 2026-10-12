@@ -111,6 +111,9 @@ async def test_generates_and_persists_a_real_insight_on_first_call(db_session, m
     assert context.what_needs_understanding == _FAKE_INSIGHT["what_needs_understanding"]
     assert context.key_idea_body == _FAKE_INSIGHT["key_idea_body"]
     assert [r.title for r in context.references] == ["Right-Hand Thumb Rule"]
+    # for "Revise this topic": the gap is the chapter here, so no topic of that name
+    assert context.chapter_id == str((await db_session.get(VoiceTest, hw.test_id)).chapter_id)
+    assert context.topic_id is None
 
     # The weakest *assessed* level (ANALYZE, 30%) was picked, not just the first one.
     assert captured["weak_bloom_level"] == "ANALYZE"

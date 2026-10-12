@@ -34,6 +34,7 @@ from src.domain.models import (
     StudentTestResult,
     StudentTestResultBloomScore,
     Subject,
+    Topic,
     User,
     VoiceTest,
 )
@@ -207,6 +208,9 @@ async def get_homework_context(
 
     token = authorization.split(" ", 1)[-1].strip() if authorization else None
     insight = await _ensure_insight_generated(session, hw, user.id, token)
+    chapter_id = (await session.execute(select(VoiceTest.chapter_id).where(VoiceTest.id == hw.test_id))).scalar()
+    topic_id = (await session.execute(select(Topic.id).where(
+        Topic.chapter_id == chapter_id, Topic.name == hw.gap_topic).limit(1))).scalar() if chapter_id else None
     return HomeworkLearningContextOut(
         homework_id=str(hw.id),
         topic_label=hw.gap_topic,
@@ -215,6 +219,8 @@ async def get_homework_context(
         key_idea_title=insight["key_idea_title"],
         key_idea_body=insight["key_idea_body"],
         connection_prompt=insight["connection_prompt"],
+        chapter_id=str(chapter_id) if chapter_id else None,
+        topic_id=str(topic_id) if topic_id else None,
     )
 
 

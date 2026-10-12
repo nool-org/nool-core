@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from fastapi import BackgroundTasks
 from sqlalchemy import func, select
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
@@ -457,18 +458,18 @@ async def test_complete_needs_every_answer_and_is_idempotent(db_session):
 async def test_teacher_marks_topics_taught_and_sees_chapter_progress(db_session):
     s = await _seed(db_session, students=0)
     cid, chid = str(s.cls.id), str(s.electricity.id)
-    marked = await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), user=s.teacher,
+    marked = await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher,
                                            session=db_session)
     assert marked.taught_on == service.today_ist() and marked.name == "Ohm's law" and marked.order == 2
     day = service.today_ist() - timedelta(days=4)
-    await routes.set_topic_taught(cid, str(s.current.id), TopicTaughtIn(taught=True, taught_on=day), user=s.teacher,
+    await routes.set_topic_taught(cid, str(s.current.id), TopicTaughtIn(taught=True, taught_on=day), background_tasks=BackgroundTasks(), user=s.teacher,
                                   session=db_session)
     progress = await routes.get_chapter_progress(cid, chid, user=s.teacher, session=db_session)
     assert progress.chapter.name == "Electricity"
     assert [(t.name, t.order, t.taught_on) for t in progress.topics] == [
         ("Current", 1, day), ("Ohm's law", 2, service.today_ist()), ("Power", 3, None)]
     assert (await service.current_chapter(db_session, s.cls.id)).id == s.electricity.id
-    unmarked = await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=False), user=s.teacher,
+    unmarked = await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=False), background_tasks=BackgroundTasks(), user=s.teacher,
                                              session=db_session)
     assert unmarked.taught_on is None
     progress = await routes.get_chapter_progress(cid, chid, user=s.teacher, session=db_session)
@@ -480,12 +481,12 @@ async def test_teacher_marks_topics_taught_and_sees_chapter_progress(db_session)
     with pytest.raises(ForbiddenError):
         await routes.get_chapter_progress(cid, chid, user=stranger, session=db_session)
     with pytest.raises(ForbiddenError):
-        await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), user=stranger,
+        await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=stranger,
                                       session=db_session)
     with pytest.raises(ForbiddenError):
         await routes.get_daily_practice_summary(cid, user=stranger, session=db_session)
     with pytest.raises(NotFoundError):
-        await routes.set_topic_taught(cid, "not-a-topic", TopicTaughtIn(taught=True), user=s.teacher,
+        await routes.set_topic_taught(cid, "not-a-topic", TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher,
                                       session=db_session)
 
 
@@ -644,17 +645,25 @@ async def test_marking_a_topic_taught_today_notifies_the_class_once_per_lesson(d
     cid = str(s.cls.id)
     yesterday = service.today_ist() - timedelta(days=1)
     await routes.set_topic_taught(cid, str(s.current.id), TopicTaughtIn(taught=True, taught_on=yesterday),
-                                  user=s.teacher, session=db_session)
+                                  background_tasks=BackgroundTasks(), user=s.teacher, session=db_session)
     assert sent == []  # back-dated: not a lesson today
     for row in (await db_session.execute(select(ClassTopicProgress).where(
             ClassTopicProgress.class_id == s.cls.id))).scalars().all():
         row.created_at = datetime.now(timezone.utc) - timedelta(hours=1)
     await db_session.flush()
-    await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), user=s.teacher, session=db_session)
+    await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher, session=db_session)
     [call] = sent
     assert call["user_ids"] == {k.id for k in s.students} and call["title"] == "New practice is ready"
     assert call["body"] == "Your teacher just taught Ohm's law. Try a few questions."
     assert call["data"] == {"type": "daily_practice"}
-    await routes.set_topic_taught(cid, str(s.power.id), TopicTaughtIn(taught=True), user=s.teacher,
+    await routes.set_topic_taught(cid, str(s.power.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher,
                                   session=db_session)
     assert len(sent) == 1  # Ohm's law was marked within 30 minutes
+
+
+async def test_marking_a_topic_taught_queues_its_revision_cards(db_session):
+    s = await _seed(db_session)
+    tasks = BackgroundTasks()
+    await routes.set_topic_taught(str(s.cls.id), str(s.ohm.id), TopicTaughtIn(taught=True),
+                                  background_tasks=tasks, user=s.teacher, session=db_session)
+    assert [(t.func.__name__, t.args) for t in tasks.tasks] == [("pregenerate_for_topic", (s.ohm.id,))]

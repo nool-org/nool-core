@@ -101,6 +101,9 @@ Stateless LLM writer; only Core calls it, it has no database. See
 - `POST /v1/homework/gap-fill` - writes questions for the Homework slots the
   question bank couldn't fill: `gpt-5.1` writes, `gpt-5-mini` verifies,
   failed slots are regenerated once.
+- `POST /v1/revision/cards` - 6-8 revision cards for one topic, grounded in
+  its textbook text: one `gpt-5-mini` (low effort) call plus code checks,
+  retried once with the problems listed.
 
 ### KG Service
 
@@ -122,6 +125,7 @@ with Structured Outputs. See `services/kg/README.md`.
 | Voice test grading | colearner, on `.../finish` | `gpt-5-mini` (rubric per question; scores computed in code) | none - the session is stored with `needs_review` and no score |
 | Homework questions | Core: question bank -> generation gap-fill -> relaxed bank -> kg -> deterministic generator | `gpt-5.1` + `gpt-5-mini` verify (generation), `gpt-5.1` (kg) | `DeterministicContentGenerator`, last resort only |
 | Homework insight | Core -> colearner | `gpt-4o-mini` | fixed placeholder paragraph |
+| Revision cards (once per topic, shared by every student; first open or teacher regenerate, background) | Core -> generation `/v1/revision/cards` | `gpt-5-mini` | deck `failed`, retried by the next open after 10 minutes |
 | Question paper questions / replacements | Core -> kg | `gpt-5.1` | none - errors surface to the teacher |
 | Teacher Assistant chat | Core | none - keyword-matched canned replies | - |
 

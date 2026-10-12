@@ -63,6 +63,7 @@ from .question_paper import (
     QuestionPaperTopic,
     QuestionPaperValidation,
 )
+from .revision import RevisionDeck
 from .roster import SchoolClass, SchoolGrade, StudentProfile, TeacherClassAssignment
 from .support_ticket import SupportTicket, SupportTicketComment, TicketStatus
 from .test_result import StudentTestResult, StudentTestResultBloomScore, StudentTestResultTopicScore
@@ -134,6 +135,7 @@ __all__ = [
     "DailyPracticeItem",
     "DailyPracticeSession",
     "PracticeQuestion",
+    "RevisionDeck",
     "StudentTopicMastery",
     "McqTest",
     "McqTestQuestion",

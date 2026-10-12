@@ -52,6 +52,7 @@ from src.api.routes import test_reviews
 from src.api.routes import paper_copilot
 from src.api.routes import paper_answer_key, paper_parallel
 from src.api.routes import paper_templates
+from src.api.routes import revision_cards
 from src.config.settings import get_settings
 from src.repositories.database import dispose_engine, init_engine
 
@@ -122,6 +123,7 @@ def create_app() -> FastAPI:
     app.include_router(journey.router)
     app.include_router(mcq_test.router)
     app.include_router(daily_practice.router)
+    app.include_router(revision_cards.router)
     app.include_router(realtime.router)
     # Super Admin / School Admin
     app.include_router(admin.router)

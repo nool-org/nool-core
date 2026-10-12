@@ -2,8 +2,9 @@
 voice over WebRTC (OpenAI Realtime).
 
 The app streams its mic straight to OpenAI over WebRTC and hears the reply
-as it's generated - server-side VAD decides when the student has finished,
-and the student can interrupt. The app never sees the API key or the
+as it's generated - server-side VAD decides when the student has finished.
+Speech never cuts Milo off (speakerphone echo of his own voice would); the
+app's "Tap to interrupt" button does that deliberately. The app never sees the API key or the
 instructions: it hands its SDP offer to us (via Core), we create the call
 with the session config ("unified interface"), and hand back the SDP answer.
 
@@ -51,24 +52,44 @@ _OPENAI = "https://api.openai.com/v1/realtime"
 # After the session's time limit the co-learner gets this long to wrap up,
 # then we hang up regardless - an abandoned call must not keep billing.
 _GRACE_SECONDS = 30
+# After end_session the goodbye (summary + sign-off) gets this long to play - the
+# test clock is off by then - then we hang up if the app hasn't finished the call.
+_CLOSING_GRACE_SECONDS = 60
 # Finished/abandoned calls are kept this long (so a retried finish still
 # gets its result), then dropped.
 _KEEP_SECONDS = 3 * 3600
 # Cost caps - live voice is billed by how long Milo talks and how long the call runs.
-# ~17 audio tokens per spoken second + the text transcript: 220 ~ 10 s of speech,
-# a backstop for "1-2 short sentences" (a reply may be cut, never runs on).
-MAX_REPLY_TOKENS = 220
-MAX_CLOSING_TOKENS = 500  # the 2-3 sentence summary + fixed sign-off line
+# A cap is only a backstop against a runaway reply: billing is for what Milo actually
+# says, so each cap leaves room for the longest thing he must say in full.
+SENTENCE_CHARS = 150  # one sentence of context / acknowledgement
+
+
+def speech_tokens(chars: int) -> int:
+    """Output tokens to speak `chars` of text: ~17 audio tokens per spoken second at a
+    slow, clear ~12 chars/s, plus the text transcript (~4 chars per token)."""
+    return -(-chars * 17 // 12) + -(-chars // 4)
+
+
+MAX_REPLY_TOKENS = speech_tokens(2 * SENTENCE_CHARS)  # floor: "1-2 short sentences" (~25 s)
+MAX_CLOSING_TOKENS = speech_tokens(4 * SENTENCE_CHARS)  # the 2-3 sentence summary + fixed sign-off line
 MAX_REPLIES = 18  # co-learner replies per call (floor), then the wrap-up is forced
 REPLIES_PER_QUESTION = 6  # ask + one follow-up + two nudges + a silence check-in + acknowledgement
 
 
 def reply_cap(num_questions: int) -> int:
     return max(MAX_REPLIES, REPLIES_PER_QUESTION * num_questions + 3)
+
+
+def reply_tokens(config: SessionConfig) -> int:
+    """Per-reply cap: room to read (or repeat) the longest prepared question or hint
+    plus one sentence of context, so Milo is never cut off mid-sentence."""
+    texts = [t for q in config.questions or () for v in (q, q.easier) if v for t in (v.spoken_text, *v.hints)]
+    return max(MAX_REPLY_TOKENS, speech_tokens(max(map(len, texts), default=0) + SENTENCE_CHARS))
 MAX_CALL_SECONDS = 8 * 60  # config's session_max_time_seconds is unbounded
-# Replies we start ourselves after a tool call: reading a prepared question
-# (plus one context sentence) runs longer.
-MAX_QUESTION_TOKENS = 400
+# The test clock starts at question 1 (the first ask_question) - the greeting and
+# "are you ready?" don't count - but the call can never run past the time limit
+# plus this long from connect (plus pauses), however long the handshake drags.
+READY_ALLOWANCE_SECONDS = 3 * 60
 MAX_HINTS = 2  # per question
 # Student silent this long after Milo finished speaking a question -> one gentle check-in.
 SILENCE_SECONDS = 12
@@ -272,17 +293,20 @@ def build_session(config: SessionConfig) -> dict:
                     "prompt": f"A school student in India answering {config.subject} questions about "
                               f"{config.chapter_name}, sometimes mixing in Tamil, Hindi or other Indian-language words.",
                 },
-                # far_field: students use phones on speakerphone, so they can still barge in.
+                # far_field: students use phones on speakerphone.
                 "noise_reduction": {"type": "far_field"},
-                # semantic_vad judges "finished a thought", not just silence -
-                # a student pausing mid-answer isn't cut off. "medium" still lets them interrupt Milo.
-                "turn_detection": {"type": "semantic_vad", "eagerness": "medium"},
+                # semantic_vad judges "finished a thought", not just silence - a student
+                # pausing mid-answer isn't cut off. interrupt_response off: on speakerphone
+                # Milo's own voice echoes into the mic and was cutting him off mid-sentence;
+                # the app's "Tap to interrupt" stops him deliberately (response.cancel).
+                "turn_detection": {"type": "semantic_vad", "eagerness": "medium",
+                                   "interrupt_response": False, "create_response": True},
             },
             "output": {"voice": VOICE},
         },
         "tools": tools,
         "tool_choice": "auto",
-        "max_output_tokens": MAX_REPLY_TOKENS,
+        "max_output_tokens": reply_tokens(config),
     }
 
 
@@ -334,16 +358,20 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
             # student until they hear it.
             await ws.send(json.dumps({"type": "response.create"}))
             try:
-                async with asyncio.timeout(call_time_limit(call.state.config)) as call.deadline:
+                # absolute cap until question 1 starts the real clock (_start_clock)
+                limit = call_time_limit(call.state.config) + READY_ALLOWANCE_SECONDS
+                async with asyncio.timeout(limit) as call.deadline:
                     await _record(call, ws)
                 call.deadline = None
                 if call.closing_done:  # reply cap hit: hang up once the goodbye has played
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(_record(call, ws), timeout=_GRACE_SECONDS)
             except asyncio.TimeoutError:
+                call.deadline = None
+                if call.state.is_completed:  # the goodbye's own grace ran out - just hang up
+                    return
                 # Time's up: let the co-learner wrap up in its own voice,
                 # then hang up after a short grace period either way.
-                call.deadline = None
                 logger.info("realtime_call_time_limit call_id=%s", call.call_id)
                 call.time_up = True
                 _cancel_silence(call)
@@ -385,6 +413,8 @@ async def _record(call: RealtimeCall, ws) -> None:
                 spoken = any(c.get("type") == "input_audio" for c in item.get("content") or [])
                 if is_new and item["role"] == "user" and spoken:
                     call.spoken_turns += 1
+                    if not call.state.config.questions:  # improvised questions: "yes, ready" starts the clock
+                        _start_clock(call)
                 elif is_new and item["role"] == "user":
                     _pause_marker(call, item)
                 if is_new and call.current:
@@ -412,8 +442,9 @@ async def _record(call: RealtimeCall, ws) -> None:
                 if capped and not final_answer_in:
                     logger.info("realtime_call_reply_cap call_id=%s replies=%d", call.call_id, call.replies)
                     call.hangup_after_closing = True
+                # only the reply just starting - never output_audio_buffer.clear, which would
+                # cut off the previous reply still playing
                 await ws.send(json.dumps({"type": "response.cancel"}))
-                await ws.send(json.dumps({"type": "output_audio_buffer.clear"}))
         elif kind == "conversation.item.input_audio_transcription.completed":
             entry = call.items.setdefault(event["item_id"], {"role": "user", "text": ""})
             entry["text"] = (event.get("transcript") or "").strip()
@@ -447,10 +478,12 @@ async def _record(call: RealtimeCall, ws) -> None:
                 await ws.send(json.dumps({
                     "type": "response.create",
                     "response": {"instructions": END_REFUSED_INSTRUCTIONS, "tool_choice": "none",
-                                 "max_output_tokens": MAX_REPLY_TOKENS},
+                                 "max_output_tokens": reply_tokens(call.state.config)},
                 }))
             elif end and not call.state.is_completed:
                 call.state.is_completed = True
+                if call.deadline:  # test clock off - [TIME_UP] can't land on the goodbye, which gets its own grace
+                    call.deadline.reschedule(asyncio.get_running_loop().time() + _CLOSING_GRACE_SECONDS)
                 # The model tends to call end_session straight after a bare
                 # acknowledgement - so the closing summary is always its own,
                 # explicit final turn (tools off, so it can't end twice).
@@ -534,6 +567,14 @@ def _pause_marker(call: RealtimeCall, item: dict) -> None:
             call.deadline.reschedule(call.deadline.when() - (allowance - held))
 
 
+def _start_clock(call: RealtimeCall) -> None:
+    """Question 1 has begun: the time limit counts from now, never past the absolute
+    cap _sideband set. Later calls change nothing (the deadline is already sooner)."""
+    if call.deadline:
+        now = asyncio.get_running_loop().time()
+        call.deadline.reschedule(min(call.deadline.when(), now + call_time_limit(call.state.config)))
+
+
 def _cancel_silence(call: RealtimeCall) -> None:
     if call.silence_task:
         call.silence_task.cancel()
@@ -560,7 +601,8 @@ async def _silence_after(call: RealtimeCall, ws, n: int) -> None:
             "type": "conversation.item.create",
             "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "[SILENCE]"}]},
         }))
-        await ws.send(json.dumps({"type": "response.create", "response": {"max_output_tokens": MAX_REPLY_TOKENS}}))
+        await ws.send(json.dumps({"type": "response.create",
+                                  "response": {"max_output_tokens": reply_tokens(call.state.config)}}))
 
 
 def _tag_user_turn(call: RealtimeCall, item_id: str) -> None:
@@ -623,30 +665,31 @@ def _version(q, version: str):
     return q.easier if version == EASIER and q.easier else q
 
 
-def _tool_output(call: RealtimeCall, name: str, n: int | None, easier: bool = False) -> tuple[dict, int]:
-    """Runs one question tool; returns (output for the model, max tokens for the reply it triggers)."""
+def _tool_output(call: RealtimeCall, name: str, n: int | None, easier: bool = False) -> dict:
+    """Runs one question tool; returns its output for the model."""
     questions = call.state.config.questions
     if n is None or not 1 <= n <= len(questions):
         if name == "ask_question" and call.current >= len(questions):
-            return {"error": "There are no more questions. Call end_session now."}, MAX_REPLY_TOKENS
-        return {"error": f"question_number must be between 1 and {len(questions)}."}, MAX_REPLY_TOKENS
+            return {"error": "There are no more questions. Call end_session now."}
+        return {"error": f"question_number must be between 1 and {len(questions)}."}
     q = questions[n - 1]
     progress = _progress(call, n)
     if name == "ask_question":
+        _start_clock(call)
         call.current = n
         if progress["first_item"] is None:  # never switch the rubric under an answer already given
             progress["version"] = EASIER if easier and q.easier else STANDARD
-        return {"question_number": n, "say": _version(q, progress["version"]).spoken_text}, MAX_QUESTION_TOKENS
+        return {"question_number": n, "say": _version(q, progress["version"]).spoken_text}
     # give_hint - from the version asked
     hints = _version(q, progress["version"]).hints
     if progress["hints_used"] >= min(MAX_HINTS, len(hints)):
         # nudges used up: the student's last turn (e.g. "I don't know") stands as the answer
         return {"no_hints_left": True,
                 "say_instead": "Kindly say \"That's okay, we'll work on this in your homework\", "
-                               "then go to the next question."}, MAX_REPLY_TOKENS
+                               "then go to the next question."}
     _request_turn(call, n, "hint_request")
     progress["hints_used"] += 1
-    return {"hint": hints[progress["hints_used"] - 1]}, MAX_REPLY_TOKENS
+    return {"hint": hints[progress["hints_used"] - 1]}
 
 
 def _said(spoken: str, text: str) -> bool:
@@ -663,14 +706,14 @@ async def _questions_done(call: RealtimeCall, ws, outputs: list[dict]) -> None:
              and o.get("name") in ("ask_question", "give_hint")]
     messages = [o["id"] for o in outputs if o.get("type") == "message" and o.get("id")]
     spoken = " ".join(call.items.get(m, {}).get("text", "") for m in messages)
-    max_tokens, reply_needed = MAX_REPLY_TOKENS, False
+    reply_needed = False
     for fc in calls:
         try:
             args = json.loads(fc.get("arguments") or "{}")
             n = int(args.get("question_number"))
         except (ValueError, TypeError, AttributeError):
             args, n = {}, None
-        output, tokens = _tool_output(call, fc["name"], n, easier=args.get("easier") is True)
+        output = _tool_output(call, fc["name"], n, easier=args.get("easier") is True)
         if fc["name"] == "ask_question" and "say" in output and _said(spoken, output["say"]):
             for m in messages:  # the question was spoken in this same response - it belongs to it
                 call.item_question[m] = n
@@ -678,13 +721,13 @@ async def _questions_done(call: RealtimeCall, ws, outputs: list[dict]) -> None:
             # the tool's text hasn't been said yet (a filler like "Okay, got it."
             # may have been) - Milo needs a reply to say it
             reply_needed = True
-            max_tokens = max(max_tokens, tokens)
         await ws.send(json.dumps({
             "type": "conversation.item.create",
             "item": {"type": "function_call_output", "call_id": fc.get("call_id"), "output": json.dumps(output)},
         }))
     if reply_needed:
-        await ws.send(json.dumps({"type": "response.create", "response": {"max_output_tokens": max_tokens}}))
+        await ws.send(json.dumps({"type": "response.create",
+                                  "response": {"max_output_tokens": reply_tokens(call.state.config)}}))
     elif (messages and not calls and not call.forcing_end and call.current == len(call.state.config.questions)
           and _progress(call, call.current)["first_item"] is not None and not spoken.rstrip().endswith("?")):
         # Milo acknowledged the final answer but didn't end - make it (the goodbye follows).

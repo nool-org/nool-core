@@ -5,7 +5,7 @@ src/services/daily_practice.py. Recorded answers: routes/practice_voice.py."""
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +30,7 @@ from src.api.schemas.daily_practice import (
 from src.domain.models import Chapter, ClassTopicProgress, Role, StudentProfile, Topic, User
 from src.repositories.lookups import get_class_in_school
 from src.repositories.roster_repository import teaches_class, teaches_class_subject
-from src.services import daily_practice, push
+from src.services import daily_practice, push, revision_cards
 
 router = APIRouter(prefix="/api/v1", tags=["daily-practice"])
 NOTIFY_QUIET_MINUTES = 30
@@ -173,6 +173,7 @@ async def set_topic_taught(
     class_id: str,
     topic_id: str,
     body: TopicTaughtIn,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_role(Role.TEACHER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> TopicProgressOut:
@@ -194,6 +195,9 @@ async def set_topic_taught(
         await session.execute(delete(ClassTopicProgress).where(
             ClassTopicProgress.class_id == class_uuid, ClassTopicProgress.topic_id == topic.id))
     await session.commit()
+    if body.taught:
+        # revision cards are made once per topic; have them ready before students look
+        background_tasks.add_task(revision_cards.pregenerate_for_topic, topic.id)
     if taught_on == daily_practice.today_ist():
         await _notify_taught(session, class_uuid, topic)
     order = [t.id for t in await _chapter_topics(session, chapter.id)].index(topic.id) + 1
