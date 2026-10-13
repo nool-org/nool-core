@@ -30,7 +30,7 @@ def test_plan_spreads_topics_and_sets_each_types_level():
     t1, t2 = SimpleNamespace(name="a"), SimpleNamespace(name="b")
     slots = service.plan([t1, t2], {"mcq": 5, "who_is_right": 1, "make_your_own": 1})
     assert [(s.kind, s.bloom_level) for s in slots] == [
-        ("mcq", B.REMEMBER), ("mcq", B.UNDERSTAND), ("mcq", B.APPLY), ("mcq", B.ANALYZE), ("mcq", B.REMEMBER),
+        ("mcq", B.APPLY), ("mcq", B.APPLY), ("mcq", B.UNDERSTAND), ("mcq", B.APPLY), ("mcq", B.ANALYZE),
         ("who_is_right", B.ANALYZE), ("make_your_own", B.CREATE)]
     assert [s.topic for s in slots[:3]] == [t1, t2, t1]
     for bad in ({"mcq": 0}, {"mcq": 21}, {"essay": 2}):
@@ -71,7 +71,7 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
 
     detail = await routes.get_quiz_test(created.id, user=s.teacher, session=db_session)
     assert detail.status == "ready" and detail.question_count == 4
-    assert [q.bloom_level for q in detail.questions] == ["REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE"]
+    assert [q.bloom_level for q in detail.questions] == ["APPLY", "APPLY", "UNDERSTAND", "APPLY"]
     assert all(q.correct_index is not None for q in detail.questions)  # the teacher sees the answers
 
     # not open yet: students don't see it and can't start it
@@ -99,10 +99,10 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
     await _answer(db_session, s, attempt, {R, U})
     done = await quiz_routes.finish_my_topic_quiz(attempt.id, background_tasks=BackgroundTasks(), user=s.student,
                                                   session=db_session)
-    assert done.analysis.score_percent == 50 and done.analysis.outcome == "homework"
+    assert done.analysis.score_percent == 25 and done.analysis.outcome == "homework"  # 3 of 4 are Apply problems
 
     results = await routes.get_quiz_test_results(created.id, user=s.teacher, session=db_session)
-    assert (results.student_count, results.done, results.average_percent) == (2, 1, 50)
+    assert (results.student_count, results.done, results.average_percent) == (2, 1, 25)
     assert results.weakest_level == "APPLY" and len(results.needs_help) == 1
     assert sorted(r.status for r in results.students) == ["done", "not_started"]
 

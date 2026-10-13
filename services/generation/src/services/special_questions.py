@@ -25,7 +25,10 @@ Kind = Literal["who_is_right", "make_your_own", "fix_steps"]
 
 BASE = """You write one question for a CBSE Class {grade} {subject} student in India, on the topic "{topic}"
 (chapter "{chapter}"), at Bloom level {level}. Use ONLY ideas from the textbook text given. Simple Indian
-English, short sentences. Write maths as plain text with symbols: √5, 2 × 3, x², ≠, ≤, π - never LaTeX or $."""
+English, short sentences. Write maths as plain text with symbols: √5, 2 × 3, x², ≠, ≤, π - never LaTeX or $.
+In Mathematics, build the question around a calculation or a worked problem (numbers to work with, a short
+word problem) the way CBSE board papers do - not around a definition. Keep every line short: it is read on a
+phone."""
 
 PROMPTS = {
     "who_is_right": BASE + """

@@ -37,7 +37,9 @@ from src.services.daily_practice import Slot
 logger = logging.getLogger(__name__)
 
 KINDS = ("mcq", *question_types.KINDS)
-MCQ_LEVELS = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND, BloomLevel.APPLY, BloomLevel.ANALYZE]
+# the MCQs' levels in turn: mostly problems to work out (Apply), like a board paper
+MCQ_LEVELS = [BloomLevel.APPLY, BloomLevel.APPLY, BloomLevel.UNDERSTAND, BloomLevel.APPLY, BloomLevel.ANALYZE,
+              BloomLevel.REMEMBER]
 KIND_LEVEL = {"who_is_right": BloomLevel.ANALYZE, "fix_steps": BloomLevel.EVALUATE,
               "make_your_own": BloomLevel.CREATE}
 MAX_QUESTIONS = 20
@@ -45,7 +47,7 @@ MAX_QUESTIONS = 20
 
 def plan(topics: list[Topic], mix: dict[str, int]) -> list[Slot]:
     """One slot per question: the topics in turn, MCQs cycling through
-    Remember -> Analyze, each other type at its own level."""
+    MCQ_LEVELS (mostly Apply problems), each other type at its own level."""
     unknown = set(mix) - set(KINDS)
     if unknown:
         raise ValidationError(f"Unknown question type: {', '.join(sorted(unknown))}.")

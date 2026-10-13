@@ -185,3 +185,25 @@ async def test_an_mcq_hint_that_gives_the_answer_away_is_rejected_in_code():
     llm = FakeLLM([_Drafts(questions=[mcq("Think series.", explanation=" ")])] * 2, [])
     result = await fill_gaps(llm, request, generation_model="gen", verify_model="ver")
     assert result.unfilled_slot_indexes == [0] and "one-line explanation" in llm.calls[1][2]
+
+
+@pytest.mark.asyncio
+async def test_maths_gets_problem_first_rules_science_does_not():
+    systems = []
+
+    class Recording(FakeLLM):
+        async def __call__(self, *, model, effort, system, user, output_type):
+            systems.append((output_type.__name__, system))
+            return await super().__call__(model=model, effort=effort, system=system, user=user,
+                                          output_type=output_type)
+
+    maths = REQUEST.model_copy(update={"subject": "Mathematics", "slots": REQUEST.slots[:1]})
+    await fill_gaps(Recording([_Drafts(questions=[question(0)])], [_Verdicts(verdicts=ok(0))]), maths,
+                    generation_model="gen", verify_model="ver")
+    writer = next(s for t, s in systems if t == "_Drafts")
+    assert "write PROBLEMS, not text questions" in writer and "never LaTeX" in writer
+    systems.clear()
+    science = REQUEST.model_copy(update={"slots": REQUEST.slots[:1]})
+    await fill_gaps(Recording([_Drafts(questions=[question(0)])], [_Verdicts(verdicts=ok(0))]), science,
+                    generation_model="gen", verify_model="ver")
+    assert "PROBLEMS" not in next(s for t, s in systems if t == "_Drafts")

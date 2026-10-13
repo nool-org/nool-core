@@ -49,7 +49,7 @@ def test_quiz_slots_add_two_spoken_answers():
 
 def test_maths_quiz_mixes_in_its_own_question_types():
     first = service.quiz_slots(1, subject="Mathematics")
-    assert first == [("mcq", B.REMEMBER)] * 2 + [("mcq", B.UNDERSTAND)] * 2 + [("mcq", B.APPLY)] * 2 + [
+    assert first == [("mcq", B.REMEMBER), ("mcq", B.UNDERSTAND)] + [("mcq", B.APPLY)] * 4 + [
         ("who_is_right", B.ANALYZE), ("fix_steps", B.EVALUATE), ("make_your_own", B.CREATE), ("voice", B.UNDERSTAND)]
     recheck = service.quiz_slots(2, ["CREATE", "APPLY"], subject="Mathematics")
     assert [k for k, _ in recheck] == ["mcq"] * 4 + ["make_your_own", "voice"]
@@ -391,6 +391,7 @@ async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, m
     monkeypatch.setattr(service.daily_practice.generation_client, "special_questions", special_questions)
     quiz = await _start(db_session, s, s.ohm)
     assert [i.kind for i in quiz.items] == ["mcq"] * 6 + ["who_is_right", "fix_steps", "mcq", "voice"]
+    assert [i.bloom_level for i in quiz.items][:6] == [R, U, A, A, A, A]  # mostly problems
     assert [sl["kind"] for sl in asked[0]["slots"]] == ["who_is_right", "fix_steps", "make_your_own"]
     assert "pair_hcf_lcm" in {c["kind"] for c in asked[0]["checks"]} and asked[0]["subject"] == "Mathematics"
     who = next(i for i in quiz.items if i.kind == "who_is_right")

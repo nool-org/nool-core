@@ -123,9 +123,27 @@ no facts, formulas or data that aren't in them or standard for this class.
   toward the idea - it never names, quotes or gives away the right option).
 - If a slot has `feedback`, your previous question for it was rejected for that reason - fix it."""
 
+# Extra rules per subject, appended to GENERATE_SYSTEM. Maths is tested on problems, the way CBSE board
+# papers do it - not on statements about the topic.
+SUBJECT_STYLE = {
+    "Mathematics": """
+MATHS - write PROBLEMS, not text questions:
+- Almost every question is something to work out: numbers to compute, a short word problem, a value to find,
+  a claim to check by calculating - the way CBSE Class 10 board papers ask (e.g. find the HCF/LCM of given
+  numbers; a real-life word problem such as bells or lights repeating, packing or cutting into equal parts;
+  find the other number given HCF, LCM and one number; find the smallest n that makes a product a perfect
+  square; decide whether a given number can end in a digit). Only a REMEMBER slot may ask for a statement or
+  definition, and even then prefer recognising a correct example.
+- Use numbers a Class 10 student can handle on paper in 1-3 minutes, no calculator.
+- MCQ options are answers (numbers or short expressions). Every wrong option is what a typical mistake
+  gives - LCM instead of HCF, highest powers instead of lowest, a dropped prime, an arithmetic slip - never a
+  random number.
+- Write maths as plain text with symbols: 2³ × 3², √5, ≠, ≤ - never LaTeX or $.""",
+}
+
 VERIFY_SYSTEM = """You are a strict CBSE Class {grade} {subject} teacher checking generated homework questions.
 For each question, ok=true only if ALL hold:
-1. The answer is correct and complete (re-derive any numericals yourself).
+1. The answer is correct and complete (re-derive any numericals yourself - work every calculation out).
 2. It is answerable from the given textbook sections at Class {grade} level.
 3. It fits its requested Bloom level and difficulty reasonably.
 4. It is self-contained (no unseen figure/diagram/table) and unambiguous; an mcq has exactly one correct option,
@@ -192,7 +210,8 @@ class GapFillWorkflow(Workflow):
     @step
     async def generate(self, ctx: Context, ev: GenerateEvent) -> VerifyEvent:
         request: GapFillRequest = await ctx.store.get("request")
-        system = GENERATE_SYSTEM.format(grade=request.grade, subject=request.subject)
+        system = GENERATE_SYSTEM.format(grade=request.grade, subject=request.subject) + SUBJECT_STYLE.get(
+            request.subject, "")
         if request.style == "spoken":
             system += SPOKEN_RULES
         # a retry must not repeat what an earlier attempt already got accepted

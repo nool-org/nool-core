@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 LEVELS = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND, BloomLevel.APPLY, BloomLevel.ANALYZE]  # MCQ levels
 SCORED = [*LEVELS, BloomLevel.EVALUATE, BloomLevel.CREATE]  # what the analysis can report on
+# A mixed subject's (Maths) 6 MCQs: mostly problems to work out (Apply), one recall, one concept check.
+PROBLEM_LEVELS = [BloomLevel.REMEMBER, BloomLevel.UNDERSTAND] + [BloomLevel.APPLY] * 4
 # Per subject, the question types a quiz adds after its MCQs, each at its level (question_types.py).
 # Maths swaps its Analyze MCQs for these - they test reasoning MCQs can't.
 QUIZ_MIX: dict[str, list[tuple[str, BloomLevel]]] = {
@@ -85,7 +87,7 @@ def quiz_slots(attempt: int, lagging: list[str] | None = None, subject: str | No
     (a spoken answer shows understanding best).
 
     Without a mix: 8 MCQs (2 per level) + 2 spoken; re-check 6 + 2.
-    With one (Maths): 6 MCQs (no Analyze) + the mix + 1 spoken; on a re-check,
+    With one (Maths): 6 MCQs (PROBLEM_LEVELS: 4 Apply problems) + the mix + 1 spoken; on a re-check,
     MCQs on the lagging MCQ levels + the mix types whose level lags (else the
     first) + 1 spoken."""
     mix = QUIZ_MIX.get(subject or "", [])
@@ -96,7 +98,7 @@ def quiz_slots(attempt: int, lagging: list[str] | None = None, subject: str | No
         return mcqs + [("voice", level) for level in voice]
     mixed_levels = {level for _, level in mix}
     if attempt == 1:
-        mcq_levels = [level for level in LEVELS if level not in mixed_levels for _ in range(PER_LEVEL)]
+        mcq_levels = list(PROBLEM_LEVELS)
         extra = list(mix)
     else:
         mcq_weak = [v for v in (lagging or []) if BloomLevel(v) in LEVELS and BloomLevel(v) not in mixed_levels]
