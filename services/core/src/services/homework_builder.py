@@ -5,12 +5,16 @@
 1. question bank first: services/question_selector.py picks real questions
    on the test's topic from the datasets this class may use (and the
    teacher picked), skipping ones the class has already had;
-2. generation service for the slots the bank couldn't fill, grounded in the
+2. for one student's own homework: a question generated earlier for
+   another student's homework on the same topic and Bloom level, that this
+   student hasn't had - each topic grows its own library of generated
+   questions, so most students cost no model call (_reuse_generated);
+3. generation service for the slots still open, grounded in the
    topic's own textbook text (services/generation, via generation_client);
-3. if generation couldn't cover them: any unused bank question on the same
+4. if generation couldn't cover them: any unused bank question on the same
    topic (then chapter), even if its Bloom level/difficulty don't match -
    a real question beats a placeholder;
-4. the existing KG/deterministic generator only for anything still missing,
+5. the existing KG/deterministic generator only for anything still missing,
    so a homework never comes back short because a service is down.
 """
 
@@ -127,17 +131,22 @@ async def build_homework_questions(
             picked.append(q)
     open_slots = [i for i in range(len(slots)) if i not in drafts]
     counts = {"bank": len(drafts)}
+    if open_slots and student_id and topic_id:
+        await _reuse_generated(session, topic_id=topic_id, student_id=student_id, slots=slots,
+                               open_slots=open_slots, drafts=drafts)
+        open_slots = [i for i in range(len(slots)) if i not in drafts]
+    counts["reused"] = len(drafts) - counts["bank"]
 
     if open_slots:
         await _generate(session, test=test, topic_id=topic_id, slots=slots, open_slots=open_slots, drafts=drafts,
                         examples=picked, fallback_dataset_id=fallback_dataset_id,
                         release_before_generation=release_before_generation, keep=keep)
-    counts["generated"] = len(drafts) - counts["bank"]
+    counts["generated"] = len(drafts) - counts["bank"] - counts["reused"]
     still_open = [i for i in range(len(slots)) if i not in drafts]
     if still_open:
         await _bank_relaxed_fill(session, test=test, topic_id=topic_id, dataset_ids=dataset_ids,
                                  open_slots=still_open, drafts=drafts, exclude_uids=seen)
-    counts["relaxed_bank"] = len(drafts) - counts["bank"] - counts["generated"]
+    counts["relaxed_bank"] = len(drafts) - counts["bank"] - counts["reused"] - counts["generated"]
     still_open = [i for i in range(len(slots)) if i not in drafts]
     if still_open:
         await _legacy_fill(session, test=test, slots=slots, open_slots=still_open, drafts=drafts,
@@ -168,6 +177,34 @@ async def grounding_dataset_id(session: AsyncSession, *, user: User, test: Voice
 def question_uid(q: DatasetQuestion) -> str:
     """Identity of a question across its dataset copies (the selector's key)."""
     return q.external_uid or str(q.id)
+
+
+async def _reuse_generated(session: AsyncSession, *, topic_id, student_id, slots: list[Slot],
+                           open_slots: list[int], drafts: dict[int, QuestionDraft]) -> None:
+    """Fills open slots with questions the generation service already wrote
+    for other students' homework on this topic (a topic quiz's homework has
+    topic_id; a voice test's follows its test's topic) at the slot's Bloom
+    level - the least handed-out first, never one this student has had or
+    one already in this homework."""
+    on_topic = or_(Homework.topic_id == topic_id,
+                   Homework.test_id.in_(select(VoiceTest.id).where(VoiceTest.topic_id == topic_id)))
+    had = select(HomeworkQuestion.text).join(
+        HomeworkTargetStudent, HomeworkTargetStudent.homework_id == HomeworkQuestion.homework_id
+    ).where(HomeworkTargetStudent.student_id == student_id)
+    rows = (await session.execute(
+        select(HomeworkQuestion.bloom_level, HomeworkQuestion.text, func.min(HomeworkQuestion.answer),
+               func.min(cast(HomeworkQuestion.dataset_id, String)), func.count())
+        .join(Homework, Homework.id == HomeworkQuestion.homework_id)
+        .where(on_topic, HomeworkQuestion.source_question_id.is_(None), Homework.status.in_(_HANDED_OUT),
+               HomeworkQuestion.text.not_in(had))
+        .group_by(HomeworkQuestion.bloom_level, HomeworkQuestion.text)
+        .order_by(func.count(), HomeworkQuestion.text))).all()
+    taken = {d.text for d in drafts.values()}
+    for i in open_slots:
+        hit = next((r for r in rows if r[0] == slots[i].bloom_level and r[1] not in taken), None)
+        if hit is not None:
+            drafts[i] = QuestionDraft(bloom_level=hit[0], text=hit[1], answer=hit[2], dataset_id=uuid.UUID(hit[3]))
+            taken.add(hit[1])
 
 
 async def _seen_uids(session: AsyncSession, class_id, student_id=None) -> set[str]:

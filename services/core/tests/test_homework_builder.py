@@ -145,3 +145,55 @@ async def test_a_draft_still_in_review_doesnt_use_up_the_pool(db_session, monkey
 
     second = await _build(db_session, s, total=2, picked=[s["imp"].id])
     assert _bank_ids(first) == _bank_ids(second)
+
+
+@pytest.mark.asyncio
+async def test_a_students_homework_reuses_questions_generated_for_another_students(db_session, monkeypatch):
+    """Generated questions are kept per topic and Bloom level: the next student
+    who needs one gets it without a model call - but never twice."""
+    from src.domain.models import HomeworkTargetStudent
+
+    s = await _seed(db_session, bank_size=0)
+    a, b = (User(firebase_uid=f"s-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com", display_name=n,
+                 role=Role.STUDENT, school_id=s["teacher"].school_id, status=UserStatus.ACTIVE) for n in "AB")
+    db_session.add_all([a, b])
+    await db_session.flush()
+    calls = []
+
+    async def fake_gap_fill(payload):
+        calls.append(payload)
+        return {"questions": [{"slot_index": 0, "question_type": "short_answer", "text": f"generated q{len(calls)}",
+                               "options": [], "answer": "g", "solution": "", "grounded_in": "11.6 Resistors"}],
+                "unfilled_slot_indexes": [], "attempts": 1}
+
+    monkeypatch.setattr(generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(generation_client, "gap_fill", fake_gap_fill)
+
+    async def build_for(student):
+        return await build_homework_questions(
+            db_session, user=s["teacher"], test=s["test"], total=1, bloom_weights={B.APPLY: 1},
+            difficulty=HomeworkDifficulty.EASY, fallback_dataset_id=s["imp"].id, picked_dataset_ids=[s["imp"].id],
+            seed="t", student_id=student.id)
+
+    async def hand_to(student, drafts):
+        hw = Homework(test_id=None, topic_id=s["test"].topic_id, class_id=s["test"].class_id, gap_topic="",
+                      gap_mastery_percent=0, total_questions=1, difficulty=HomeworkDifficulty.EASY,
+                      target_mode=AssignmentTargetMode.SPECIFIC_STUDENTS, status=HomeworkStatus.ASSIGNED)
+        db_session.add(hw)
+        await db_session.flush()
+        db_session.add(HomeworkTargetStudent(homework_id=hw.id, student_id=student.id))
+        db_session.add_all([HomeworkQuestion(homework_id=hw.id, order=i, bloom_level=d.bloom_level,
+                                             dataset_id=d.dataset_id, source_question_id=d.source_question_id,
+                                             text=d.text, answer=d.answer) for i, d in enumerate(drafts, 1)])
+        await db_session.flush()
+
+    first = await build_for(a)
+    assert [d.text for d in first] == ["generated q1"] and len(calls) == 1
+    await hand_to(a, first)
+
+    second = await build_for(b)                                    # same topic and level: no model call
+    assert [d.text for d in second] == ["generated q1"] and len(calls) == 1
+    assert second[0].source_question_id is None
+
+    again = await build_for(a)                                     # A already had it: a fresh one
+    assert [d.text for d in again] == ["generated q2"] and len(calls) == 2
