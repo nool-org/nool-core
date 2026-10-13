@@ -152,3 +152,9 @@ async def test_publishing_needs_ready_questions_and_maths_has_no_voice_tests(db_
     with pytest.raises(ValidationError, match="written tests"):
         await voice_routes.create_test(body, background_tasks=BackgroundTasks(), user=s.teacher, _feature=s.teacher,
                                        session=db_session)
+
+
+async def test_a_subject_only_gets_its_own_question_types(db_session, monkeypatch):
+    s = await _seed(db_session)  # Electricity is Science: no Make your own (its checks are maths)
+    with pytest.raises(ValidationError, match="make_your_own"):
+        await _create(db_session, s, monkeypatch, mix={"mcq": 2, "make_your_own": 1})

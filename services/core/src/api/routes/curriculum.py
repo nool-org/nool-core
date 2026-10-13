@@ -51,7 +51,7 @@ async def list_subjects(
         )
     )
     # `grade` narrows to that grade's subjects (legacy grade-less subjects always match)
-    items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade, voice_tests=subject_rules.voice_tests_allowed(s.name)) for s in result.scalars().all()
+    items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade, voice_tests=subject_rules.voice_tests_allowed(s.name), formats=list(subject_rules.formats(s.name))) for s in result.scalars().all()
              if grade is None or s.grade in (None, grade)]
     return ListEnvelope(items=items, total=len(items))
 
@@ -96,7 +96,7 @@ async def list_subjects_for_class(
         )
     )
     enabled_ids = {row[0] for row in enabled.all()}
-    items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade, voice_tests=subject_rules.voice_tests_allowed(s.name)) for s in assigned_subjects if s.id in enabled_ids]
+    items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade, voice_tests=subject_rules.voice_tests_allowed(s.name), formats=list(subject_rules.formats(s.name))) for s in assigned_subjects if s.id in enabled_ids]
     return ListEnvelope(items=items, total=len(items))
 
 

@@ -28,10 +28,11 @@ from src.domain.models import (
     QuizTest,
     SchoolClass,
     StudentProfile,
+    Subject,
     Topic,
     User,
 )
-from src.services import ai_context, daily_practice, push, question_types, topic_quiz
+from src.services import ai_context, daily_practice, push, question_types, subject_rules, topic_quiz
 from src.services.daily_practice import Slot
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,10 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
     if any(t.chapter_id != chapter.id for t in topics):
         raise ValidationError("Every topic must be from the chosen chapter.")
     plan(topics, mix)  # validates the mix
+    subject = await session.get(Subject, chapter.subject_id)
+    unfit = sorted(k for k, n in mix.items() if int(n) > 0 and k not in subject_rules.formats(subject.name))
+    if unfit:
+        raise ValidationError(f"{subject.name} doesn't use: {', '.join(unfit)}.")
     test = QuizTest(id=uuid.uuid4(), class_id=class_uuid, subject_id=chapter.subject_id, chapter_id=chapter.id,
                     # a default name a teacher can tell apart from last week's: "Real Numbers test · 13 Oct"
                     title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} test · "

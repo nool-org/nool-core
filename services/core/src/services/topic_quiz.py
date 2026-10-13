@@ -44,7 +44,7 @@ from src.domain.models import (
     Topic,
     User,
 )
-from src.services import ai_context, daily_practice, generation_client, push, question_types
+from src.services import ai_context, daily_practice, generation_client, push, question_types, subject_rules
 from src.services.daily_practice import Slot
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,8 @@ def quiz_slots(attempt: int, lagging: list[str] | None = None, subject: str | No
         mcq_levels = [lv for lv in quiz_levels(2, mcq_weak) if lv not in mixed_levels][:4]
         extra = [(k, lv) for k, lv in mix if lv in weak] or mix[:1]
     voice = list(dict.fromkeys([lv for lv in weak if lv in VOICE_LEVELS] + VOICE_LEVELS))[:1]
+    if not subject_rules.voice_tests_allowed(subject):
+        voice = []
     return [("mcq", level) for level in mcq_levels] + extra + [("voice", level) for level in voice]
 
 
