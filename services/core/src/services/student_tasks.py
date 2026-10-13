@@ -82,24 +82,24 @@ def _topic_task(loop, hw, progress, now) -> dict:
     quiz_step = _step("quiz", "Check-in", "current" if stage == "quiz" else "done", target_id=str(loop.topic.id),
                       note=f"{quiz.score_percent}%" if quiz and quiz.outcome else None)
     if stage == "quiz":
-        hw_step, re_step = _step("homework", "Homework", "locked"), _step("recheck", "Re-check", "locked")
+        hw_step, re_step = _step("homework", "Homework", "locked"), _step("recheck", "Second look", "locked")
     elif quiz.outcome == "mastered":
         hw_step = _step("homework", "Homework", "skipped", note="Not needed")
-        re_step = _step("recheck", "Re-check", "skipped")  # the task says "Mastered"
+        re_step = _step("recheck", "Second look", "skipped")  # the task says "Mastered"
     else:
         hw_step = _homework_step(hw, progress, waiting=stage == "homework_pending", now=now)
         if (quiz.analysis or {}).get("homework_skipped"):
             hw_step = _step("homework", "Homework", "skipped", note="Not needed")
         if recheck is not None and recheck.outcome is not None:
-            re_step = _step("recheck", "Re-check", "done", target_id=str(loop.topic.id),
+            re_step = _step("recheck", "Second look", "done", target_id=str(loop.topic.id),
                             note=f"{recheck.score_percent}%")
         else:
-            re_step = _step("recheck", "Re-check", "current" if stage == "recheck" else "locked",
+            re_step = _step("recheck", "Second look", "current" if stage == "recheck" else "locked",
                             target_id=str(loop.topic.id))
     steps = [quiz_step, hw_step, re_step]
     result = {"mastered": "Mastered", "needs_teacher": "Your teacher will help"}.get(stage)
     return {"id": f"topic:{loop.topic.id}", "kind": "topic", "title": daily_practice.tidy(loop.topic.name),
-            "subtitle": "Milo's check-in", "state": _chain_state(steps), "result": result, "steps": steps,
+            "subtitle": "Milo's check-in", "subject": None, "state": _chain_state(steps), "result": result, "steps": steps,
             "sort_at": loop.taught_on}
 
 
@@ -145,6 +145,7 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
         out.append({"id": f"test:{test.id}", "kind": "test",
                     "title": chapter.name if chapter else "Chat with Milo",
                     "subtitle": f"{subject.name if subject else ''} · Chat with Milo".strip(" ·"),
+                    "subject": subject.name if subject else None,
                     "state": _chain_state(steps), "result": None, "steps": steps,
                     "sort_at": test.scheduled_at or test.created_at})
     return out
@@ -182,7 +183,8 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
             hw_step = _homework_step(hw, progress, waiting=True, now=now)
         steps = [step, hw_step]
         out.append({"id": f"quiz_test:{test.id}", "kind": "quiz_test", "title": test.title,
-                    "subtitle": "Written challenge", "state": _chain_state(steps),
+                    "subtitle": "Written challenge", "subject": (await session.get(Subject, test.subject_id)).name,
+                    "state": _chain_state(steps),
                     "result": "Mastered" if finished and attempt.outcome == "mastered" else None,
                     "steps": steps, "sort_at": test.published_at})
     return out
@@ -201,6 +203,11 @@ async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
         .where(Homework.id.in_(hw_ids)))).all()} if hw_ids else {}
     tasks = [_topic_task(lp, *rows.get(lp.quiz.homework_id if lp.quiz else None, (None, None)), now)
              for lp in loops]
+    # each topic task's subject, so the app can filter and colour by it
+    subject_of = dict((await session.execute(select(Chapter.id, Subject.name).join(
+        Subject, Subject.id == Chapter.subject_id).where(Chapter.id.in_({lp.topic.chapter_id for lp in loops})))).all())
+    for task, lp in zip(tasks, loops):
+        task["subject"] = subject_of.get(lp.topic.chapter_id)
     tasks += await _test_tasks(session, student, now)
     tasks += await _quiz_test_tasks(session, student, now)
 

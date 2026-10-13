@@ -18,6 +18,7 @@ class TaskOut(CamelModel):
     kind: Literal["topic", "test", "quiz_test"]
     title: str
     subtitle: str
+    subject: str | None = None  # the subject's name - the app filters and colours by it
     state: Literal["open", "done"]
     result: str | None
     steps: list[TaskStepOut]

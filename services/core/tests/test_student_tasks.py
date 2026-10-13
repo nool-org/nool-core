@@ -55,7 +55,7 @@ async def test_topic_task_walks_quiz_homework_recheck(db_session, monkeypatch):
     tid = f"topic:{s.ohm.id}"
 
     task = await _task(db_session, s.student, tid)
-    assert task.state == "open" and task.subtitle == "Milo's check-in"
+    assert task.state == "open" and task.subtitle == "Milo's check-in" and task.subject.startswith("Science")
     assert _steps(task) == [("quiz", "current"), ("homework", "locked"), ("recheck", "locked")]
 
     quiz = await _start(db_session, s, s.ohm)
@@ -105,7 +105,7 @@ async def test_voice_test_task_runs_test_homework_mcq_check(db_session):
     tid = f"test:{s['test'].id}"
 
     task = await _task(db_session, s["student"], tid)
-    assert task.kind == "test" and task.title == "Electricity"
+    assert task.kind == "test" and task.title == "Electricity" and task.subject.startswith("Science")
     assert _steps(task) == [("voice_test", "done"), ("homework", "waiting"), ("mcq_check", "waiting")]
 
     hw = Homework(test_id=s["test"].id, class_id=s["class"].id, gap_topic="Electricity", gap_mastery_percent=46,
