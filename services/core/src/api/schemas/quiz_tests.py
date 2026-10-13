@@ -45,6 +45,9 @@ class QuizTestOut(CamelModel):
     opens_at: dt.datetime | None
     created_at: dt.datetime
     question_count: int
+    # how far the class has got - students who finished it / students in the class
+    done_count: int = 0
+    student_count: int = 0
 
 
 class QuizTestDetailOut(QuizTestOut):

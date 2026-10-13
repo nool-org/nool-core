@@ -18,6 +18,7 @@ from src.domain.models import (
     Chapter,
     Homework,
     QuestionPaper,
+    QuizTest,
     SchoolClass,
     StudentHomeworkProgress,
     StudentHomeworkStatus,
@@ -118,11 +119,24 @@ async def build_teacher_facts(session: AsyncSession, teacher: User) -> dict:
         .order_by(QuestionPaper.created_at.desc()).limit(5)
     )).all()
 
+    from src.services import quiz_tests  # lazy: quiz_tests pulls in the practice services
+
+    challenges = []
+    for test in (await session.execute(
+            select(QuizTest).where(QuizTest.created_by == teacher.id, QuizTest.status == "published")
+            .order_by(QuizTest.created_at.desc()).limit(5))).scalars():
+        r = await quiz_tests.results(session, test)
+        challenges.append({
+            "title": test.title, "finished": f"{r['done']}/{r['student_count']}",
+            "class_average_percent": r["average_percent"], "deadline_passed": bool(test.due_at and test.due_at < now),
+            "students_needing_help": r["needs_help"][:STRUGGLING]})
+
     return {
         "teacher": teacher.display_name,
         "today": now.date().isoformat(),
         "classes": [{"class": c, "subject": s, "students": n} for c, s, n in classes],
         "recent_voice_tests": recent_tests,
+        "open_challenges": challenges,  # e.g. Fix Milo's homework (Maths)
         "thinking_levels_average_percent": {lvl.value: int(p) for lvl, p in bloom_rows},
         "attempts_waiting_for_teacher_review": pending_reviews,
         "students_needing_help": [{"name": n, "average_percent": int(a)} for n, a in struggling],

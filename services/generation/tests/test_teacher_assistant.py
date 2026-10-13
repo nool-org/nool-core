@@ -26,7 +26,8 @@ def test_reply_sends_only_the_facts_and_the_last_turns():
     assert "never invent" in call["system"]
 
 
-def test_summary_asks_for_two_or_three_action_first_bullets():
+def test_summary_asks_for_up_to_three_action_first_bullets_and_none_when_nothing_needs_attention():
     llm = FakeLLM(service.SummaryResult(bullets=["27 students haven't finished Light."]))
     out = asyncio.run(service.summary(llm, service.SummaryRequest(facts=FACTS), model="m"))
-    assert out.bullets and "2-3 bullets" in llm.calls[0]["system"]
+    system = llm.calls[0]["system"]
+    assert out.bullets and "up to 3 bullets" in system and "return no bullets at all" in system

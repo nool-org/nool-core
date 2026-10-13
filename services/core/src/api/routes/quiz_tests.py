@@ -6,7 +6,7 @@ practice's item routes, then finish with the topic quiz's finish."""
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_db_session, require_role
@@ -21,14 +21,14 @@ from src.api.schemas.quiz_tests import (
     QuizTestScheduleIn,
 )
 from src.api.schemas.topic_quiz import TopicQuizOut
-from src.domain.models import QuizTest, Role, User
+from src.domain.models import DailyPracticeSession, QuizTest, Role, StudentProfile, User
 from src.services import quiz_tests
 
 router = APIRouter(prefix="/api/v1", tags=["quiz-tests"])
 
 
-def _out(test: QuizTest) -> QuizTestOut:
-    return QuizTestOut(
+def _out(test: QuizTest, done: int = 0, students: int = 0) -> QuizTestOut:
+    return QuizTestOut(done_count=done, student_count=students,
         id=str(test.id), class_id=str(test.class_id), subject_id=str(test.subject_id),
         chapter_id=str(test.chapter_id), title=test.title, topic_ids=test.topic_ids, mix=test.mix,
         status=test.status, due_at=test.due_at,
@@ -58,7 +58,14 @@ async def list_my_quiz_tests(
 ) -> QuizTestListOut:
     rows = (await session.execute(select(QuizTest).where(QuizTest.created_by == user.id)
                                   .order_by(QuizTest.created_at.desc()))).scalars().all()
-    return QuizTestListOut(items=[_out(t) for t in rows])
+    done = dict((await session.execute(
+        select(DailyPracticeSession.quiz_test_id, func.count()).where(
+            DailyPracticeSession.quiz_test_id.in_([t.id for t in rows]), DailyPracticeSession.attempt == 1,
+            DailyPracticeSession.outcome.is_not(None)).group_by(DailyPracticeSession.quiz_test_id))).all()) if rows else {}
+    students = dict((await session.execute(
+        select(StudentProfile.class_id, func.count()).where(StudentProfile.class_id.in_({t.class_id for t in rows}))
+        .group_by(StudentProfile.class_id))).all()) if rows else {}
+    return QuizTestListOut(items=[_out(t, done.get(t.id, 0), students.get(t.class_id, 0)) for t in rows])
 
 
 @router.get("/quiz-tests/{test_id}")

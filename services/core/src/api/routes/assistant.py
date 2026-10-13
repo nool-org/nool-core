@@ -130,6 +130,8 @@ async def teacher_summary(
         return TeacherSummaryOut(bullets=cached[1])
     try:
         bullets = await generation_client.teacher_summary(await build_teacher_facts(session, user))
+        # "No reviews waiting" tells the teacher nothing - the card hides when there's nothing to say
+        bullets = [b for b in bullets if not b.strip().lower().startswith(("no ", "there are no", "nothing "))]
     except generation_client.GenerationServiceUnavailableError:
         logger.warning("teacher_summary_llm_unavailable")
         return TeacherSummaryOut(bullets=[])

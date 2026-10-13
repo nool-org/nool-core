@@ -55,12 +55,14 @@ async def test_summary_is_cached_and_empty_when_the_model_is_down(db_session, mo
 
     async def fake_summary(facts):
         calls.append(facts)
-        return ["Nothing needs you today."]
+        return ["2 students need help on Real Numbers", "No reviews waiting today"]
 
     monkeypatch.setattr(generation_client, "teacher_summary", fake_summary)
     first = await assistant.teacher_summary(user=teacher, session=db_session)
     second = await assistant.teacher_summary(user=teacher, session=db_session)
-    assert first.bullets == second.bullets == ["Nothing needs you today."] and len(calls) == 1
+    # "No ..." lines say nothing - dropped, so the card shows only what needs the teacher
+    assert first.bullets == second.bullets == ["2 students need help on Real Numbers"] and len(calls) == 1
+    assert "open_challenges" in calls[0]  # the teacher's Fix Milo challenges are in the facts too
     await assistant.teacher_summary(refresh=True, user=teacher, session=db_session)
     assert len(calls) == 2
 

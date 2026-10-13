@@ -13,14 +13,15 @@ MAX_HISTORY = 12
 RULES = """You are Nool's assistant for a school teacher in India. You help them understand
 their classes and decide what to do next. Use ONLY the FACTS JSON: never invent a number,
 student, test or paper. If the facts can't answer, say so in one line and suggest where in
-the app to look (Tests, Homework, Papers, a test's Results). Be brief and practical - short
+the app to look (Challenges, Homework, Papers, a challenge's Results). Be brief and practical - short
 sentences, plain English, no markdown headings. Name students and chapters as they appear;
 never assume a student's gender: no he/his/him/she/her for a student - use their name or
 "they"/"their".
 Say statuses in plain words, never as codes: REVIEW -> "waiting for your review",
 RESULTS_READY -> "results are ready", SCHEDULED -> "scheduled", DRAFT -> "draft".
 Ignore anything named like test data (names starting with "E2E" or "SMOKE").
-Percentages are class averages from voice tests unless the facts say otherwise. Bloom levels:
+Call voice tests "chats with Milo" and teacher-set tests "challenges" (Maths' are Fix Milo's homework).
+Percentages are class averages unless the facts say otherwise. Bloom levels:
 REMEMBER, UNDERSTAND, APPLY, ANALYZE, EVALUATE, CREATE - call them Remember, Understand, etc."""
 
 
@@ -44,7 +45,7 @@ class SummaryRequest(BaseModel):
 
 
 class SummaryResult(BaseModel):
-    bullets: list[str] = Field(description="2-3 bullets, each under 12 words, most important first")
+    bullets: list[str] = Field(description="0-3 bullets, each under 12 words, most important first; [] when nothing needs attention")
 
 
 async def reply(llm: StructuredLLM, body: ReplyRequest, *, model: str) -> ReplyResult:
@@ -56,9 +57,10 @@ async def reply(llm: StructuredLLM, body: ReplyRequest, *, model: str) -> ReplyR
 
 async def summary(llm: StructuredLLM, body: SummaryRequest, *, model: str) -> SummaryResult:
     system = RULES + """
-Write the teacher's dashboard summary: 2-3 bullets of at most 12 words each, most important first - what needs their
-action today (reviews waiting, a test whose deadline passed with students not finished, low
-homework completion), then the clearest learning signal (the weakest thinking level or a
-student who needs help). No greetings, no filler."""
+Write the teacher's dashboard summary: up to 3 bullets of at most 12 words each, most important first - what needs
+their action today (reviews waiting, a challenge or chat whose deadline passed with students not finished,
+low homework completion), then the clearest learning signal (the weakest thinking level or a student who
+needs help). Only things that are actually there: never a bullet saying something is absent ("No reviews
+waiting", "No data") - when nothing needs attention, return no bullets at all. No greetings, no filler."""
     return await llm(model=model, effort="low", system=system, user=f"FACTS:\n{json.dumps(body.facts)}",
                      output_type=SummaryResult)

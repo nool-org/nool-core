@@ -113,6 +113,8 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
 
     results = await routes.get_quiz_test_results(created.id, user=s.teacher, session=db_session)
     assert (results.student_count, results.done, results.average_percent) == (2, 1, 25)
+    [listed] = (await routes.list_my_quiz_tests(user=s.teacher, session=db_session)).items
+    assert (listed.done_count, listed.student_count) == (1, 2)  # "1 of 2 done" on the teacher's list
     assert results.weakest_level == "APPLY" and len(results.needs_help) == 1
     assert sorted(r.status for r in results.students) == ["done", "not_started"]
 
