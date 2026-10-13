@@ -256,7 +256,7 @@ async def test_progress_counts_check_ins_and_challenges_per_subject(db_session):
     [subject] = await student_progress.by_subject(db_session, s.student)
     assert subject["subject_label"].startswith("Science") and (subject["count"], subject["score_percent"]) == (1, 40)
     assert (subject["focus_level"], subject["focus_percent"]) == (B.APPLY, 25)
-    assert [r["kind"] for r in subject["results"]] == ["Check-in"]
+    assert [r["kind"] for r in subject["results"]] == ["Topic checkpoint"]
 
 
 async def test_badges_come_from_check_ins_and_challenges_too(db_session):
@@ -271,3 +271,27 @@ async def test_badges_come_from_check_ins_and_challenges_too(db_session):
         outcome="mastered", completed_at=datetime.now(timezone.utc)))
     await db_session.flush()
     assert set(await gamification.sync_badges(db_session, s.student.id)) == {"badge-judge"}
+
+
+async def test_like_a_voice_co_learner_a_window_from_opening_and_chosen_students(db_session, monkeypatch):
+    """Fix Milo gets the voice co-learner's options: the deadline is the window
+    counted from when it opens, and only the chosen students get it."""
+    s = await _seed(db_session, students=2)
+    for topic in (s.ohm, s.power):
+        await _teach(db_session, s, topic)
+        await _pools(db_session, topic)
+    chosen, other = s.students[0], s.students[1]
+    created = await _create(db_session, s, monkeypatch, completion_window_hours=24, student_ids=[str(chosen.id)])
+    assert created.completion_window_hours == 24 and created.due_at is None  # not open yet: no deadline
+
+    out = await routes.publish_quiz_test(created.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
+    assert abs((out.due_at - out.opens_at).total_seconds() - 24 * 3600) < 1
+
+    async def mine(student):
+        return [t for t in (await task_routes.get_my_tasks(user=student, session=db_session)).tasks
+                if t.kind == "quiz_test"]
+    assert len(await mine(chosen)) == 1 and await mine(other) == []
+    results = await routes.get_quiz_test_results(created.id, user=s.teacher, session=db_session)
+    assert results.student_count == 1
+    [listed] = (await routes.list_my_quiz_tests(user=s.teacher, session=db_session)).items
+    assert listed.student_count == 1

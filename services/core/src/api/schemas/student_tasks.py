@@ -19,6 +19,10 @@ class TaskOut(CamelModel):
     title: str
     subtitle: str
     subject: str | None = None  # the subject's name - the app filters and colours by it
+    # where it sits: a topic checkpoint's topic, and the chapter (a co-learner is chapter-wide)
+    chapter_id: str | None = None
+    chapter_name: str | None = None
+    topic_id: str | None = None
     state: Literal["open", "done"]
     result: str | None
     steps: list[TaskStepOut]

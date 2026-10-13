@@ -13,7 +13,7 @@ missed) - mastered, or their teacher is told.
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -69,7 +69,8 @@ def plan(topics: list[Topic], mix: dict[str, int]) -> list[Slot]:
 
 
 async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id: str, topic_ids: list[str],
-                 mix: dict[str, int], title: str | None, due_at: datetime | None) -> QuizTest:
+                 mix: dict[str, int], title: str | None, due_at: datetime | None,
+                 completion_window_hours: int | None = None, student_ids: list[str] | None = None) -> QuizTest:
     """The test, 'preparing' - prepare() picks its questions. Caller commits, then queues prepare."""
     from src.api.routes.daily_practice import _get, _teaches
 
@@ -88,7 +89,9 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
                     title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} challenge · "
                     f"{daily_practice.today_ist().strftime('%d %b').lstrip('0')}",
                     topic_ids=[str(t.id) for t in topics], mix={k: int(v) for k, v in mix.items() if int(v) > 0},
-                    question_ids=[], status="preparing", due_at=due_at, created_by=teacher.id)
+                    question_ids=[], status="preparing", due_at=due_at, created_by=teacher.id,
+                    completion_window_hours=completion_window_hours,
+                    student_ids=await _class_students(session, class_uuid, student_ids))
     session.add(test)
     await session.flush()
     return test
@@ -145,6 +148,8 @@ async def publish(session: AsyncSession, test: QuizTest, opens_at: datetime | No
     now = datetime.now(timezone.utc)
     later = opens_at is not None and opens_at > now
     test.status, test.published_at = ("scheduled", opens_at) if later else ("published", now)
+    if test.completion_window_hours:  # like a voice co-learner: the window starts when it opens
+        test.due_at = test.published_at + timedelta(hours=test.completion_window_hours)
     await session.flush()
     return not later
 
@@ -155,9 +160,25 @@ def is_open(test: QuizTest, now: datetime | None = None) -> bool:
     return test.status in ("published", "scheduled") and test.published_at is not None and test.published_at <= now
 
 
+async def _class_students(session: AsyncSession, class_id: uuid.UUID, student_ids: list[str] | None) -> list[str] | None:
+    """The chosen students, checked against the class roster (None = the whole class)."""
+    if not student_ids:
+        return None
+    roster = {str(sid) for sid in (await session.execute(select(StudentProfile.user_id).where(
+        StudentProfile.class_id == class_id))).scalars()}
+    chosen = [sid for sid in dict.fromkeys(student_ids) if sid in roster]
+    if not chosen:
+        raise ValidationError("Choose students from this class.")
+    return chosen
+
+
+def is_for(test: QuizTest, student_id) -> bool:
+    return test.student_ids is None or str(student_id) in test.student_ids
+
+
 async def notify_class(session: AsyncSession, test: QuizTest) -> None:
-    students = (await session.execute(select(StudentProfile.user_id).where(
-        StudentProfile.class_id == test.class_id))).scalars().all()
+    students = [s for s in (await session.execute(select(StudentProfile.user_id).where(
+        StudentProfile.class_id == test.class_id))).scalars().all() if is_for(test, s)]
     await push.notify(session, students, f"New challenge: {test.title}", "Your teacher set you a challenge - start it now.",
                       {"type": "quiz_test", "quizTestId": str(test.id)})
 
@@ -168,10 +189,10 @@ async def tests_for(session: AsyncSession, student: User) -> list[QuizTest]:
         StudentProfile.user_id == student.id))).scalar_one_or_none()
     if profile is None:
         return []
-    return list((await session.execute(select(QuizTest).where(
+    return [t for t in (await session.execute(select(QuizTest).where(
         QuizTest.class_id == profile.class_id, QuizTest.status.in_(("published", "scheduled")),
         QuizTest.published_at <= datetime.now(timezone.utc))  # the app's clock, as publish() stamps it
-        .order_by(QuizTest.published_at.desc()))).scalars().all())
+        .order_by(QuizTest.published_at.desc()))).scalars().all() if is_for(t, student.id)]
 
 
 async def _attempt(session: AsyncSession, student: User, test: QuizTest, attempt: int) -> DailyPracticeSession | None:
@@ -262,6 +283,7 @@ async def results(session: AsyncSession, test: QuizTest) -> dict:
     students = (await session.execute(select(User.id, User.display_name).join(
         StudentProfile, StudentProfile.user_id == User.id).where(StudentProfile.class_id == test.class_id)
         .order_by(User.display_name))).all()
+    students = [row for row in students if is_for(test, row[0])]  # only the students it was set for
     tried = await attempts(session, test)
     rows, levels = [], {}
     for sid, name in students:

@@ -13,6 +13,9 @@ class QuizTestCreateIn(CamelModel):
     mix: dict[str, int]
     title: str | None = Field(default=None, max_length=120)
     due_at: dt.datetime | None = None
+    # the same options as a voice co-learner: hours to finish once it opens, and who gets it
+    completion_window_hours: int | None = Field(default=None, ge=1, le=168)
+    student_ids: list[str] | None = Field(default=None, max_length=200)  # None = the whole class
 
 
 class QuizTestScheduleIn(CamelModel):
@@ -45,6 +48,8 @@ class QuizTestOut(CamelModel):
     opens_at: dt.datetime | None
     created_at: dt.datetime
     question_count: int
+    completion_window_hours: int | None = None
+    student_ids: list[str] | None = None
     # how far the class has got - students who finished it / students in the class
     done_count: int = 0
     student_count: int = 0

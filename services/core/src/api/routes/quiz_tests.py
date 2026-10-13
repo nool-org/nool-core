@@ -33,7 +33,8 @@ def _out(test: QuizTest, done: int = 0, students: int = 0) -> QuizTestOut:
         chapter_id=str(test.chapter_id), title=test.title, topic_ids=test.topic_ids, mix=test.mix,
         status=test.status, due_at=test.due_at,
         opens_at=test.published_at if test.status in ("published", "scheduled") else None,
-        created_at=test.created_at, question_count=len(test.question_ids))
+        created_at=test.created_at, question_count=len(test.question_ids),
+        completion_window_hours=test.completion_window_hours, student_ids=test.student_ids)
 
 
 @router.post("/classes/{class_id}/quiz-tests", status_code=201)
@@ -45,7 +46,7 @@ async def create_quiz_test(
     session: AsyncSession = Depends(get_db_session),
 ) -> QuizTestOut:
     test = await quiz_tests.create(session, user, class_id, body.chapter_id, body.topic_ids, body.mix, body.title,
-                                   body.due_at)
+                                   body.due_at, body.completion_window_hours, body.student_ids)
     await session.commit()
     background_tasks.add_task(quiz_tests.prepare, test.id)
     return _out(test)
@@ -65,7 +66,8 @@ async def list_my_quiz_tests(
     students = dict((await session.execute(
         select(StudentProfile.class_id, func.count()).where(StudentProfile.class_id.in_({t.class_id for t in rows}))
         .group_by(StudentProfile.class_id))).all()) if rows else {}
-    return QuizTestListOut(items=[_out(t, done.get(t.id, 0), students.get(t.class_id, 0)) for t in rows])
+    return QuizTestListOut(items=[_out(t, done.get(t.id, 0), len(t.student_ids) if t.student_ids
+                                       else students.get(t.class_id, 0)) for t in rows])
 
 
 @router.get("/quiz-tests/{test_id}")

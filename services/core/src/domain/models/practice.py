@@ -124,6 +124,9 @@ class QuizTest(IdMixin, Base):
     question_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")  # in order
     status: Mapped[str] = mapped_column(String(20))  # preparing | ready | failed | published
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # like a voice co-learner: hours to finish, counted from when it opens (due_at is set at publish)
+    completion_window_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    student_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # null = the whole class
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
