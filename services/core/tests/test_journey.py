@@ -136,3 +136,17 @@ async def test_completing_a_test_advances_that_chapter_on_the_real_journey_endpo
     assert result.nodes[0].state == "DONE"
     assert result.nodes[0].stars_earned == 3  # 100% mastery
     assert result.nodes[1].state == "CURRENT"
+
+
+async def test_journey_counts_each_chapters_topics(db_session):
+    """Revise leaves out chapters whose topics aren't loaded yet - it needs the count."""
+    from src.domain.models import Topic
+
+    school = await _seed_school(db_session)
+    student = await _seed_student(db_session, school.id)
+    subject, chapters = await _seed_subject_with_chapters(db_session, ["Real Numbers", "Polynomials"])
+    db_session.add_all([Topic(chapter_id=chapters[0].id, name=f"1.{n} Topic") for n in (1, 2)])
+    await db_session.flush()
+
+    result = await journey.get_my_journey(subject_id=str(subject.id), user=student, session=db_session)
+    assert [n.topic_count for n in result.nodes] == [2, 0]

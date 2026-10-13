@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import NotFoundError
 
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.journey import JourneyChapterNodeOut, SubjectJourneyOut
-from src.domain.models import Chapter, Role, StudentChapterProgress, Subject, User
+from src.domain.models import Chapter, Role, StudentChapterProgress, Subject, Topic, User
 
 router = APIRouter(prefix="/api/v1", tags=["journey"])
 
@@ -41,6 +41,9 @@ async def get_my_journey(
         )
     )
     progress_by_chapter = {p.chapter_id: p for p in progress_result.scalars().all()}
+    topic_counts = dict((await session.execute(
+        select(Topic.chapter_id, func.count()).where(Topic.chapter_id.in_([c.id for c in chapters]))
+        .group_by(Topic.chapter_id))).all())
 
     nodes: list[JourneyChapterNodeOut] = []
     still_unlocked = True
@@ -61,6 +64,7 @@ async def get_my_journey(
                 chapter_label=chapter.name,
                 state=state,
                 stars_earned=progress.stars if progress else 0,
+                topic_count=topic_counts.get(chapter.id, 0),
             )
         )
         if not done:

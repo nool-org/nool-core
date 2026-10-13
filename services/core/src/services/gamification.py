@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.domain.models import (
     AiAssessorSession,
     BloomLevel,
+    DailyPracticeSession,
     Homework,
     StudentHomeworkProgress,
     StudentProfile,
@@ -41,8 +42,10 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 async def sync_badges(session: AsyncSession, student_id: uuid.UUID) -> dict[str, datetime]:
     """Stores any newly earned badge, returns {badge_id: earned_at} of all
-    earned ones. earned_at = start of the first voice-test session that
-    scored >= 80% in the badge's level (now, if that session is gone).
+    earned ones: >= 80% in the badge's level on a chat with Milo (earned_at =
+    that session's start, now if it's gone), a check-in or a teacher
+    challenge such as Fix Milo's homework (earned_at = when it was finished) -
+    so every subject can earn them, not only the ones with voice tests.
     Caller commits."""
     level_to_badge = {level: badge_id for badge_id, _, level in BADGES}
     rows = await session.execute(
@@ -61,10 +64,17 @@ async def sync_badges(session: AsyncSession, student_id: uuid.UUID) -> dict[str,
         .group_by(StudentTestResultBloomScore.bloom_level)
     )
     now = datetime.now(timezone.utc)
-    new = [
-        {"student_id": student_id, "badge_id": level_to_badge[level], "earned_at": earned_at or now}
-        for level, earned_at in rows.all()
-    ]
+    earned = {level: earned_at or now for level, earned_at in rows.all()}
+    finished = await session.execute(
+        select(DailyPracticeSession.per_bloom, DailyPracticeSession.completed_at).where(
+            DailyPracticeSession.student_id == student_id, DailyPracticeSession.outcome.is_not(None),
+            DailyPracticeSession.per_bloom.is_not(None)))
+    for per_bloom, at in finished.all():
+        for level in level_to_badge:
+            if (per_bloom or {}).get(level.value, 0) >= BADGE_THRESHOLD:
+                earned[level] = min(earned.get(level, at or now), at or now)
+    new = [{"student_id": student_id, "badge_id": level_to_badge[level], "earned_at": at}
+           for level, at in earned.items()]
     if new:
         await session.execute(insert(StudentBadge).values(new).on_conflict_do_nothing())
     stored = await session.execute(

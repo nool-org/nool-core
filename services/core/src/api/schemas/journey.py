@@ -6,6 +6,7 @@ class JourneyChapterNodeOut(CamelModel):
     chapter_label: str
     state: str  # "DONE" | "CURRENT" | "LOCKED"
     stars_earned: int
+    topic_count: int = 0  # 0 = the chapter's topics aren't loaded yet (nothing to revise)
 
 
 class SubjectJourneyOut(CamelModel):

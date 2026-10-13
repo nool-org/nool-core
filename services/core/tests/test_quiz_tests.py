@@ -255,3 +255,17 @@ async def test_progress_counts_check_ins_and_challenges_per_subject(db_session):
     assert subject["subject_label"].startswith("Science") and (subject["count"], subject["score_percent"]) == (1, 40)
     assert (subject["focus_level"], subject["focus_percent"]) == (B.APPLY, 25)
     assert [r["kind"] for r in subject["results"]] == ["Check-in"]
+
+
+async def test_badges_come_from_check_ins_and_challenges_too(db_session):
+    """A Maths student never chats with Milo - a Fix Milo challenge at 80%+ in
+    Judge it (Evaluate) still earns the Judge badge."""
+    from src.services import gamification
+
+    s = await _seed(db_session)
+    db_session.add(service.DailyPracticeSession(
+        student_id=s.student.id, practice_date=service.daily_practice.today_ist(), chapter_id=s.electricity.id,
+        attempt=1, status="completed", xp_awarded=0, score_percent=90, per_bloom={"EVALUATE": 90},
+        outcome="mastered", completed_at=datetime.now(timezone.utc)))
+    await db_session.flush()
+    assert set(await gamification.sync_badges(db_session, s.student.id)) == {"badge-judge"}
