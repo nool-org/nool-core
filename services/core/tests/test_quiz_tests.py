@@ -238,3 +238,20 @@ async def test_teacher_home_only_shows_the_teachers_own_subject(db_session):
     await db_session.flush()
     dash = await teacher_dashboard.get_teacher_dashboard(class_id=str(s.cls.id), user=s.teacher, session=db_session)
     assert dash.headline_test is None
+
+
+async def test_progress_counts_check_ins_and_challenges_per_subject(db_session):
+    """Progress isn't only chats with Milo: a finished check-in shows under its
+    subject, with its thinking levels and the weakest one to work on."""
+    from src.services import student_progress
+
+    s = await _seed(db_session)
+    db_session.add(service.DailyPracticeSession(
+        student_id=s.student.id, practice_date=service.daily_practice.today_ist(), chapter_id=s.electricity.id,
+        topic_id=s.ohm.id, attempt=1, status="completed", xp_awarded=0, score_percent=40,
+        per_bloom={"REMEMBER": 100, "APPLY": 25}, outcome="homework"))
+    await db_session.flush()
+    [subject] = await student_progress.by_subject(db_session, s.student)
+    assert subject["subject_label"].startswith("Science") and (subject["count"], subject["score_percent"]) == (1, 40)
+    assert (subject["focus_level"], subject["focus_percent"]) == (B.APPLY, 25)
+    assert [r["kind"] for r in subject["results"]] == ["Check-in"]

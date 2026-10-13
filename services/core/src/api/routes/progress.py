@@ -22,6 +22,8 @@ from src.domain.models import (
     VoiceTest,
 )
 
+from src.services import student_progress
+
 router = APIRouter(prefix="/api/v1", tags=["progress"])
 
 
@@ -138,6 +140,7 @@ async def get_my_progress(
     ]
 
     return StudentProgressOverviewOut(
+        subjects=await student_progress.by_subject(session, user),
         bloom_mastery=bloom_mastery,
         subject_summaries=subject_summaries,
         subject_tests=subject_tests,
