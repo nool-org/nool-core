@@ -81,7 +81,7 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
         raise ValidationError(f"{subject.name} doesn't use: {', '.join(unfit)}.")
     test = QuizTest(id=uuid.uuid4(), class_id=class_uuid, subject_id=chapter.subject_id, chapter_id=chapter.id,
                     # a default name a teacher can tell apart from last week's: "Real Numbers test · 13 Oct"
-                    title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} test · "
+                    title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} challenge · "
                     f"{daily_practice.today_ist().strftime('%d %b').lstrip('0')}",
                     topic_ids=[str(t.id) for t in topics], mix={k: int(v) for k, v in mix.items() if int(v) > 0},
                     question_ids=[], status="preparing", due_at=due_at, created_by=teacher.id)
@@ -154,7 +154,7 @@ def is_open(test: QuizTest, now: datetime | None = None) -> bool:
 async def notify_class(session: AsyncSession, test: QuizTest) -> None:
     students = (await session.execute(select(StudentProfile.user_id).where(
         StudentProfile.class_id == test.class_id))).scalars().all()
-    await push.notify(session, students, f"New test: {test.title}", "Your teacher set a test - take it now.",
+    await push.notify(session, students, f"New challenge: {test.title}", "Your teacher set you a challenge - start it now.",
                       {"type": "quiz_test", "quizTestId": str(test.id)})
 
 

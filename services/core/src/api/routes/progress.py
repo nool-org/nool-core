@@ -131,7 +131,7 @@ async def get_my_progress(
     )
     subject_tests = [
         SubjectTestSummaryOut(
-            subject_id=str(subject_id), label=chapter_name or subject_name, test_type=f"Voice test · {subject_name}",
+            subject_id=str(subject_id), label=chapter_name or subject_name, test_type=f"Chat with Milo · {subject_name}",
             score_percent=mastery, trend_label="", test_id=str(test_id),
         )
         for test_id, mastery, subject_id, subject_name, chapter_name in finished.all()

@@ -149,7 +149,7 @@ def fallback_analysis(topic: str, attempt: int, lagging: list[str]) -> dict:
         "summary": f"You're getting there with {topic}; the {level} questions tripped you up.",
         "lagging_meaning": f"Questions that ask you to {level} ideas from {topic} need more practice.",
         "need_to_know": [],
-        "next_step": ("Do your homework on these gaps, then take the re-check quiz." if attempt == 1
+        "next_step": ("Do your homework on these gaps, then take a second look." if attempt == 1
                       else "Go over the revision cards - your teacher will help with the rest."),
     }
 
@@ -435,7 +435,7 @@ async def build_homework(quiz_id: uuid.UUID) -> None:
             quiz.homework_id = hw.id
             await session.commit()
             await push.notify(session, [student.id], f"Homework ready: {hw.gap_topic}",
-                              "Made for the gaps in your quiz.", {"type": "homework", "homeworkId": str(hw.id)})
+                              "Made for the gaps in your check-in.", {"type": "homework", "homeworkId": str(hw.id)})
     except Exception:  # logged, never raised: the quiz result already stands
         logger.exception("topic_quiz_homework_failed", extra={"quiz_id": str(quiz_id)})
 

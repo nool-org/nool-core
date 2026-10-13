@@ -55,7 +55,7 @@ async def test_topic_task_walks_quiz_homework_recheck(db_session, monkeypatch):
     tid = f"topic:{s.ohm.id}"
 
     task = await _task(db_session, s.student, tid)
-    assert task.state == "open" and task.subtitle == "Topic quiz"
+    assert task.state == "open" and task.subtitle == "Milo's check-in"
     assert _steps(task) == [("quiz", "current"), ("homework", "locked"), ("recheck", "locked")]
 
     quiz = await _start(db_session, s, s.ohm)

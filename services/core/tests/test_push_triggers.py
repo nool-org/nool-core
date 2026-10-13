@@ -130,7 +130,7 @@ async def test_mcq_unlock_pushes_once(schema, sent):  # noqa: F811
     [mcq] = await mcq_test.sync_for_student(schema, s["student"].id)
     assert mcq.unlocked_at is not None
     await mcq_test.sync_for_student(schema, s["student"].id)  # already unlocked - no second push
-    assert sent == [{"user_ids": {str(s["student"].id)}, "title": "Your MCQ check is ready",
+    assert sent == [{"user_ids": {str(s["student"].id)}, "title": "Your pick-one round is ready",
                      "data": {"type": "mcq_test", "mcqTestId": str(mcq.id)}}]
 
 

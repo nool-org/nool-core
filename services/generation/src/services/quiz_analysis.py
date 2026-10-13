@@ -56,7 +56,7 @@ def _next(body: AnalysisRequest) -> str:
     if body.lagging_level is None:
         return "the topic is done - point them to the next one"
     if body.attempt == 1:
-        return "do the homework made for these gaps, then take the re-check quiz"
+        return "do the homework made for these gaps, then take a second look"
     return "go over these points with the revision cards; their teacher will help with the rest"
 
 

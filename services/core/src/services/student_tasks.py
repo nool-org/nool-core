@@ -79,7 +79,7 @@ def _chain_state(steps: list[dict]) -> str:
 # ------------------------------------------------------------------ topics
 def _topic_task(loop, hw, progress, now) -> dict:
     stage, quiz, recheck = loop.stage, loop.quiz, loop.recheck
-    quiz_step = _step("quiz", "Quiz", "current" if stage == "quiz" else "done", target_id=str(loop.topic.id),
+    quiz_step = _step("quiz", "Check-in", "current" if stage == "quiz" else "done", target_id=str(loop.topic.id),
                       note=f"{quiz.score_percent}%" if quiz and quiz.outcome else None)
     if stage == "quiz":
         hw_step, re_step = _step("homework", "Homework", "locked"), _step("recheck", "Re-check", "locked")
@@ -99,7 +99,7 @@ def _topic_task(loop, hw, progress, now) -> dict:
     steps = [quiz_step, hw_step, re_step]
     result = {"mastered": "Mastered", "needs_teacher": "Your teacher will help"}.get(stage)
     return {"id": f"topic:{loop.topic.id}", "kind": "topic", "title": daily_practice.tidy(loop.topic.name),
-            "subtitle": "Topic quiz", "state": _chain_state(steps), "result": result, "steps": steps,
+            "subtitle": "Milo's check-in", "state": _chain_state(steps), "result": result, "steps": steps,
             "sort_at": loop.taught_on}
 
 
@@ -127,24 +127,24 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
         subject = await session.get(Subject, test.subject_id)
         done = test.id in taken
         hw, progress = homework.get(test.id, (None, None))
-        voice = _step("voice_test", "Voice test", "done" if done else "current", target_id=str(test.id),
+        voice = _step("voice_test", "Chat with Milo", "done" if done else "current", target_id=str(test.id),
                       due_at=None if done else test.due_at)
         hw_step = (_homework_step(hw, progress, waiting=True, now=now) if done
                    else _step("homework", "Homework", "locked"))
         check = checks.get(test.id)
         if check is None or not done:
-            check_step = _step("mcq_check", "MCQ check", "locked")
+            check_step = _step("mcq_check", "Pick-one round", "locked")
         else:
             status = {"completed": "done", "available": "current", "locked": "waiting"}[mcq_test.status(check)]
-            check_step = _step("mcq_check", "MCQ check", status, target_id=str(check.id),
+            check_step = _step("mcq_check", "Pick-one round", status, target_id=str(check.id),
                                note=f"{check.score_percent}%" if status == "done" else
                                "Opens after your homework" if status == "waiting" else None)
             if status == "waiting" and hw_step["status"] == "done":
                 check_step["note"] = "Opening soon"
         steps = [voice, hw_step, check_step]
         out.append({"id": f"test:{test.id}", "kind": "test",
-                    "title": chapter.name if chapter else "Voice test",
-                    "subtitle": f"{subject.name if subject else ''} · Co-learner test".strip(" ·"),
+                    "title": chapter.name if chapter else "Chat with Milo",
+                    "subtitle": f"{subject.name if subject else ''} · Chat with Milo".strip(" ·"),
                     "state": _chain_state(steps), "result": None, "steps": steps,
                     "sort_at": test.scheduled_at or test.created_at})
     return out
@@ -170,7 +170,7 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
         finished = attempt is not None and attempt.outcome is not None
         if test.due_at and test.due_at < now and not finished:
             continue  # missed - gone, like a voice test past its deadline
-        step = _step("test", "Test", "done" if finished else "current", target_id=str(test.id),
+        step = _step("test", "Challenge", "done" if finished else "current", target_id=str(test.id),
                      due_at=None if finished else test.due_at,
                      note=f"{attempt.score_percent}%" if finished else None)
         if not finished:
@@ -182,7 +182,7 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
             hw_step = _homework_step(hw, progress, waiting=True, now=now)
         steps = [step, hw_step]
         out.append({"id": f"quiz_test:{test.id}", "kind": "quiz_test", "title": test.title,
-                    "subtitle": "Written test", "state": _chain_state(steps),
+                    "subtitle": "Written challenge", "state": _chain_state(steps),
                     "result": "Mastered" if finished and attempt.outcome == "mastered" else None,
                     "steps": steps, "sort_at": test.published_at})
     return out

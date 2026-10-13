@@ -118,7 +118,7 @@ async def get_student_dashboard(
             subject_label=subject.name,
             kind=PendingActivityKind.TEST,
             title=chapter_names.get(test.chapter_id) or subject.name,
-            meta=" · ".join(filter(None, ["Voice test", _time_left(test.due_at)])),
+            meta=" · ".join(filter(None, ["Chat with Milo", _time_left(test.due_at)])),
             progress_percent=0,
             for_you_title=f"Continue {subject.name}",
             for_you_meta="Recommended from your last session",

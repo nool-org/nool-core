@@ -119,4 +119,4 @@ async def test_progress_lists_each_finished_test_with_its_chapter_and_score(db_s
 
     assert sorted(t.score_percent for t in result.subject_tests) == [30, 64]
     assert all(t.label == "Chapter 1" and t.test_id for t in result.subject_tests)
-    assert all(t.test_type.startswith("Voice test · ") for t in result.subject_tests)
+    assert all(t.test_type.startswith("Chat with Milo · ") for t in result.subject_tests)

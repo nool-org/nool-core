@@ -136,7 +136,7 @@ async def sync_for_student(session: AsyncSession, student_id: uuid.UUID) -> list
     if unlocked:
         await session.commit()
         for mcq_id in unlocked:
-            await push.notify(session, [student_id], "Your MCQ check is ready",
+            await push.notify(session, [student_id], "Your pick-one round is ready",
                               "See how much you've improved since your voice test.",
                               {"type": "mcq_test", "mcqTestId": str(mcq_id)})
     return list(rows)

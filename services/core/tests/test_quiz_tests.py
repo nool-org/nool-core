@@ -56,7 +56,7 @@ async def _create(db, s, monkeypatch, mix=None, **kw):
     out = await routes.create_quiz_test(str(s.cls.id), QuizTestCreateIn(
         chapter_id=str(s.electricity.id), topic_ids=[str(s.ohm.id), str(s.power.id)],
         mix=mix or {"mcq": 4}, **kw), background_tasks=BackgroundTasks(), user=s.teacher, session=db)
-    assert out.status == "preparing" and out.title.startswith("Electricity test · ")  # dated, to tell tests apart
+    assert out.status == "preparing" and out.title.startswith("Electricity challenge · ")  # dated, to tell tests apart
     await service.prepare(service.uuid.UUID(out.id))
     return out
 
@@ -86,7 +86,7 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
         sent.append((set(ids), title))
     monkeypatch.setattr(service.push, "notify", notify)
     out = await routes.publish_quiz_test(created.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
-    assert out.status == "published" and sent == [({k.id for k in s.students}, f"New test: {created.title}")]
+    assert out.status == "published" and sent == [({k.id for k in s.students}, f"New challenge: {created.title}")]
 
     [task] = [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
               if t.kind == "quiz_test"]

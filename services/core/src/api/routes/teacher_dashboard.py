@@ -54,7 +54,7 @@ async def get_teacher_dashboard(
             chapter = await session.get(Chapter, test.chapter_id)
             headline_test = TeacherHeadlineTest(
                 id=str(test.id),
-                title=chapter.name if chapter else "Voice test",
+                title=chapter.name if chapter else "Chat with Milo",
                 meta=f"{test.status.value.replace('_', ' ').capitalize()} · "
                      f"{test.completed_count}/{test.assigned_count} complete",
                 status=test.status,
