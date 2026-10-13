@@ -103,13 +103,13 @@ async def _bank(db, s, topic, mcq=0, voice=0):
     await db.flush()
 
 
-async def _pool(db, topic, n, kind="mcq", bloom_level=B.UNDERSTAND, **kw):
+async def _pool(db, topic, n, kind="mcq", bloom_level=B.UNDERSTAND, origin_override=None, **kw):
     rows = [PracticeQuestion(chapter_id=topic.chapter_id, topic_id=topic.id, bloom_level=bloom_level, kind=kind,
                              text=f"{topic.name} pool {kind} {i}",
                              options=["a", "b", "c", "d"] if kind == "mcq" else None,
                              correct_index=1 if kind == "mcq" else None, explanation="why" if kind == "mcq" else None,
                              hint="hint" if kind == "mcq" else None, expected_points=["p"] if kind == "voice" else [],
-                             origin="bank", used_count=0, **kw)
+                             origin=origin_override or "bank", used_count=0, **kw)
             for i in range(n)]
     db.add_all(rows)
     await db.flush()
@@ -312,17 +312,16 @@ async def test_no_question_repeats_within_14_days(db_session):
 
 
 # ------------------------------------------------------------ question pool
-async def test_reuses_the_pool_before_the_bank(db_session):
+async def test_real_bank_questions_come_before_written_ones(db_session):
     s = await _seed(db_session)
     await _teach(db_session, s, s.current)
-    rows = await _pool(db_session, s.current, 6) + await _pool(db_session, s.current, 2, kind="voice")
-    await _bank(db_session, s, s.current, mcq=6, voice=2)
+    written = await _pool(db_session, s.current, 6, origin_override="generated")
+    await _bank(db_session, s, s.current, mcq=6)
     out = await _today(db_session, s.student)
-    assert len(out.items) == 8
-    count = (await db_session.execute(select(func.count()).select_from(PracticeQuestion).where(
-        PracticeQuestion.topic_id == s.current.id))).scalar_one()
-    assert count == 8  # nothing imported
-    assert all(q.used_count == 1 for q in rows)
+    mcqs = [i.text for i in out.items if i.kind == "mcq"]
+    # all 6 bank (board) questions are used; written ones only fill the 2 slots left
+    assert sum(t.startswith("Current mcq") for t in mcqs) == 6 and len(mcqs) == 8
+    assert sum(q.used_count for q in written) == 2
 
 
 async def test_generates_mcqs_when_pool_and_bank_are_empty(db_session, monkeypatch, _no_models):

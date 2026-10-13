@@ -161,14 +161,15 @@ async def _seen(session: AsyncSession, student_id: uuid.UUID, today: date) -> se
 
 async def _from_pool(session: AsyncSession, topic: Topic, kind: str, level: BloomLevel,
                      exclude: set[uuid.UUID], exact: bool = False) -> PracticeQuestion | None:
-    """The least used pool question on the topic, the slot's Bloom level first
-    (only that level when `exact`)."""
+    """The least used pool question on the topic - the slot's Bloom level first
+    (only that level when `exact`), then real question-bank ones before written ones."""
     query = select(PracticeQuestion).where(PracticeQuestion.topic_id == topic.id, PracticeQuestion.kind == kind,
                                            PracticeQuestion.id.not_in(list(exclude)))
     if exact:
         query = query.where(PracticeQuestion.bloom_level == level)
     return (await session.execute(
-        query.order_by((PracticeQuestion.bloom_level == level).desc(), PracticeQuestion.used_count,
+        query.order_by((PracticeQuestion.bloom_level == level).desc(), (PracticeQuestion.origin == "bank").desc(),
+                       PracticeQuestion.used_count,
                   PracticeQuestion.created_at, PracticeQuestion.id).limit(1))).scalar_one_or_none()
 
 
@@ -351,6 +352,11 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
     exclude = await _seen(session, student.id, today)
     dataset_ids = [d.id for d in await visible_datasets(session, student) if d.type == DatasetType.QA]
     picked: dict[int, PracticeQuestion] = {}
+    # real question-bank (board paper) questions first: bring a batch of each topic's into the pool
+    # before choosing, so they're picked ahead of written ones (_from_pool prefers origin "bank")
+    for topic in dict.fromkeys(slot.topic for slot in slots):
+        for kind in ("mcq", "voice"):
+            await _import_bank(session, dataset_ids, topic, kind)
     for i, slot in enumerate(slots):
         # a who_is_right/make_your_own/fix_steps slot waits for generation before it settles for an MCQ
         for kind in [slot.kind] if slot.kind in question_types.KINDS else dict.fromkeys([slot.kind, "mcq"]):
