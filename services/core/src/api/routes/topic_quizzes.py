@@ -18,7 +18,7 @@ from src.api.schemas.topic_quiz import (
     TopicQuizOut,
     TopicQuizSummaryOut,
 )
-from src.domain.models import Chapter, DailyPracticeSession, Role, Subject, Topic, User
+from src.domain.models import Chapter, DailyPracticeSession, QuizTest, Role, Subject, Topic, User
 from src.services import daily_practice, topic_quiz
 
 router = APIRouter(prefix="/api/v1", tags=["topic-quizzes"])
@@ -37,11 +37,18 @@ def _analysis_out(quiz: DailyPracticeSession) -> QuizAnalysisOut | None:
 
 
 async def _quiz_out(session: AsyncSession, quiz: DailyPracticeSession) -> TopicQuizOut:
-    topic = await session.get(Topic, quiz.topic_id)
+    """A topic quiz, or an attempt at a teacher's test (named after the test, no topic)."""
     items = await daily_practice.items_of(session, quiz.id)
-    return TopicQuizOut(id=str(quiz.id), topic_id=str(topic.id), topic_name=daily_practice.tidy(topic.name),
-                        attempt=quiz.attempt, status=quiz.status, items=[_item_out(*row) for row in items],
-                        xp_awarded=quiz.xp_awarded or 0, analysis=_analysis_out(quiz))
+    if quiz.quiz_test_id is not None:
+        test = await session.get(QuizTest, quiz.quiz_test_id)
+        topic_id, name = "", test.title
+    else:
+        topic = await session.get(Topic, quiz.topic_id)
+        topic_id, name = str(topic.id), daily_practice.tidy(topic.name)
+    return TopicQuizOut(id=str(quiz.id), topic_id=topic_id, topic_name=name, attempt=quiz.attempt,
+                        status=quiz.status, items=[_item_out(*row) for row in items],
+                        xp_awarded=quiz.xp_awarded or 0, analysis=_analysis_out(quiz),
+                        quiz_test_id=str(quiz.quiz_test_id) if quiz.quiz_test_id else None)
 
 
 @router.get("/me/topic-quizzes")

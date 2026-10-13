@@ -25,6 +25,7 @@ from src.domain.models import (
     AiAssessorSessionRecord,
     AssignmentTargetMode,
     Chapter,
+    Subject,
     Feature,
     Role,
     SchoolClass,
@@ -43,7 +44,7 @@ from src.repositories.lookups import ensure_students_in_class, get_test_for_teac
 from src.repositories.roster_repository import teaches_class_subject
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_tests
-from src.services import push, voice_test_prep
+from src.services import subject_rules, push, voice_test_prep
 
 router = APIRouter(prefix="/api/v1", tags=["voice-tests"])
 
@@ -164,6 +165,9 @@ async def create_test(
     chapter = await session.get(Chapter, body.chapter_id)
     if chapter is None or str(chapter.subject_id) != str(body.subject_id):
         raise ValidationError("That chapter isn't part of this subject.")
+    subject = await session.get(Subject, body.subject_id)
+    if not subject_rules.voice_tests_allowed(subject.name if subject else None):
+        raise ValidationError(f"{subject.name} uses written tests, not voice tests - create a written test instead.")
     if body.topic_id:
         topic = await session.get(Topic, body.topic_id)
         if topic is None or str(topic.chapter_id) != str(body.chapter_id):

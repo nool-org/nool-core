@@ -466,7 +466,7 @@ async def ensure_today(session: AsyncSession, student: User) -> tuple[DailyPract
     today = today_ist()
     practice = (await session.execute(select(DailyPracticeSession).where(
         DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today,
-        DailyPracticeSession.topic_id.is_(None)))).scalar_one_or_none()
+        DailyPracticeSession.topic_id.is_(None), DailyPracticeSession.quiz_test_id.is_(None)))).scalar_one_or_none()
     if practice is not None:
         new, items = await _newly_taught(session, practice, taught)
         if not new:
@@ -484,11 +484,13 @@ async def ensure_today(session: AsyncSession, student: User) -> tuple[DailyPract
         id=uuid.uuid4(), student_id=student.id, practice_date=today, chapter_id=taught[0][0].chapter_id,
         status="open", xp_awarded=0,
     ).on_conflict_do_nothing(index_elements=["student_id", "practice_date"],
-                             index_where=DailyPracticeSession.topic_id.is_(None))
+                             index_where=DailyPracticeSession.topic_id.is_(None)
+                             & DailyPracticeSession.quiz_test_id.is_(None))
         .returning(DailyPracticeSession.id))).scalar_one_or_none()
     practice = (await session.execute(select(DailyPracticeSession).where(
         DailyPracticeSession.student_id == student.id, DailyPracticeSession.practice_date == today,
-        DailyPracticeSession.topic_id.is_(None)).execution_options(populate_existing=True))).scalar_one()
+        DailyPracticeSession.topic_id.is_(None), DailyPracticeSession.quiz_test_id.is_(None))
+        .execution_options(populate_existing=True))).scalar_one()
     if created is None:
         return practice, None
 

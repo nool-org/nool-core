@@ -80,7 +80,9 @@ class DailyPracticeSession(IdMixin, Base):
     __tablename__ = "daily_practice_sessions"
     __table_args__ = (
         Index("uq_daily_practice_sessions_student_date", "student_id", "practice_date", unique=True,
-              postgresql_where=text("topic_id IS NULL")),
+              postgresql_where=text("topic_id IS NULL AND quiz_test_id IS NULL")),
+        Index("uq_quiz_test_attempts_student_test", "student_id", "quiz_test_id", unique=True,
+              postgresql_where=text("quiz_test_id IS NOT NULL")),
         Index("uq_topic_quizzes_student_topic_attempt", "student_id", "topic_id", "attempt", unique=True,
               postgresql_where=text("topic_id IS NOT NULL")),
     )
@@ -101,6 +103,29 @@ class DailyPracticeSession(IdMixin, Base):
     outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)  # homework | mastered | needs_teacher
     homework_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("homework.id", ondelete="SET NULL"), nullable=True)
+    # a teacher-made written test's attempt (services/quiz_tests.py) - topic_id stays empty
+    quiz_test_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("quiz_tests.id", ondelete="CASCADE"), nullable=True)
+
+
+class QuizTest(IdMixin, Base):
+    """A teacher-made written test for a class (services/quiz_tests.py): a
+    fixed set of practice-pool questions, the same for every student."""
+
+    __tablename__ = "quiz_tests"
+
+    class_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("classes.id", ondelete="CASCADE"))
+    subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("subjects.id"))
+    chapter_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chapters.id"))
+    title: Mapped[str] = mapped_column(Text)
+    topic_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    mix: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")  # kind -> how many
+    question_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")  # in order
+    status: Mapped[str] = mapped_column(String(20))  # preparing | ready | failed | published
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DailyPracticeItem(IdMixin, Base):

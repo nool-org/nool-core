@@ -4,6 +4,7 @@ topic loops (topic_quiz.py), voice tests, their homework and MCQ checks.
 
 - Topic task (each taught topic): quiz -> homework (12 h) -> re-check.
 - Test task (each teacher voice test): voice test -> homework -> MCQ check.
+- Written test task (a teacher's quiz test, quiz_tests.py): test -> homework.
 
 A step is "done", "current" (the student's move), "waiting" (on us -
 homework being made, MCQ check not unlocked yet), "locked" (after the
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.routes.assigned_test import taken_test_ids
 from src.domain.models import (
     Chapter,
+    DailyPracticeSession,
     Homework,
     HomeworkTargetStudent,
     McqTest,
@@ -32,7 +34,7 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestTargetStudent,
 )
-from src.services import daily_practice, mcq_test, topic_quiz
+from src.services import daily_practice, mcq_test, quiz_tests, topic_quiz
 
 # (share of the window used, bonus): done in the first quarter -> 30 XP, ...
 EARLY_BONUS = [(0.25, 30), (0.5, 20), (1.0, 10)]
@@ -148,6 +150,44 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
     return out
 
 
+# ------------------------------------------------------------------ teacher tests
+async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) -> list[dict]:
+    tests = await quiz_tests.tests_for(session, student)
+    if not tests:
+        return []
+    tried = {a.quiz_test_id: a for a in (await session.execute(select(DailyPracticeSession).where(
+        DailyPracticeSession.student_id == student.id,
+        DailyPracticeSession.quiz_test_id.in_([t.id for t in tests])))).scalars()}
+    hw_ids = [a.homework_id for a in tried.values() if a.homework_id]
+    homework = {hw.id: (hw, progress) for hw, progress in (await session.execute(
+        select(Homework, StudentHomeworkProgress)
+        .join(StudentHomeworkProgress, (StudentHomeworkProgress.homework_id == Homework.id)
+              & (StudentHomeworkProgress.student_id == student.id))
+        .where(Homework.id.in_(hw_ids)))).all()} if hw_ids else {}
+    out = []
+    for test in tests:
+        attempt = tried.get(test.id)
+        finished = attempt is not None and attempt.outcome is not None
+        if test.due_at and test.due_at < now and not finished:
+            continue  # missed - gone, like a voice test past its deadline
+        step = _step("test", "Test", "done" if finished else "current", target_id=str(test.id),
+                     due_at=None if finished else test.due_at,
+                     note=f"{attempt.score_percent}%" if finished else None)
+        if not finished:
+            hw_step = _step("homework", "Homework", "locked")
+        elif attempt.outcome == "mastered" or (attempt.analysis or {}).get("homework_skipped"):
+            hw_step = _step("homework", "Homework", "skipped", note="Not needed")
+        else:
+            hw, progress = homework.get(attempt.homework_id, (None, None))
+            hw_step = _homework_step(hw, progress, waiting=True, now=now)
+        steps = [step, hw_step]
+        out.append({"id": f"quiz_test:{test.id}", "kind": "quiz_test", "title": test.title,
+                    "subtitle": "Written test", "state": _chain_state(steps),
+                    "result": "Mastered" if finished and attempt.outcome == "mastered" else None,
+                    "steps": steps, "sort_at": test.published_at})
+    return out
+
+
 async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
     """Open tasks first (the soonest deadline first, then the newest), then
     the last DONE_SHOWN finished ones."""
@@ -162,6 +202,7 @@ async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
     tasks = [_topic_task(lp, *rows.get(lp.quiz.homework_id if lp.quiz else None, (None, None)), now)
              for lp in loops]
     tasks += await _test_tasks(session, student, now)
+    tasks += await _quiz_test_tasks(session, student, now)
 
     def stamp(value) -> float:
         if value is None:

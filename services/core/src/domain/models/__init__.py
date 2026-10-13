@@ -48,6 +48,7 @@ from .practice import (
     DailyPracticeItem,
     DailyPracticeSession,
     PracticeQuestion,
+    QuizTest,
     StudentTopicMastery,
 )
 from .question_paper import (
@@ -135,6 +136,7 @@ __all__ = [
     "DailyPracticeItem",
     "DailyPracticeSession",
     "PracticeQuestion",
+    "QuizTest",
     "RevisionDeck",
     "StudentTopicMastery",
     "McqTest",

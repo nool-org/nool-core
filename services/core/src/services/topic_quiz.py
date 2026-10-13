@@ -31,6 +31,7 @@ from src.domain.models import (
     DailyPracticeItem,
     DailyPracticeSession,
     Homework,
+    QuizTest,
     HomeworkDifficulty,
     HomeworkQuestion,
     HomeworkStatus,
@@ -293,13 +294,26 @@ async def start(session: AsyncSession, student: User, topic_id: str, attempt: in
 
 async def own_quiz(session: AsyncSession, quiz_id: str, student: User) -> DailyPracticeSession:
     quiz = await daily_practice.own_session(session, quiz_id, student)
-    if quiz.topic_id is None:
+    if quiz.topic_id is None and quiz.quiz_test_id is None:  # the day's practice isn't a quiz
         raise NotFoundError("Quiz not found.")
     return quiz
 
 
+def focus_topic_id(items) -> uuid.UUID | None:
+    """A multi-topic test's weakest topic (most of its questions missed;
+    ties to the earlier one) - its homework is made on it."""
+    tally: dict = {}
+    for item, _, _ in items:
+        if item.topic_id is not None:
+            right, total = tally.get(item.topic_id, (0, 0))
+            tally[item.topic_id] = (right + bool(item.correct), total + 1)
+    if not tally:
+        return None
+    return min(tally, key=lambda t: tally[t][0] / tally[t][1])
+
+
 async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: Topic, scores: dict, lagging: list,
-                    items) -> dict:
+                    items, label: str | None = None) -> dict:
     chapter = await session.get(Chapter, topic.chapter_id)
     subject = await session.get(Subject, chapter.subject_id) if chapter else None
     school_class = await daily_practice.class_of(session, quiz.student_id)
@@ -319,7 +333,7 @@ async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: To
                 "chosen": f"{(item.feedback or {}).get('message', '')} [mistake: {(item.feedback or {}).get('mistake')}]"[:500],
                 "correct": (q.spec or {}).get("explanation", "")[:500]}
                for item, q, _ in items if item.kind in question_types.KINDS and item.answered_at and not item.correct]
-    name = daily_practice.tidy(topic.name)
+    name = label or daily_practice.tidy(topic.name)
     try:
         with ai_context.feature("topic_quiz_analysis"):
             words = await generation_client.quiz_analysis({
@@ -346,10 +360,18 @@ async def finish(session: AsyncSession, quiz: DailyPracticeSession) -> dict:
         items = [row for row in await daily_practice.items_of(session, quiz.id) if row[0].answered_at is not None]
         scores = per_bloom([(item.bloom_level, bool(item.correct)) for item, _, _ in items])
         lagging = lagging_levels(scores)
-        topic = await session.get(Topic, quiz.topic_id)
+        label = None
+        if quiz.topic_id is not None:
+            topic_id = quiz.topic_id
+        else:  # a teacher's test: its homework goes on its weakest topic
+            test = await session.get(QuizTest, quiz.quiz_test_id)
+            topic_id = focus_topic_id(items) or uuid.UUID(str(test.topic_ids[0]))
+            label = test.title
+        topic = await session.get(Topic, topic_id)
         quiz.per_bloom = scores
         quiz.score_percent = round(100 * sum(bool(i.correct) for i, _, _ in items) / len(items))
-        quiz.analysis = await _analysis(session, quiz, topic, scores, lagging, items)
+        quiz.analysis = {**await _analysis(session, quiz, topic, scores, lagging, items, label),
+                         "focus_topic_id": str(topic.id)}
         quiz.outcome = outcome_of(quiz.attempt, lagging)
         await session.flush()
     return {"quiz": quiz, "xp_awarded": quiz.xp_awarded, "streak_days": completion["streak_days"]}
@@ -371,7 +393,7 @@ async def build_homework(quiz_id: uuid.UUID) -> None:
             if quiz is None or quiz.outcome != "homework" or quiz.homework_id is not None:
                 return
             student = await session.get(User, quiz.student_id)
-            topic = await session.get(Topic, quiz.topic_id)
+            topic = await session.get(Topic, quiz.topic_id or uuid.UUID((quiz.analysis or {})["focus_topic_id"]))
             chapter = await session.get(Chapter, topic.chapter_id)
             profile = (await session.execute(select(StudentProfile).where(
                 StudentProfile.user_id == student.id))).scalar_one_or_none()

@@ -51,6 +51,7 @@ class TopicQuizOut(CamelModel):
     items: list[PracticeItemOut]
     xp_awarded: int
     analysis: QuizAnalysisOut | None
+    quiz_test_id: str | None = None  # an attempt at a teacher's test (topic_id is then "")
 
 
 class QuizFinishOut(CamelModel):
