@@ -54,3 +54,14 @@ def test_a_rejected_draft_is_rewritten_once_then_dropped():
 
     llm = FakeLLM({"WhoIsRight": [WHO, WHO], "Verdict": [bad, bad]})
     assert asyncio.run(svc.write_questions(llm, request("who_is_right"), model="m", verify_model="v")).questions == []
+
+
+def test_a_question_built_from_an_official_one_uses_it_and_the_cheaper_model():
+    llm = FakeLLM({"WhoIsRight": [WHO], "Verdict": [{"ok": True, "problem": ""}]})
+    body = request("who_is_right")
+    body.slots[0].source = svc.Source(question="Can 15ⁿ end with the digit 0? Give reasons.", answer="No",
+                                      solution="15ⁿ = 3ⁿ × 5ⁿ has no factor 2.")
+    [q] = asyncio.run(svc.write_questions(llm, body, model="gpt-5.1", verify_model="gpt-5-mini")).questions
+    writer = next(c for c in llm.calls if c["type"] == "WhoIsRight")
+    assert writer["model"] == "gpt-5-mini" and "OFFICIAL QUESTION: Can 15ⁿ end with the digit 0?" in writer["system"]
+    assert "15ⁿ = 3ⁿ × 5ⁿ has no factor 2." in writer["system"] and q.kind == "who_is_right"

@@ -63,6 +63,17 @@ code checks the student's. Pick ONE check from this list and give its params as 
 - explanation: one sentence on how to build an answer.""",
 }
 
+FROM_SOURCE = """
+BUILD IT FROM THIS OFFICIAL CBSE BOARD QUESTION AND ITS MARKING-SCHEME ANSWER - don't invent a new problem:
+- fix_steps: Milo's steps are the official solution, rewritten as 3-6 short lines, with exactly ONE line changed
+  to a typical student mistake; the correct fix is the official line.
+- who_is_right: the claim is the official question's (an Assertion-Reason question's assertion, or a "can it /
+  is it" question); the right side and the real reason are the official answer's.
+OFFICIAL QUESTION: {question}
+OPTIONS: {options}
+OFFICIAL ANSWER: {answer}
+OFFICIAL SOLUTION: {solution}"""
+
 VERIFY = """You check one {kind} question for a Class {grade} {subject} student. Work it out yourself first.
 Is the marked answer really correct, and is every other choice really wrong (or, for reasons/fixes,
 really not the right one)? Is it clear and on the topic? Answer ok=true only if all of that holds;
@@ -110,9 +121,18 @@ class Verdict(BaseModel):
     problem: str
 
 
+class Source(BaseModel):
+    """An official question to build from (a CBSE board question and its marking-scheme solution)."""
+    question: str = Field(max_length=4000)
+    answer: str = Field(max_length=1000)
+    solution: str = Field(default="", max_length=4000)
+    options: list[str] | None = None
+
+
 class SpecialSlot(BaseModel):
     kind: Kind
     bloom_level: str
+    source: Source | None = None
 
 
 class CheckInfo(BaseModel):
@@ -169,6 +189,11 @@ async def _one(llm: StructuredLLM, body: SpecialRequest, i: int, slot: SpecialSl
     checks = "\n".join(f'- {c.kind}: {c.describe}' for c in body.checks) or "(none)"
     system = PROMPTS[slot.kind].format(grade=body.grade, subject=body.subject, topic=body.topic,
                                        chapter=body.chapter, level=slot.bloom_level, checks=checks)
+    if slot.source is not None:  # grounded in an official question: the cheaper model is enough to rework it
+        src = slot.source
+        system += FROM_SOURCE.format(question=src.question, options=src.options or "-", answer=src.answer,
+                                     solution=src.solution or "-")
+        model = verify_model
     user = f"TEXTBOOK TEXT:\n{body.context[:MAX_CONTEXT]}"
     if body.avoid:
         user += "\n\nDon't repeat these questions:\n- " + "\n- ".join(body.avoid)

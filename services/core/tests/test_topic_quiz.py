@@ -395,7 +395,7 @@ async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, m
     assert [sl["kind"] for sl in asked[0]["slots"]] == ["who_is_right", "fix_steps", "make_your_own"]
     assert "pair_hcf_lcm" in {c["kind"] for c in asked[0]["checks"]} and asked[0]["subject"] == "Mathematics"
     who = next(i for i in quiz.items if i.kind == "who_is_right")
-    assert who.spec["reasons"] == ["6 is even", "6ⁿ has no factor 5", "Powers of 6 end in 6"]
+    assert sorted(who.spec["reasons"]) == sorted(["6 is even", "6ⁿ has no factor 5", "Powers of 6 end in 6"])
     assert "correct" not in str(who.spec)  # never the answer before answering
     stored = (await db_session.execute(service.select(PracticeQuestion).where(
         PracticeQuestion.topic_id == s.ohm.id, PracticeQuestion.kind == "who_is_right"))).scalar_one()
@@ -403,7 +403,8 @@ async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, m
 
     await _answer(db_session, s, quiz, {R, U, A, AN})  # the dropped make_your_own fell back to an Analyze MCQ
     fix = next(i for i in quiz.items if i.kind == "fix_steps")
-    for item, response in ((who, {"pick": 1, "reason": 1}), (fix, {"step": 0, "fix": 0})):
+    right_reason = next(i for i, r in enumerate(stored.spec["reasons"]) if r["correct"])  # shuffled when stored
+    for item, response in ((who, {"pick": stored.spec["correct"], "reason": right_reason}), (fix, {"step": 0, "fix": 0})):
         out = await practice_routes.answer_my_practice_response(quiz.id, item.id, PracticeResponseIn(response=response),
                                                                  user=s.student, session=db_session)
         assert out.result.reveal["explanation"]

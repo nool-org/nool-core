@@ -302,7 +302,7 @@ async def _generate_special(session: AsyncSession, school_class: SchoolClass, sl
             slot = slots[mine[n]]
             made[mine[n]] = PracticeQuestion(
                 chapter_id=topic.chapter_id, topic_id=topic.id, bloom_level=slot.bloom_level, kind=slot.kind,
-                text=g["text"], spec=g["spec"], options=None, correct_index=None,
+                text=g["text"], spec=question_types.shuffle(slot.kind, g["spec"], g["text"]), options=None, correct_index=None,
                 explanation=g["spec"].get("explanation") or None, expected_points=[], misconceptions=[],
                 origin="generated", used_count=0)
     session.add_all(made.values())

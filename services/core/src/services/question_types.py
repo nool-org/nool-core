@@ -14,6 +14,8 @@ answer); grade() marks a response; reveal() is what the app gets after.
 Two-part answers score 100 / 50 (right pick, wrong reason or fix) / 0.
 """
 
+import random
+
 from src.services import answer_checks
 
 KINDS = ("who_is_right", "make_your_own", "fix_steps")
@@ -55,6 +57,25 @@ def validate(kind: str, spec: dict) -> None:
             raise SpecError(f"unknown kind {kind}")
     except (KeyError, TypeError) as exc:
         raise SpecError(f"incomplete spec: {exc}") from exc
+
+
+def shuffle(kind: str, spec: dict, seed: str) -> dict:
+    """The spec with its answer moved around, the same way for the same seed: a
+    model tends to put the right reason/fix first and make the second
+    character right, which students would learn to pick blind. Zip stays the
+    first speaker; who is right moves between them."""
+    rng = random.Random(seed)
+    out = {**spec}
+    if kind == "who_is_right":
+        claims = [dict(c) for c in spec["claims"]]
+        if rng.random() < 0.5:  # swap what they say, keep who speaks first
+            claims[0]["says"], claims[1]["says"] = claims[1]["says"], claims[0]["says"]
+            out["correct"] = 1 - spec["correct"]
+        out["claims"] = claims
+        out["reasons"] = rng.sample(list(spec["reasons"]), len(spec["reasons"]))
+    elif kind == "fix_steps":
+        out["fixes"] = rng.sample(list(spec["fixes"]), len(spec["fixes"]))
+    return out
 
 
 def public(kind: str, spec: dict) -> dict:

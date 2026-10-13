@@ -62,3 +62,20 @@ def test_reveal_after_answering():
     assert qt.reveal("who_is_right", WHO)["correct"] == 1 and qt.reveal("who_is_right", WHO)["reason"] == 1
     assert qt.reveal("fix_steps", FIX) == {"wrong_step": 2, "fix": 0, "explanation": FIX["explanation"]}
     assert qt.reveal("make_your_own", MINE)["example"] == ["12", "18"]
+
+
+def test_shuffle_moves_the_answer_but_keeps_it_right():
+    sides, first_reason, first_fix = set(), set(), set()
+    for n in range(40):
+        who = qt.shuffle("who_is_right", WHO, f"seed-{n}")
+        qt.validate("who_is_right", who)
+        assert [c["name"] for c in who["claims"]] == ["Zip", "Bolt"]  # Zip still speaks first
+        right = who["claims"][who["correct"]]["says"]
+        assert right == WHO["claims"][WHO["correct"]]["says"]  # the right words stay the right answer
+        sides.add(who["correct"])
+        first_reason.add(who["reasons"][0]["correct"])
+        fix = qt.shuffle("fix_steps", FIX, f"seed-{n}")
+        qt.validate("fix_steps", fix)
+        first_fix.add(fix["fixes"][0]["correct"])
+    assert sides == {0, 1} and first_reason == {True, False} and first_fix == {True, False}
+    assert qt.shuffle("who_is_right", WHO, "x") == qt.shuffle("who_is_right", WHO, "x")  # same seed, same order
