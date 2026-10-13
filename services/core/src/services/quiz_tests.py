@@ -75,7 +75,9 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
         raise ValidationError("Every topic must be from the chosen chapter.")
     plan(topics, mix)  # validates the mix
     test = QuizTest(id=uuid.uuid4(), class_id=class_uuid, subject_id=chapter.subject_id, chapter_id=chapter.id,
-                    title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} test",
+                    # a default name a teacher can tell apart from last week's: "Real Numbers test · 13 Oct"
+                    title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} test · "
+                    f"{daily_practice.today_ist().strftime('%d %b').lstrip('0')}",
                     topic_ids=[str(t.id) for t in topics], mix={k: int(v) for k, v in mix.items() if int(v) > 0},
                     question_ids=[], status="preparing", due_at=due_at, created_by=teacher.id)
     session.add(test)

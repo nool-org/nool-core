@@ -25,7 +25,7 @@ Kind = Literal["who_is_right", "make_your_own", "fix_steps"]
 
 BASE = """You write one question for a CBSE Class {grade} {subject} student in India, on the topic "{topic}"
 (chapter "{chapter}"), at Bloom level {level}. Use ONLY ideas from the textbook text given. Simple Indian
-English, short sentences. Write maths as plain text with symbols: √5, 2 × 3, x², ≠, ≤, π - never LaTeX or $.
+English, short sentences. Write maths as plain text with symbols: √5, 2 × 3, x², 2³, ≠, ≤, π - powers as superscripts, never ^, LaTeX or $.
 In Mathematics, build the question around a calculation or a worked problem (numbers to work with, a short
 word problem) the way CBSE board papers do - not around a definition. Keep every line short: it is read on a
 phone."""
@@ -35,11 +35,13 @@ PROMPTS = {
 TYPE "Who is right?": two characters disagree about one claim from this topic, and the student decides.
 - Zip is quick but jumps to conclusions; Bolt loves spotting patterns. Either may be the right one.
 - question: the claim being debated, as a short yes/no question (e.g. "Can 6ⁿ end with the digit 0?").
-- claims: exactly 2, Zip's then Bolt's - each one or two sentences, in their voice. One is right; the other
-  makes a mistake real students make. Neither says "I am right".
+- claims: exactly 2, Zip's then Bolt's - each ONE short sentence stating a position in their voice ("Yes, it
+  can - 6 is even."), never the full reasoning: the "why" is the second step and must not be given away.
+  One is right; the other makes a mistake real students make. Neither says "I am right".
 - correct: 0 if Zip is right, 1 if Bolt is right.
 - reasons: 3 or 4 short reasons for the right side; exactly one is the real reason (correct: true). The others
-  sound plausible but are wrong or beside the point - give each a short snake_case mistake tag
+  sound plausible but are wrong or beside the point - give each a short snake_case mistake tag. All reasons
+  about the same length, none labelled as wrong
   (e.g. "pattern_not_proof", "even_means_divisible").
 - explanation: two sentences on why the right one is right.""",
     "fix_steps": BASE + """
@@ -49,7 +51,8 @@ TYPE "Fix Milo's homework": Milo, the class owl, solved a problem and made ONE m
   mistake - e.g. taking the highest power for the HCF); every later step follows from it honestly.
 - wrong_step: index (from 0) of the wrong step.
 - fixes: 3 or 4 versions of that step; exactly one is correct (correct: true); the others are other common
-  mistakes, each with a snake_case mistake tag.
+  mistakes, each with a snake_case mistake tag. All about the same length and written as Milo would write
+  them - a wrong fix never describes itself ("...kept by mistake") and the right one never explains itself.
 - explanation: one or two sentences on what went wrong and why the fix is right.""",
     "make_your_own": BASE + """
 TYPE "Make your own": the student builds something that fits a condition - many answers are right and
@@ -76,7 +79,9 @@ OFFICIAL SOLUTION: {solution}"""
 
 VERIFY = """You check one {kind} question for a Class {grade} {subject} student. Work it out yourself first.
 Is the marked answer really correct, and is every other choice really wrong (or, for reasons/fixes,
-really not the right one)? Is it clear and on the topic? Answer ok=true only if all of that holds;
+really not the right one)? Is it clear and on the topic? Does nothing give the answer away - a claim that
+already states the reason, a choice that labels itself wrong, a right choice much longer than the rest?
+Answer ok=true only if all of that holds;
 otherwise ok=false and say what's wrong in problem."""
 
 
