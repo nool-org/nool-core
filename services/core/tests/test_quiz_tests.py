@@ -158,3 +158,25 @@ async def test_a_subject_only_gets_its_own_question_types(db_session, monkeypatc
     s = await _seed(db_session)  # Electricity is Science: no Make your own (its checks are maths)
     with pytest.raises(ValidationError, match="make_your_own"):
         await _create(db_session, s, monkeypatch, mix={"mcq": 2, "make_your_own": 1})
+
+
+async def test_a_one_type_challenge_keeps_its_type_and_skips_repeats(db_session, monkeypatch):
+    """Fix Milo only, over two topics where one has no Fix Milo questions: both
+    slots stay Fix Milo (the other topic's), and a board question that appears
+    twice (two years' papers) is used once."""
+    from src.domain.models import Chapter, PracticeQuestion, Subject
+    from tests.test_question_types import FIX
+
+    s = await _seed(db_session)
+    subject = await db_session.get(Subject, (await db_session.get(Chapter, s.electricity.id)).subject_id)
+    subject.name = "Mathematics"
+    for text in ("Find the HCF of 12 and 18.", "Find the HCF of 12 and 18 !", "Find the LCM of 4 and 6."):
+        db_session.add(PracticeQuestion(chapter_id=s.electricity.id, topic_id=s.ohm.id, bloom_level=B.EVALUATE,
+                                        kind="fix_steps", text=text, spec=FIX, expected_points=[], misconceptions=[],
+                                        origin="bank", used_count=0))
+    await db_session.flush()
+
+    created = await _create(db_session, s, monkeypatch, mix={"fix_steps": 2})
+    detail = await routes.get_quiz_test(created.id, user=s.teacher, session=db_session)
+    assert [q.kind for q in detail.questions] == ["fix_steps", "fix_steps"]
+    assert sorted(q.text for q in detail.questions) == ["Find the HCF of 12 and 18.", "Find the LCM of 4 and 6."]

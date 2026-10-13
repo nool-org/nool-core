@@ -20,6 +20,7 @@
 """
 
 import logging
+import re
 import random
 import uuid
 from dataclasses import dataclass, replace
@@ -342,6 +343,11 @@ async def _prepare_voice(session: AsyncSession, questions: list[PracticeQuestion
     await prepare_voice_questions(session, todo)
 
 
+def same_question(text: str) -> str:
+    """A key that's equal for the same question worded with other spacing or punctuation."""
+    return re.sub(r"\W+", "", text.lower())[:80]
+
+
 async def _fill(session: AsyncSession, student: User, school_class: SchoolClass, slots: list[Slot],
                 today: date, seed: str, exact_level: bool = False) -> list[tuple[Slot, PracticeQuestion]]:
     """A question per slot: pool, then bank import, then generation. A voice
@@ -357,14 +363,34 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
     for topic in dict.fromkeys(slot.topic for slot in slots):
         for kind in ("mcq", "voice"):
             await _import_bank(session, dataset_ids, topic, kind)
+    seen_texts: set[str] = set()
+
+    async def pool(topic: Topic, kind: str, level: BloomLevel, exact: bool) -> PracticeQuestion | None:
+        # the same question twice (one board question in two years' papers) only once
+        for _ in range(5):
+            q = await _from_pool(session, topic, kind, level, exclude, exact)
+            if q is None or same_question(q.text) not in seen_texts:
+                return q
+            exclude.add(q.id)
+        return None
+
+    topics = list(dict.fromkeys(slot.topic for slot in slots))
     for i, slot in enumerate(slots):
         # a who_is_right/make_your_own/fix_steps slot waits for generation before it settles for an MCQ
         for kind in [slot.kind] if slot.kind in question_types.KINDS else dict.fromkeys([slot.kind, "mcq"]):
             exact = exact_level and kind == "mcq"  # spoken questions are few: any level, scored at its own
-            q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact)
+            q = await pool(slot.topic, kind, slot.bloom_level, exact)
             if q is None and kind in ("mcq", "voice") and await _import_bank(session, dataset_ids, slot.topic, kind):
-                q = await _from_pool(session, slot.topic, kind, slot.bloom_level, exclude, exact)
+                q = await pool(slot.topic, kind, slot.bloom_level, exact)
+            if q is None and kind in question_types.KINDS:
+                # none of this type on the topic (an introduction rarely has a worked problem): a sibling
+                # topic's keeps the type the teacher asked for
+                for other in topics:
+                    if other is not slot.topic and (q := await pool(other, kind, slot.bloom_level, exact)):
+                        slot = replace(slot, topic=other)
+                        break
             if q is not None:
+                seen_texts.add(same_question(q.text))
                 slots[i] = replace(slot, kind=kind)
                 picked[i] = q
                 exclude.add(q.id)
