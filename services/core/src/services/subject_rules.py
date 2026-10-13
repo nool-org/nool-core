@@ -12,10 +12,17 @@ FORMATS: dict[str, tuple[str, ...]] = {
     "Mathematics": ("mcq", "who_is_right", "fix_steps", "make_your_own"),
 }
 DEFAULT_FORMATS = ("mcq", "voice")
+# what a teacher sets as a challenge (the rest are for check-ins): Maths' Fix
+# Milo's homework stands in for the voice test other subjects use
+CHALLENGE_FORMATS: dict[str, tuple[str, ...]] = {"Mathematics": ("fix_steps",)}
 
 
 def formats(subject_name: str | None) -> tuple[str, ...]:
     return FORMATS.get(subject_name or "", DEFAULT_FORMATS)
+
+
+def challenge_formats(subject_name: str | None) -> tuple[str, ...]:
+    return CHALLENGE_FORMATS.get(subject_name or "", ())
 
 
 def voice_tests_allowed(subject_name: str | None) -> bool:

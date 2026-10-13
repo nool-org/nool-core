@@ -5,7 +5,7 @@ from src.api.schemas.common import CamelModel
 
 
 class TaskStepOut(CamelModel):
-    kind: Literal["quiz", "homework", "recheck", "voice_test", "mcq_check", "test"]
+    kind: Literal["quiz", "homework", "recheck", "voice_test", "mcq_check", "test", "test_recheck"]
     label: str
     status: Literal["done", "current", "waiting", "locked", "skipped"]
     due_at: datetime | None

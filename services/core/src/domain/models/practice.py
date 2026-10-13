@@ -81,7 +81,8 @@ class DailyPracticeSession(IdMixin, Base):
     __table_args__ = (
         Index("uq_daily_practice_sessions_student_date", "student_id", "practice_date", unique=True,
               postgresql_where=text("topic_id IS NULL AND quiz_test_id IS NULL")),
-        Index("uq_quiz_test_attempts_student_test", "student_id", "quiz_test_id", unique=True,
+        # attempt 2 = the second look after the homework
+        Index("uq_quiz_test_attempts_student_test", "student_id", "quiz_test_id", "attempt", unique=True,
               postgresql_where=text("quiz_test_id IS NOT NULL")),
         Index("uq_topic_quizzes_student_topic_attempt", "student_id", "topic_id", "attempt", unique=True,
               postgresql_where=text("topic_id IS NOT NULL")),

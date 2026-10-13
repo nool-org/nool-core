@@ -328,10 +328,17 @@ async def confirm_completion(
             mcq_id = mcq.id
             background_tasks.add_task(mcq_test.prebuild, mcq.id, user.id)
 
+    # a teacher's challenge's homework: its second look opens now
+    recheck_test = (await session.execute(select(DailyPracticeSession.quiz_test_id).where(
+        DailyPracticeSession.homework_id == hw.id, DailyPracticeSession.quiz_test_id.is_not(None))
+    )).scalars().first() if hw is not None and hw.topic_id else None
+
     await session.commit()
     return HomeworkQaConfirmationOut(confirmed_at=progress.confirmed_at,
                                      mcq_test_id=str(mcq_id) if mcq_id else None,
-                                     recheck_topic_id=str(hw.topic_id) if hw is not None and hw.topic_id else None,
+                                     recheck_topic_id=str(hw.topic_id) if hw is not None and hw.topic_id
+                                     and recheck_test is None else None,
+                                     recheck_test_id=str(recheck_test) if recheck_test else None,
                                      early_bonus_xp=early_xp)
 
 

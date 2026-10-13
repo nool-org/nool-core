@@ -156,7 +156,7 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
     tests = await quiz_tests.tests_for(session, student)
     if not tests:
         return []
-    tried = {a.quiz_test_id: a for a in (await session.execute(select(DailyPracticeSession).where(
+    tried = {(a.quiz_test_id, a.attempt): a for a in (await session.execute(select(DailyPracticeSession).where(
         DailyPracticeSession.student_id == student.id,
         DailyPracticeSession.quiz_test_id.in_([t.id for t in tests])))).scalars()}
     hw_ids = [a.homework_id for a in tried.values() if a.homework_id]
@@ -167,25 +167,37 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
         .where(Homework.id.in_(hw_ids)))).all()} if hw_ids else {}
     out = []
     for test in tests:
-        attempt = tried.get(test.id)
+        attempt, second = tried.get((test.id, 1)), tried.get((test.id, 2))
         finished = attempt is not None and attempt.outcome is not None
         if test.due_at and test.due_at < now and not finished:
             continue  # missed - gone, like a voice test past its deadline
         step = _step("test", "Challenge", "done" if finished else "current", target_id=str(test.id),
                      due_at=None if finished else test.due_at,
                      note=f"{attempt.score_percent}%" if finished else None)
+        # like a check-in: the homework, then a second look in the same format
+        look = _step("test_recheck", "Second look", "locked", target_id=str(test.id))
         if not finished:
             hw_step = _step("homework", "Homework", "locked")
-        elif attempt.outcome == "mastered" or (attempt.analysis or {}).get("homework_skipped"):
+        elif attempt.outcome == "mastered":
             hw_step = _step("homework", "Homework", "skipped", note="Not needed")
+            look = _step("test_recheck", "Second look", "skipped")
         else:
             hw, progress = homework.get(attempt.homework_id, (None, None))
-            hw_step = _homework_step(hw, progress, waiting=True, now=now)
-        steps = [step, hw_step]
+            hw_step = _homework_step(hw, progress, waiting=attempt.homework_id is None, now=now)
+            if (attempt.analysis or {}).get("homework_skipped"):
+                hw_step = _step("homework", "Homework", "skipped", note="Not needed")
+            if second is not None and second.outcome is not None:
+                look = _step("test_recheck", "Second look", "done", target_id=str(test.id),
+                             note=f"{second.score_percent}%")
+            elif await quiz_tests.second_look_open(session, attempt):
+                look = _step("test_recheck", "Second look", "current", target_id=str(test.id))
+        steps = [step, hw_step, look]
+        final = second.outcome if second is not None and second.outcome else attempt.outcome if finished else None
         out.append({"id": f"quiz_test:{test.id}", "kind": "quiz_test", "title": test.title,
-                    "subtitle": "Written challenge", "subject": (await session.get(Subject, test.subject_id)).name,
+                    "subtitle": "Fix Milo's homework" if set(test.mix or {}) == {"fix_steps"} else "Challenge",
+                    "subject": (await session.get(Subject, test.subject_id)).name,
                     "state": _chain_state(steps),
-                    "result": "Mastered" if finished and attempt.outcome == "mastered" else None,
+                    "result": {"mastered": "Mastered", "needs_teacher": "Your teacher will help"}.get(final or ""),
                     "steps": steps, "sort_at": test.published_at})
     return out
 

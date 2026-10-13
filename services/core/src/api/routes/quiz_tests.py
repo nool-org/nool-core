@@ -3,7 +3,9 @@ are picked in the background), review, publish now or schedule, results;
 students start them from their Tests tab and answer through daily
 practice's item routes, then finish with the topic quiz's finish."""
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,9 +105,10 @@ async def get_quiz_test_results(
 @router.post("/me/quiz-tests/{test_id}/start")
 async def start_my_quiz_test(
     test_id: str,
+    attempt: Annotated[int, Query(ge=1, le=2)] = 1,  # 2 = the second look, after the homework
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> TopicQuizOut:
-    attempt = await quiz_tests.start(session, user, test_id)
+    attempt = await quiz_tests.start(session, user, test_id, attempt)
     await session.commit()
     return await _quiz_out(session, attempt)

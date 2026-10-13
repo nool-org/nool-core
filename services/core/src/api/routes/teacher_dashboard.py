@@ -45,7 +45,10 @@ async def get_teacher_dashboard(
     if active is not None:
         test_result = await session.execute(
             select(VoiceTest)
-            .where(VoiceTest.class_id == active.id)
+            # only this teacher's subjects - the class's other teachers' tests aren't theirs to show
+            .where(VoiceTest.class_id == active.id, VoiceTest.subject_id.in_(
+                select(TeacherClassAssignment.subject_id).where(
+                    TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.class_id == active.id)))
             .order_by(VoiceTest.created_at.desc())
             .limit(1)
         )

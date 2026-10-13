@@ -1,13 +1,14 @@
-"""Teacher-made written tests - for subjects without voice tests (Maths,
-subject_rules.py). The teacher picks a chapter's topics and how many of each
-question type; the questions are chosen once - the same for every student -
-from the shared practice pool (bank, then generation; daily_practice._fill),
-reviewed, then published to the class.
+"""Teacher-set challenges for subjects without voice tests - in Maths, Fix
+Milo's homework (subject_rules.CHALLENGE_FORMATS): the teacher picks a
+chapter's topics and how many problems; the questions are chosen once - the
+same for every student - from the shared practice pool (bank, then
+generation; daily_practice._fill), reviewed, then published to the class.
 
-A student's attempt is a practice session with quiz_test_id (attempt 1, no
-topic): answering, the analysis and the homework on its weakest topic are the
-topic quiz's (topic_quiz.finish / build_homework). No re-check: the next step
-after a test is its homework.
+A student's attempt is a practice session with quiz_test_id and no topic:
+answering, the analysis and the homework on its weakest topic are the topic
+quiz's (topic_quiz.finish / build_homework). Then, like a check-in, a second
+look in the same format (attempt 2: fresh problems on the topics they
+missed) - mastered, or their teacher is told.
 """
 
 import logging
@@ -27,6 +28,8 @@ from src.domain.models import (
     PracticeQuestion,
     QuizTest,
     SchoolClass,
+    StudentHomeworkProgress,
+    StudentHomeworkStatus,
     StudentProfile,
     Subject,
     Topic,
@@ -44,6 +47,7 @@ MCQ_LEVELS = [BloomLevel.APPLY, BloomLevel.APPLY, BloomLevel.UNDERSTAND, BloomLe
 KIND_LEVEL = {"who_is_right": BloomLevel.ANALYZE, "fix_steps": BloomLevel.EVALUATE,
               "make_your_own": BloomLevel.CREATE}
 MAX_QUESTIONS = 20
+SECOND_LOOK = 5  # problems in the second look
 
 
 def plan(topics: list[Topic], mix: dict[str, int]) -> list[Slot]:
@@ -76,7 +80,7 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
         raise ValidationError("Every topic must be from the chosen chapter.")
     plan(topics, mix)  # validates the mix
     subject = await session.get(Subject, chapter.subject_id)
-    unfit = sorted(k for k, n in mix.items() if int(n) > 0 and k not in subject_rules.formats(subject.name))
+    unfit = sorted(k for k, n in mix.items() if int(n) > 0 and k not in subject_rules.challenge_formats(subject.name))
     if unfit:
         raise ValidationError(f"{subject.name} doesn't use: {', '.join(unfit)}.")
     test = QuizTest(id=uuid.uuid4(), class_id=class_uuid, subject_id=chapter.subject_id, chapter_id=chapter.id,
@@ -170,8 +174,40 @@ async def tests_for(session: AsyncSession, student: User) -> list[QuizTest]:
         .order_by(QuizTest.published_at.desc()))).scalars().all())
 
 
-async def start(session: AsyncSession, student: User, test_id: str) -> DailyPracticeSession:
-    """The student's attempt - built on first call, the same one after. Caller commits."""
+async def _attempt(session: AsyncSession, student: User, test: QuizTest, attempt: int) -> DailyPracticeSession | None:
+    return (await session.execute(select(DailyPracticeSession).where(
+        DailyPracticeSession.student_id == student.id, DailyPracticeSession.quiz_test_id == test.id,
+        DailyPracticeSession.attempt == attempt).execution_options(populate_existing=True))).scalar_one_or_none()
+
+
+async def second_look_open(session: AsyncSession, first: DailyPracticeSession | None) -> bool:
+    """After a first attempt that led to homework, once that homework is done
+    (or there was none to make)."""
+    if first is None or first.outcome != "homework":
+        return False
+    if (first.analysis or {}).get("homework_skipped"):
+        return True
+    if first.homework_id is None:
+        return False
+    status = (await session.execute(select(StudentHomeworkProgress.status).where(
+        StudentHomeworkProgress.homework_id == first.homework_id,
+        StudentHomeworkProgress.student_id == first.student_id))).scalar_one_or_none()
+    return status == StudentHomeworkStatus.COMPLETED
+
+
+def second_look_plan(test: QuizTest, first_items, topics: list[Topic]) -> list[Slot]:
+    """SECOND_LOOK questions in the test's own formats, on the topics the
+    student missed (all the test's topics if none)."""
+    missed = list(dict.fromkeys(item.topic_id for item, _, _ in first_items if not item.correct and item.topic_id))
+    focus = [t for t in topics if t.id in missed] or topics
+    kinds = [k for k in KINDS if (test.mix or {}).get(k)] or ["mcq"]
+    return plan(focus, {k: SECOND_LOOK // len(kinds) + (n < SECOND_LOOK % len(kinds)) for n, k in enumerate(kinds)})
+
+
+async def start(session: AsyncSession, student: User, test_id: str, attempt: int = 1) -> DailyPracticeSession:
+    """The student's attempt (1) or second look (2, once the homework is done:
+    fresh questions, same formats) - built on first call, the same one after.
+    Caller commits."""
     try:
         tid = uuid.UUID(test_id)
     except ValueError:
@@ -179,27 +215,45 @@ async def start(session: AsyncSession, student: User, test_id: str) -> DailyPrac
     test = await session.get(QuizTest, tid)
     if test is None or not is_open(test) or test not in await tests_for(session, student):
         raise NotFoundError("Test not found.")
+    if attempt == 2 and await _attempt(session, student, test, 2) is None:
+        if not await second_look_open(session, await _attempt(session, student, test, 1)):
+            raise ConflictError("Finish your homework first - then the second look opens.")
     created = (await session.execute(pg_insert(DailyPracticeSession).values(
         id=uuid.uuid4(), student_id=student.id, practice_date=daily_practice.today_ist(),
-        chapter_id=test.chapter_id, quiz_test_id=test.id, attempt=1, status="open", xp_awarded=0,
-    ).on_conflict_do_nothing(index_elements=["student_id", "quiz_test_id"],
+        chapter_id=test.chapter_id, quiz_test_id=test.id, attempt=attempt, status="open", xp_awarded=0,
+    ).on_conflict_do_nothing(index_elements=["student_id", "quiz_test_id", "attempt"],
                              index_where=DailyPracticeSession.quiz_test_id.is_not(None))
         .returning(DailyPracticeSession.id))).scalar_one_or_none()
-    attempt = (await session.execute(select(DailyPracticeSession).where(
-        DailyPracticeSession.student_id == student.id, DailyPracticeSession.quiz_test_id == test.id)
-        .execution_options(populate_existing=True))).scalar_one()
-    if created is not None:
-        session.add_all([DailyPracticeItem(session_id=attempt.id, order=n, practice_question_id=q.id, kind=q.kind,
-                                           topic_id=q.topic_id, bloom_level=q.bloom_level)
-                         for n, q in enumerate(await questions_of(session, test), start=1)])
-        await session.flush()
-    return attempt
+    current = await _attempt(session, student, test, attempt)
+    if created is None:
+        return current
+    if attempt == 1:
+        questions = [(q.topic_id, q) for q in await questions_of(session, test)]
+    else:
+        first = await _attempt(session, student, test, 1)
+        topics = [await session.get(Topic, uuid.UUID(str(t))) for t in test.topic_ids]
+        school_class = await session.get(SchoolClass, test.class_id)
+        slots = second_look_plan(test, await daily_practice.items_of(session, first.id), topics)
+        # ponytail: holds the row through the LLM calls on a cold pool, as the check-in's re-check does
+        with ai_context.feature("quiz_test_second_look"):
+            chosen = await daily_practice._fill(session, student, school_class, slots, daily_practice.today_ist(),
+                                                str(current.id), exact_level=True)
+        if not chosen:
+            await session.delete(current)
+            await session.flush()
+            raise ConflictError("No new questions are ready yet - try again in a little while.")
+        questions = [(slot.topic.id, q) for slot, q in chosen]
+    session.add_all([DailyPracticeItem(session_id=current.id, order=n, practice_question_id=q.id, kind=q.kind,
+                                       topic_id=topic_id, bloom_level=q.bloom_level)
+                     for n, (topic_id, q) in enumerate(questions, start=1)])
+    await session.flush()
+    return current
 
 
 async def attempts(session: AsyncSession, test: QuizTest) -> dict[uuid.UUID, DailyPracticeSession]:
     rows = (await session.execute(select(DailyPracticeSession).where(
-        DailyPracticeSession.quiz_test_id == test.id))).scalars().all()
-    return {a.student_id: a for a in rows}
+        DailyPracticeSession.quiz_test_id == test.id, DailyPracticeSession.attempt == 1))).scalars().all()
+    return {a.student_id: a for a in rows}  # the first attempt is the score
 
 
 async def results(session: AsyncSession, test: QuizTest) -> dict:

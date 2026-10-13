@@ -24,6 +24,15 @@ from src.services import subject_rules
 from tests.test_topic_quiz import R, U, _answer, _pools, _seed, _stub_analysis, _teach
 
 
+@pytest.fixture(autouse=True)
+def _any_format_outside_maths(monkeypatch):
+    """The challenge mechanics are tested on the seed's Science chapter with
+    MCQs; the real rule (Maths: Fix Milo's homework only) still holds for Maths."""
+    real = subject_rules.challenge_formats
+    monkeypatch.setattr(service.subject_rules, "challenge_formats",
+                        lambda name: real(name) if name == "Mathematics" else service.KINDS)
+
+
 def test_plan_spreads_topics_and_sets_each_types_level():
     from types import SimpleNamespace
 
@@ -90,7 +99,8 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
 
     [task] = [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
               if t.kind == "quiz_test"]
-    assert [(st.kind, st.status) for st in task.steps] == [("test", "current"), ("homework", "locked")]
+    assert [(st.kind, st.status) for st in task.steps] == [
+        ("test", "current"), ("homework", "locked"), ("test_recheck", "locked")]
     assert task.steps[0].due_at is not None
 
     attempt = await routes.start_my_quiz_test(created.id, user=s.student, session=db_session)
@@ -105,6 +115,27 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
     assert (results.student_count, results.done, results.average_percent) == (2, 1, 25)
     assert results.weakest_level == "APPLY" and len(results.needs_help) == 1
     assert sorted(r.status for r in results.students) == ["done", "not_started"]
+
+    # like a check-in: the homework, then a second look in the same format
+    with pytest.raises(ConflictError):  # not before the homework
+        await routes.start_my_quiz_test(created.id, attempt=2, user=s.student, session=db_session)
+    first = await db_session.get(service.DailyPracticeSession, service.uuid.UUID(attempt.id))
+    first.analysis = {**first.analysis, "homework_skipped": True}  # (no dataset to make it from)
+    await db_session.flush()
+    [task] = [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
+              if t.kind == "quiz_test"]
+    assert task.steps[2].kind == "test_recheck" and task.steps[2].status == "current"
+    look = await routes.start_my_quiz_test(created.id, attempt=2, user=s.student, session=db_session)
+    assert look.id != attempt.id and look.items and {i.kind for i in look.items} == {"mcq"}  # the test's format
+    assert not {i.text for i in look.items} & {i.text for i in attempt.items}  # fresh questions
+    await _answer(db_session, s, look, {R, U, B.APPLY, B.ANALYZE, B.EVALUATE, B.CREATE})
+    await quiz_routes.finish_my_topic_quiz(look.id, background_tasks=BackgroundTasks(), user=s.student,
+                                           session=db_session)
+    [task] = [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
+              if t.kind == "quiz_test"]
+    assert (task.state, task.result) == ("done", "Mastered")
+    results = await routes.get_quiz_test_results(created.id, user=s.teacher, session=db_session)
+    assert results.average_percent == 25  # the teacher's results are the first try
 
     stranger = (await _seed(db_session)).teacher
     with pytest.raises(NotFoundError):
@@ -154,10 +185,16 @@ async def test_publishing_needs_ready_questions_and_maths_has_no_voice_tests(db_
                                        session=db_session)
 
 
-async def test_a_subject_only_gets_its_own_question_types(db_session, monkeypatch):
-    s = await _seed(db_session)  # Electricity is Science: no Make your own (its checks are maths)
-    with pytest.raises(ValidationError, match="make_your_own"):
-        await _create(db_session, s, monkeypatch, mix={"mcq": 2, "make_your_own": 1})
+async def test_a_maths_challenge_is_fix_milos_homework_only(db_session, monkeypatch):
+    """The other formats are for check-ins."""
+    from src.domain.models import Chapter, Subject
+
+    s = await _seed(db_session)
+    subject = await db_session.get(Subject, (await db_session.get(Chapter, s.electricity.id)).subject_id)
+    subject.name = "Mathematics"
+    await db_session.flush()
+    with pytest.raises(ValidationError, match="mcq"):
+        await _create(db_session, s, monkeypatch, mix={"mcq": 2, "fix_steps": 1})
 
 
 async def test_a_one_type_challenge_keeps_its_type_and_skips_repeats(db_session, monkeypatch):
@@ -179,4 +216,25 @@ async def test_a_one_type_challenge_keeps_its_type_and_skips_repeats(db_session,
     created = await _create(db_session, s, monkeypatch, mix={"fix_steps": 2})
     detail = await routes.get_quiz_test(created.id, user=s.teacher, session=db_session)
     assert [q.kind for q in detail.questions] == ["fix_steps", "fix_steps"]
-    assert sorted(q.text for q in detail.questions) == ["Find the HCF of 12 and 18.", "Find the LCM of 4 and 6."]
+    texts = [q.text for q in detail.questions]
+    assert "Find the LCM of 4 and 6." in texts
+    assert sum(t.startswith("Find the HCF of 12 and 18") for t in texts) == 1  # either copy, never both
+
+
+async def test_teacher_home_only_shows_the_teachers_own_subject(db_session):
+    """Another teacher's chat with Milo in the same class (another subject) isn't this teacher's headline."""
+    from src.api.routes import teacher_dashboard
+    from src.domain.models import AssignmentTargetMode, Chapter, Subject, VoiceTest
+
+    s = await _seed(db_session)
+    other = Subject(name=f"Biology-{service.uuid.uuid4()}")
+    db_session.add(other)
+    await db_session.flush()
+    chapter = Chapter(subject_id=other.id, name="Life Processes", order_index=1, grade=10)
+    db_session.add(chapter)
+    await db_session.flush()
+    db_session.add(VoiceTest(class_id=s.cls.id, subject_id=other.id, chapter_id=chapter.id, duration_minutes=8,
+                             completion_window_hours=24, target_mode=AssignmentTargetMode.WHOLE_CLASS))
+    await db_session.flush()
+    dash = await teacher_dashboard.get_teacher_dashboard(class_id=str(s.cls.id), user=s.teacher, session=db_session)
+    assert dash.headline_test is None

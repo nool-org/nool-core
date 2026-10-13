@@ -322,9 +322,11 @@ async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: To
     subject = await session.get(Subject, chapter.subject_id) if chapter else None
     school_class = await daily_practice.class_of(session, quiz.student_id)
     first = None
-    if quiz.attempt == 2:
+    if quiz.attempt == 2:  # compared with the first try - the check-in's, or the teacher's challenge's
+        same = (DailyPracticeSession.quiz_test_id == quiz.quiz_test_id if quiz.quiz_test_id
+                else DailyPracticeSession.topic_id == topic.id)
         first = (await session.execute(select(DailyPracticeSession.per_bloom).where(
-            DailyPracticeSession.student_id == quiz.student_id, DailyPracticeSession.topic_id == topic.id,
+            DailyPracticeSession.student_id == quiz.student_id, same,
             DailyPracticeSession.attempt == 1))).scalar_one_or_none()
     missed = [{"bloom_level": item.bloom_level.value, "question": q.text,
                "chosen": q.options[item.option_index] if item.option_index is not None else "",
