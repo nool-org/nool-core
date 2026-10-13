@@ -15,6 +15,8 @@ Usage (host): python scripts/import_pyq.py --data C:/pet/nool-kg/output/pyq/Clas
 """
 import argparse
 import json
+import math
+import re
 import uuid
 from pathlib import Path
 
@@ -34,6 +36,19 @@ TYPE = {"mcq": "MCQ", "assertion_reason": "MCQ", "short": "SHORT_ANSWER", "long"
 DATASET = "CBSE Board Papers"
 
 
+_STATED = re.compile(r"\b(HCF|LCM)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*=\s*(\d+)\b", re.IGNORECASE)
+
+
+def false_premise(q: dict) -> str | None:
+    """A stated HCF/LCM of two numbers that isn't true (a board paper can have one) - why, or None."""
+    for kind, a, b, stated in _STATED.findall(q["text"]):
+        a, b, stated = int(a), int(b), int(stated)
+        actual = math.gcd(a, b) if kind.upper() == "HCF" else math.lcm(a, b)
+        if actual != stated:
+            return f"{kind.upper()}({a}, {b}) is {actual}, not {stated}"
+    return None
+
+
 def topic_ref(q: dict) -> str | None:
     """Real Numbers topics by keyword; other chapters' topics aren't ingested yet."""
     if q["chapter"] != "Real Numbers":
@@ -48,6 +63,10 @@ def main():
     ap.add_argument("--grade", type=int, default=10)
     args = ap.parse_args()
     questions = [q for q in json.loads(args.data.read_text(encoding="utf-8")) if not q.get("needs_figure")]
+    wrong = {q["uid"]: why for q in questions if (why := false_premise(q))}
+    for uid, why in wrong.items():
+        print(f"  skipped {uid}: {why}")
+    questions = [q for q in questions if q["uid"] not in wrong]
 
     conn = psycopg2.connect(**db_config(Path(__file__).resolve().parent.parent / ".env"))
     with conn, conn.cursor() as cur:
@@ -100,6 +119,13 @@ def main():
         cur.execute("UPDATE datasets SET question_count = (SELECT count(*) FROM dataset_questions WHERE dataset_id = %s) "
                     "WHERE id = %s RETURNING question_count", (dataset_id, dataset_id))
         print(f"{DATASET}: {cur.fetchone()[0]} questions ({len(questions)} in this import)")
+        if wrong:  # drop ones an earlier import kept (and their copies in the practice pool)
+            # pool copies already answered can't go - detach them from their topic so they're never picked again
+            cur.execute("UPDATE practice_questions SET topic_id = NULL WHERE source_question_id IN (SELECT id FROM "
+                        "dataset_questions WHERE dataset_id = %s AND external_uid = ANY(%s))", (dataset_id, list(wrong)))
+            cur.execute("DELETE FROM dataset_questions WHERE dataset_id = %s AND external_uid = ANY(%s) "
+                        "AND source->>'edited' IS NULL", (dataset_id, list(wrong)))
+            print(f"  removed {cur.rowcount} question(s) with a false premise")
 
         cur.execute("INSERT INTO school_datasets (id, school_id, dataset_id, enabled) "
                     "SELECT gen_random_uuid(), sc.school_id, %s, true FROM school_curriculum sc "
