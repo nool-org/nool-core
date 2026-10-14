@@ -316,3 +316,37 @@ async def test_one_challenge_cycle_per_chapter_per_class(db_session, monkeypatch
 
 async def _noop():
     return None
+
+
+async def test_the_teachers_report_says_whats_in_and_out_and_what_to_do(db_session, monkeypatch):
+    from src.api.routes import challenge_report as report_routes
+
+    s = await _seed(db_session, students=2)
+    for topic in (s.ohm, s.power):
+        await _teach(db_session, s, topic)
+        await _pools(db_session, topic)
+    _stub_analysis(monkeypatch, [])
+    monkeypatch.setattr(service.push, "notify", lambda *a, **k: _noop())
+    created = await _create(db_session, s, monkeypatch)
+    await routes.publish_quiz_test(created.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
+    attempt = await routes.start_my_quiz_test(created.id, user=s.student, session=db_session)
+    await _answer(db_session, s, attempt, {R, U})
+    await quiz_routes.finish_my_topic_quiz(attempt.id, background_tasks=BackgroundTasks(), user=s.student,
+                                           session=db_session)
+
+    report = await report_routes.get_challenge_report(test_id=None, quiz_test_id=created.id, user=s.teacher,
+                                                      session=db_session)
+    assert (report.kind, report.assigned, report.finished, report.average_percent) == ("fix", 2, 1, 25)
+    assert len(report.not_started) == 1
+    assert report.topics and report.topics[0].percent <= report.topics[-1].percent  # weakest topic first
+    assert report.topics[0].struggling == [s.student.display_name]
+    assert report.questions and report.questions[0].percent == 0  # the ones nobody got, first
+    me = next(st for st in report.students if st.student_id == str(s.student.id))
+    assert me.status == "done" and me.score == 25 and me.weakest_skill == "Use it"
+    assert any(a.startswith("Re-teach") for a in report.actions)
+    assert any("haven't started" in a for a in report.actions)
+
+    stranger = (await _seed(db_session)).teacher
+    with pytest.raises(NotFoundError):
+        await report_routes.get_challenge_report(test_id=None, quiz_test_id=created.id, user=stranger,
+                                                 session=db_session)

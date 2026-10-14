@@ -52,7 +52,7 @@ from src.api.routes import test_reviews
 from src.api.routes import paper_copilot
 from src.api.routes import paper_answer_key, paper_parallel
 from src.api.routes import paper_templates
-from src.api.routes import quiz_tests, revision_cards, student_tasks, topic_quizzes
+from src.api.routes import challenge_report, quiz_tests, revision_cards, student_tasks, topic_quizzes
 from src.config.settings import get_settings
 from src.repositories.database import dispose_engine, init_engine
 
@@ -126,6 +126,7 @@ def create_app() -> FastAPI:
     app.include_router(topic_quizzes.router)
     app.include_router(student_tasks.router)
     app.include_router(quiz_tests.router)
+    app.include_router(challenge_report.router)
     app.include_router(revision_cards.router)
     app.include_router(realtime.router)
     # Super Admin / School Admin
