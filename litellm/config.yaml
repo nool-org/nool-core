@@ -1,0 +1,25 @@
+# LiteLLM proxy - nool's AI gateway (compose service `litellm`, shared/llm_gateway.py).
+# Every OpenAI call from generation, kg and colearner goes through here with its
+# metadata (service, feature, school, teacher, student, request id) and LiteLLM
+# stores each call's cost with it (database `litellm`, UI at :4000/ui).
+# Live voice (WebRTC realtime) can't be proxied and goes to OpenAI directly.
+
+model_list:
+  # any OpenAI model the services ask for, by its own name (gpt-5.1, gpt-5-mini, ...)
+  - model_name: "*"
+    litellm_params:
+      model: "openai/*"
+      api_key: os.environ/OPENAI_API_KEY
+
+litellm_settings:
+  # students' answers and prompts are not kept - only who/what/tokens/cost
+  turn_off_message_logging: true
+  # the services retry on their own
+  num_retries: 0
+  request_timeout: 180
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/LITELLM_DATABASE_URL
+  store_prompts_in_spend_logs: false
+  disable_spend_logs: false

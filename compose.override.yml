@@ -54,6 +54,10 @@ services:
   # Local stand-in for Azure Blob Storage (question images - see
   # scripts/upload_assets.py). Production points AZURE_STORAGE_CONNECTION_STRING
   # / ASSET_BASE_URL at a real storage account instead; nothing else changes.
+  litellm:
+    ports:
+      - "4000:4000"  # the AI gateway's UI and API, locally only
+
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:3.35.0
     command: ["azurite-blob", "--blobHost", "0.0.0.0", "--location", "/data", "--loose"]

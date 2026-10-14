@@ -8,6 +8,8 @@ from typing import Protocol, TypeVar
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from shared import llm_gateway
+
 from src.services.cost import log_response_usage
 
 T = TypeVar("T", bound=BaseModel)
@@ -23,7 +25,7 @@ class OpenAIStructured:
 
     def __init__(self, api_key: str, timeout: float = 170.0):
         # no SDK retries: the workflow's own retry is the budget (timeout x attempts < workflow timeout)
-        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=0)
+        self.client = AsyncOpenAI(**llm_gateway.client_kwargs(api_key), timeout=timeout, max_retries=0)
 
     async def __call__(self, *, model: str, effort: str, system: str, user: str, output_type: type[T]) -> T:
         response = await self.client.responses.parse(
@@ -31,6 +33,7 @@ class OpenAIStructured:
             reasoning={"effort": effort},
             input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             text_format=output_type,
+            **llm_gateway.call_kwargs("responses"),
         )
         log_response_usage(model, response.usage)  # billed even when the output doesn't parse
         if response.output_parsed is None:

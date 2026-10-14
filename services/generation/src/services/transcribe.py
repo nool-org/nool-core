@@ -6,6 +6,8 @@ import base64
 import binascii
 
 from openai import AsyncOpenAI
+
+from shared import llm_gateway
 from pydantic import BaseModel, Field
 
 from src.config.settings import get_settings
@@ -45,12 +47,13 @@ class TranscribeResult(BaseModel):
 
 class OpenAITranscriber:
     def __init__(self, api_key: str, timeout: float = 60.0):
-        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=0)
+        self.client = AsyncOpenAI(**llm_gateway.client_kwargs(api_key), timeout=timeout, max_retries=0)
 
     async def __call__(self, *, audio: bytes, filename: str, prompt: str, language: str = "en") -> str:
         extra = {} if language == "auto" else {"language": language}
         result = await self.client.audio.transcriptions.create(
             model=MODEL, file=(filename, audio), prompt=prompt or None, **extra,
+            **llm_gateway.call_kwargs("audio"),
         )
         log_transcription_usage(MODEL, getattr(result, "usage", None))
         return result.text

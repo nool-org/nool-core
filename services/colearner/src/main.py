@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from shared.auth import configure_identity_provider
 from shared.auth.providers.firebase import FirebaseIdentityProvider
+from shared import llm_gateway
 from shared.errors import register_exception_handlers
 from shared.logging import RequestContextMiddleware, configure_logging, get_logger
 from shared.tracing import configure_tracing
@@ -33,6 +34,15 @@ def create_app() -> FastAPI:
     app = FastAPI(title="nool-core Colearner Service", lifespan=lifespan)
 
     app.add_middleware(RequestContextMiddleware)
+
+    @app.middleware("http")
+    async def gateway_caller(request, call_next):
+        """Who each AI call of this request is for, for the AI gateway (Core's X-Nool-* headers)."""
+        token = llm_gateway.bind(request.headers)
+        try:
+            return await call_next(request)
+        finally:
+            llm_gateway.reset(token)
     register_exception_handlers(app)
     configure_tracing(app, settings.service_name, settings.otel_exporter_otlp_endpoint)
     configure_observability(app, settings)

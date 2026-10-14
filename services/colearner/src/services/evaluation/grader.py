@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
+from shared import llm_gateway
+
 from src.config.settings import get_settings
 from src.services.cost_service import MODEL_PRICING, calculate_turn_cost, record_turn_metrics
 from src.services.session_store import SessionState
@@ -107,7 +109,7 @@ def _get_client() -> Optional[AsyncOpenAI]:
     global _client
     key = get_settings().openai_api_key
     if _client is None and key:
-        _client = AsyncOpenAI(api_key=key, timeout=90.0, max_retries=2)
+        _client = AsyncOpenAI(**llm_gateway.client_kwargs(key), timeout=90.0, max_retries=2)
     return _client
 
 
@@ -207,6 +209,7 @@ async def grade_transcript(
                 {"role": "user", "content": _user_prompt(transcript, *report_args[:3], rubric)},
             ],
             response_format=RESPONSE_FORMAT,
+            **llm_gateway.call_kwargs("chat"),
         )
         _record_cost(session, getattr(resp, "usage", None))
         msg = resp.choices[0].message
@@ -288,6 +291,7 @@ async def grade_answer(
             {"role": "user", "content": f'{prompt}\nSTUDENT ANSWER:\n"""\n{transcript}\n"""'},
         ],
         response_format=ANSWER_RESPONSE_FORMAT,
+        **llm_gateway.call_kwargs("chat"),
     )
     if usage := getattr(resp, "usage", None):
         call_cost = _cost_metrics(usage)

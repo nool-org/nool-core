@@ -16,6 +16,8 @@ import logging
 
 from openai import AsyncOpenAI
 
+from shared import llm_gateway
+
 from src.config.settings import get_settings
 
 LLM_MODEL = "gpt-4o-mini"
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _settings = get_settings()
 openai_client = (
-    AsyncOpenAI(api_key=_settings.openai_api_key, timeout=_TIMEOUT_SECONDS, max_retries=2)
+    AsyncOpenAI(**llm_gateway.client_kwargs(_settings.openai_api_key), timeout=_TIMEOUT_SECONDS, max_retries=2)
     if _settings.openai_api_key
     else None
 )
@@ -85,6 +87,7 @@ Return 1-2 references. Be concrete and grounded in the context above, not vague 
     try:
         resp = await openai_client.chat.completions.create(
             model=LLM_MODEL,
+            **llm_gateway.call_kwargs("chat"),
             messages=[
                 {
                     "role": "system",

@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
+from shared import llm_gateway
+
 from src.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -70,7 +72,7 @@ def _get_client() -> Optional[AsyncOpenAI]:
     global _client
     key = get_settings().openai_api_key
     if _client is None and key:
-        _client = AsyncOpenAI(api_key=key, timeout=_TIMEOUT_SECONDS, max_retries=0)
+        _client = AsyncOpenAI(**llm_gateway.client_kwargs(key), timeout=_TIMEOUT_SECONDS, max_retries=0)
     return _client
 
 
@@ -87,6 +89,7 @@ async def generate_insights(facts: dict[str, Any], client: Optional[Any] = None)
             {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
         ],
         response_format=RESPONSE_FORMAT,
+        **llm_gateway.call_kwargs("chat"),
     )
     data = json.loads(resp.choices[0].message.content)
     data["next_steps"] = data["next_steps"][:3]  # schema says exactly 3; core pads if fewer

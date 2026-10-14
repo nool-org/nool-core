@@ -14,6 +14,7 @@ from functools import lru_cache
 
 from openai import AsyncOpenAI
 
+from shared import llm_gateway
 from src.services import cost
 
 MODEL = "gpt-5.1"
@@ -27,7 +28,8 @@ OPENAI_MAX_RETRIES = 2
 def _get_client(api_key: str) -> AsyncOpenAI:
     """One shared AsyncOpenAI client (connection pool) per key instead of a
     new sync client per request blocking the event loop."""
-    return AsyncOpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_SECONDS, max_retries=OPENAI_MAX_RETRIES)
+    return AsyncOpenAI(**llm_gateway.client_kwargs(api_key), timeout=OPENAI_TIMEOUT_SECONDS,
+                       max_retries=OPENAI_MAX_RETRIES)
 
 _BLOOM_LEVELS = ("REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE", "EVALUATE", "CREATE")
 _DIFFICULTY_LEVELS = ("EASY", "MEDIUM", "HARD")
@@ -174,6 +176,7 @@ async def generate_assessor_content(*, api_key: str, concept_context: list[dict]
     response = await _get_client(api_key).chat.completions.create(
         model=MODEL,
         max_completion_tokens=MAX_COMPLETION_TOKENS,
+        **llm_gateway.call_kwargs("chat"),
         messages=[
             {"role": "system", "content": ASSESSOR_SYSTEM_PROMPT},
             {"role": "user", "content": "Grounding topics/subtopics:\n" + json.dumps(concept_context, indent=2)},
@@ -215,6 +218,7 @@ async def generate_questions(
     response = await _get_client(api_key).chat.completions.create(
         model=MODEL,
         max_completion_tokens=MAX_COMPLETION_TOKENS,
+        **llm_gateway.call_kwargs("chat"),
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT.format(board=board, grade=grade, subject=subject)},
             {

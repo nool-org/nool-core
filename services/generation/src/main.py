@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from shared import llm_gateway
 from shared.errors import register_exception_handlers
 from shared.logging import RequestContextMiddleware, configure_logging, get_logger
 from shared.tracing import configure_tracing
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
         and returns the request's summed spend to Core as X-Nool-Cost - on errors
         too, since a failed request can still have paid for model calls."""
         token = cost.caller.set(cost.caller_of(request.headers, request.url.path))
+        gateway_token = llm_gateway.bind(request.headers)  # who each call is for, for the AI gateway
         spend = cost.new_spend()
         spend_token = cost.spent.set(spend)
         try:
@@ -52,6 +54,7 @@ def create_app() -> FastAPI:
             }})
         finally:
             cost.caller.reset(token)
+            llm_gateway.reset(gateway_token)
             cost.spent.reset(spend_token)
         if spend["calls"]:
             response.headers["X-Nool-Cost"] = cost.cost_header(spend)

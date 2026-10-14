@@ -141,6 +141,8 @@ services:
     restart: unless-stopped
     environment:
       SERVICE_NAME: kg
+      LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://litellm:4000}
+      LLM_GATEWAY_KEY: ${LLM_GATEWAY_KEY_KG:-}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       NOOL_KG_BASE_URL: ${NOOL_KG_BASE_URL:-https://nool-data.draco-labs.in}
@@ -162,6 +164,34 @@ services:
     networks:
       - nool_network
 
+  # The AI gateway (LiteLLM proxy): every non-voice OpenAI call goes through it with
+  # who/what it was for, and it keeps each call's cost - shared/llm_gateway.py,
+  # litellm/config.yaml. UI: http://localhost:4000/ui (sign in with LITELLM_MASTER_KEY).
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-}
+      LITELLM_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/litellm
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/litellm
+      STORE_MODEL_IN_DB: "False"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - nool_network
+
   # Stateless LLM question generation (LlamaIndex workflows) - see
   # services/generation/README.md. Only core calls it; it has no database.
   generation:
@@ -171,6 +201,8 @@ services:
     restart: unless-stopped
     environment:
       SERVICE_NAME: generation
+      LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://litellm:4000}
+      LLM_GATEWAY_KEY: ${LLM_GATEWAY_KEY_GENERATION:-}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -200,6 +232,8 @@ services:
     restart: unless-stopped
     environment:
       SERVICE_NAME: colearner
+      LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-http://litellm:4000}
+      LLM_GATEWAY_KEY: ${LLM_GATEWAY_KEY_COLEARNER:-}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
