@@ -33,7 +33,7 @@ async def get_my_leaderboard(
 
     rank = func.rank().over(order_by=StudentPoints.points.desc())
     rows = await session.execute(
-        select(User.id, User.display_name, StudentPoints.points, rank.label("rank"))
+        select(User.id, User.display_name, StudentPoints.points, rank.label("rank"), User.avatar)
         .join(StudentProfile, StudentProfile.user_id == User.id)
         .join(StudentPoints, StudentPoints.student_id == User.id, isouter=True)
         .where(StudentProfile.class_id == profile.class_id)
@@ -44,10 +44,11 @@ async def get_my_leaderboard(
             student_id=str(student_id),
             display_name=display_name,
             initials=_initials(display_name),
+            avatar=avatar,
             points=points or 0,
             rank=rank_value,
             is_current_student=student_id == user.id,
         )
-        for student_id, display_name, points, rank_value in rows.all()
+        for student_id, display_name, points, rank_value, avatar in rows.all()
     ]
     return ClassLeaderboardOut(class_label=class_label, entries=entries)

@@ -22,6 +22,12 @@ class ProfileOut(CamelModel):
     # endpoint (in addition to Auth's claim-only /me) specifically to read
     # this field - see services/api/meClient.ts's getMyProfile().
     enabled_features: list[Feature] | None
+    # the picture they picked (src/services/avatars.py), None = initials
+    avatar: str | None = None
+
+
+class AvatarIn(CamelModel):
+    avatar: str | None
 
 
 class MeResponse(CamelModel):

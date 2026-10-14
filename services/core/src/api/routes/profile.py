@@ -3,13 +3,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.auth import AuthenticatedUser
-from shared.errors import UnauthorizedError
+from shared.errors import UnauthorizedError, ValidationError
 
 from src.api.deps import get_current_app_user, get_current_user, get_db_session
-from src.api.schemas.profile import MeResponse, ProfileOut
+from src.api.schemas.profile import AvatarIn, MeResponse, ProfileOut
 from src.domain.models import School, User
 from src.repositories import get_by_firebase_uid
 from src.repositories.subscription_repository import get_active_plan
+from src.services.avatars import AVATARS
 from src.services.feature_entitlements import effective_enabled_features
 from src.services.user_provisioning import clear_must_change_password_claim
 
@@ -53,8 +54,23 @@ async def get_me(
             school_logo_data_uri=school_logo_data_uri,
             must_change_password=app_user.must_change_password,
             enabled_features=effective_enabled_features(plan=plan),
+            avatar=app_user.avatar,
         )
     )
+
+
+@router.put("/me/avatar", summary="Pick your picture")
+async def set_my_avatar(
+    body: AvatarIn,
+    user: User = Depends(get_current_app_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, str | None]:
+    """One of the app's avatars, or null for initials - for yourself only."""
+    if body.avatar is not None and body.avatar not in AVATARS:
+        raise ValidationError("Pick one of the avatars shown.")
+    user.avatar = body.avatar
+    await session.commit()
+    return {"avatar": user.avatar}
 
 
 @router.post("/me/acknowledge-password-change")

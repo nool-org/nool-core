@@ -187,6 +187,8 @@ class User(IdMixin, TimestampMixin, Base):
     )
     phone_number: Mapped[str | None] = mapped_column(String, nullable=True)
     employee_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # the picture the user picked - one of AVATARS (src/services/avatars.py); None = initials
+    avatar: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # True from account creation until the invitee changes their temp
     # password - see src/services/user_provisioning.py and
     # POST /api/v1/me/acknowledge-password-change. Mirrored onto the
