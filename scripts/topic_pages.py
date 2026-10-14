@@ -59,8 +59,9 @@ def main(topics_file: str) -> None:
             pattern = re.compile(rf"(^|\n)\s*{re.escape(number.group(1))}\s+\S")
             at = next((i for i, t in enumerate(texts) if pattern.search(t)), None)
         else:  # e.g. "Additional Activities": its own words on a page
-            words = name.strip().upper()
-            at = next((i for i, t in enumerate(texts) if words in t.upper()), None)
+            # kg's "Additional Activities" is the book's end-of-chapter "Group Activity"
+            words = {"ADDITIONAL ACTIVITIES": "GROUP ACTIVITY"}.get(name.strip().upper(), name.strip().upper())
+            at = next((i for i, t in enumerate(texts) if words in " ".join(t.upper().split())), None)
         if at is None:
             print(f"-- not found: {subject} {order}: {name}", file=sys.stderr)
             continue

@@ -308,7 +308,30 @@ class ClassBreakdownOut(CamelModel):
     class_id: str
     label: str
     mastery_avg_percent: int
+    # the class's latest challenge average minus its first one's (0 until it has two)
     improvement_percent: int
+    challenges_taken: int = 0
+    students_assessed: int = 0
+
+
+class WeakChapterOut(CamelModel):
+    """A chapter the school is weakest on, across every class that took a challenge on it."""
+    chapter_id: str
+    chapter: str
+    subject: str
+    average_percent: int
+    students: int
+    classes: list[str]
+
+
+class SlippingStudentOut(CamelModel):
+    """A student whose latest challenge fell well below their own earlier average, or is very low."""
+    student_id: str
+    name: str
+    class_label: str
+    chapter: str
+    latest_percent: int
+    earlier_avg_percent: int | None
 
 
 class MasteryTrendPointOut(CamelModel):
@@ -327,6 +350,8 @@ class SchoolAnalyticsOut(CamelModel):
     class_breakdown: list[ClassBreakdownOut]
     bloom_averages: list[BloomScore]
     mastery_trend: list[MasteryTrendPointOut]
+    weak_chapters: list[WeakChapterOut] = []
+    slipping_students: list[SlippingStudentOut] = []
 
 
 class SchoolSubscriptionOut(CamelModel):

@@ -117,3 +117,36 @@ async def test_compute_school_analytics_never_leaks_across_schools(db_session):
 
     assert result_a.school_mastery_avg_percent == 90
     assert result_b.school_mastery_avg_percent == 10
+
+
+async def test_school_analytics_shows_improvement_weak_chapters_and_slipping_students(db_session):
+    school = await _seed_school(db_session)
+    school_class = SchoolClass(school_id=school.id, grade=10, section="A")
+    subject = Subject(name=f"Subject-{uuid.uuid4()}")
+    db_session.add_all([school_class, subject])
+    await db_session.flush()
+    student = User(firebase_uid=f"s-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com", display_name="Asha",
+                   role=Role.STUDENT, school_id=school.id, status=UserStatus.ACTIVE)
+    db_session.add(student)
+    await db_session.flush()
+    now = datetime.now(timezone.utc)
+    for name, percent, when in (("Light", 80, now - timedelta(days=7)), ("Electricity", 30, now)):
+        chapter = Chapter(subject_id=subject.id, name=name)
+        db_session.add(chapter)
+        await db_session.flush()
+        test = VoiceTest(class_id=school_class.id, subject_id=subject.id, chapter_id=chapter.id, topic_id=None,
+                         duration_minutes=20, completion_window_hours=48, created_at=when,
+                         target_mode=AssignmentTargetMode.WHOLE_CLASS, status=TestStatus.RESULTS_READY)
+        db_session.add(test)
+        await db_session.flush()
+        db_session.add(StudentTestResult(test_id=test.id, student_id=student.id, mastery_percent=percent))
+    await db_session.flush()
+
+    result = await compute_school_analytics(db_session, school.id)
+
+    row = result.class_breakdown[0]
+    assert (row.improvement_percent, row.challenges_taken, row.students_assessed) == (-50, 2, 1)
+    assert [c.chapter for c in result.weak_chapters] == ["Electricity", "Light"]
+    assert result.weak_chapters[0].classes == ["Class 10 · A"]
+    slip = result.slipping_students[0]
+    assert (slip.name, slip.chapter, slip.latest_percent, slip.earlier_avg_percent) == ("Asha", "Electricity", 30, 80)

@@ -618,6 +618,31 @@ async def test_an_exited_session_keeps_its_transcript_but_scores_nothing(schema,
     assert record.transcript == payload["transcript"] and record.needs_review is False
 
 
+
+async def test_an_abandoned_call_is_finished_and_its_cost_recorded_once(schema, monkeypatch):
+    db = schema
+    s = await _prepared(db, monkeypatch)
+    _student, ai_session = await _student_session(db, s)
+    payload = {"report": None, "answers": [], "transcript": [{"role": "user", "text": "hi"}],
+               "cost": {"total_usd": 0.05}}
+    _wire_finish(monkeypatch, db, payload)
+    recorded = []
+
+    async def record(*args, **kwargs):
+        recorded.append(kwargs["cost"])
+    monkeypatch.setattr(ai_assessor.ai_usage, "record", record)
+    monkeypatch.setattr(ai_assessor, "ABANDONED_AFTER_SECONDS", 0)
+
+    ai_assessor._watch_for_abandon(ai_session.id, "c1", "t")  # the app was killed: no finish
+    await asyncio.gather(*ai_assessor._background)
+    ai_assessor._watch_for_abandon(ai_session.id, "c1", "t")  # already has its record: nothing
+    await asyncio.gather(*ai_assessor._background)
+
+    assert len(recorded) == 1
+    record_row = await db.get(AiAssessorSessionRecord, ai_session.id)
+    assert record_row.transcript == payload["transcript"]
+
+
 # ------------------------------------------------ co-learner improvements
 def test_easier_version_is_kept_only_when_complete():
     assert voice_test_prep._easier(EASIER) == EASIER

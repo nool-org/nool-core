@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -49,6 +50,9 @@ router = APIRouter(prefix="/api/v1", tags=["ai-assessor"])
 logger = get_logger(__name__)
 
 VOICE_TEST_GOAL_KEY = "goal-finish-voice-test"
+# colearner hangs a call up by 8 min + 3 min warm-up + grace; past this an unfinished call was abandoned
+ABANDONED_AFTER_SECONDS = 15 * 60
+_background: set[asyncio.Task] = set()
 
 
 @router.post("/ai-assessor/sessions", status_code=201, summary="Open a session")
@@ -319,7 +323,38 @@ async def realtime_offer(
     answer = await create_realtime_call(
         sdp=body.sdp, config=config, owner_ref=str(ai_session.id), token=_bearer(authorization)
     )
+    _watch_for_abandon(ai_session.id, answer["call_id"], _bearer(authorization))
     return RealtimeAnswerOut(sdp=answer["sdp"], call_id=answer["call_id"])
+
+
+def _watch_for_abandon(session_id: uuid.UUID, call_id: str, token: str) -> None:
+    """The app was killed mid-test (no finish ever comes): the call still cost
+    voice minutes. Once it's surely over, finish it here like an `exited` one -
+    its cost recorded, the transcript kept, no score. A finished session
+    already has its record, so this does nothing.
+    ponytail: in-process timer, lost on a Core restart; a sweep over sessions
+    without a record (call_id stored) if that ever matters."""
+    async def run() -> None:
+        await asyncio.sleep(ABANDONED_AFTER_SECONDS)
+        try:
+            async with get_session() as db:
+                if await db.get(AiAssessorSessionRecord, session_id) is not None:
+                    return
+            result = await finish_realtime_call(call_id=call_id, owner_ref=str(session_id), token=token)
+            await ai_usage.record("colearner", "/api/v1/colearner/realtime/calls/finish", "voice_test",
+                                  cost=ai_usage.realtime_cost(result.get("cost")))
+            async with get_session() as db:
+                ai_session = await db.get(AiAssessorSession, session_id)
+                if ai_session is not None and await db.get(AiAssessorSessionRecord, session_id) is None:
+                    await _store_record(db, ai_session, result)
+                    await db.commit()
+            logger.info("ai_assessor_abandoned_call_recorded", extra={"session_id": str(session_id)})
+        except Exception:  # best effort: the student's attempt is unaffected either way
+            logger.warning("ai_assessor_abandoned_call_failed", extra={"session_id": str(session_id)}, exc_info=True)
+
+    task = asyncio.get_running_loop().create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 @router.post("/ai-assessor/sessions/{session_id}/finish", summary="End live voice and record the result")
