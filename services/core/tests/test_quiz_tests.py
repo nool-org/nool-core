@@ -295,3 +295,24 @@ async def test_like_a_voice_co_learner_a_window_from_opening_and_chosen_students
     assert results.student_count == 1
     [listed] = (await routes.list_my_quiz_tests(user=s.teacher, session=db_session)).items
     assert listed.student_count == 1
+
+
+async def test_one_challenge_cycle_per_chapter_per_class(db_session, monkeypatch):
+    s = await _seed(db_session, students=1)
+    for topic in (s.ohm, s.power):
+        await _teach(db_session, s, topic)
+        await _pools(db_session, topic)
+    _stub_analysis(monkeypatch, [])
+    monkeypatch.setattr(service.push, "notify", lambda *a, **k: _noop())
+    first = await _create(db_session, s, monkeypatch)
+    second = await _create(db_session, s, monkeypatch)  # a second draft is fine - nothing is open yet
+
+    await routes.publish_quiz_test(first.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
+    with pytest.raises(ConflictError):  # the chapter's cycle is running - not another
+        await routes.publish_quiz_test(second.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
+    with pytest.raises(ConflictError):
+        await _create(db_session, s, monkeypatch)
+
+
+async def _noop():
+    return None

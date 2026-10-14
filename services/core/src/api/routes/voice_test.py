@@ -44,7 +44,7 @@ from src.repositories.lookups import ensure_students_in_class, get_test_for_teac
 from src.repositories.roster_repository import teaches_class_subject
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_tests
-from src.services import subject_rules, push, voice_test_prep
+from src.services import challenge_rules, subject_rules, push, voice_test_prep
 
 router = APIRouter(prefix="/api/v1", tags=["voice-tests"])
 
@@ -174,6 +174,7 @@ async def create_test(
             raise ValidationError("That topic isn't part of this chapter.")
     if body.target.mode == AssignmentTargetMode.SPECIFIC_STUDENTS and not body.target.student_ids:
         raise ValidationError("target.studentIds must be non-empty when mode is SPECIFIC_STUDENTS.")
+    await challenge_rules.ensure_one_per_chapter(session, body.class_id, body.chapter_id)
 
     plan = await get_active_plan(session, user.school_id)
     if plan is not None and plan.test_limit is not None:
@@ -244,6 +245,7 @@ async def schedule_test(
     test = await get_test_for_teacher(session, test_id, user)
     if test.status != TestStatus.DRAFT:
         raise ConflictError("Test isn't in a schedulable state.")
+    await challenge_rules.ensure_one_per_chapter(session, test.class_id, test.chapter_id, ignore_id=test.id)
     test.status = TestStatus.SCHEDULED
     test.scheduled_at = datetime.now(timezone.utc)
     await session.commit()
