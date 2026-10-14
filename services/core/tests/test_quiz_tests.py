@@ -84,7 +84,7 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
     assert all(q.correct_index is not None for q in detail.questions)  # the teacher sees the answers
 
     # not open yet: students don't see it and can't start it
-    assert not [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
+    assert not [t for t in (await task_routes.get_my_tasks(BackgroundTasks(), user=s.student, session=db_session)).tasks
                 if t.kind == "quiz_test"]
     with pytest.raises(NotFoundError):
         await routes.start_my_quiz_test(created.id, user=s.student, session=db_session)
@@ -97,7 +97,7 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
     out = await routes.publish_quiz_test(created.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
     assert out.status == "published" and sent == [({k.id for k in s.students}, f"New challenge: {created.title}")]
 
-    [task] = [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
+    [task] = [t for t in (await task_routes.get_my_tasks(BackgroundTasks(), user=s.student, session=db_session)).tasks
               if t.kind == "quiz_test"]
     assert [(st.kind, st.status) for st in task.steps] == [
         ("test", "current"), ("homework", "locked"), ("test_recheck", "locked")]
@@ -124,7 +124,7 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
     first = await db_session.get(service.DailyPracticeSession, service.uuid.UUID(attempt.id))
     first.analysis = {**first.analysis, "homework_skipped": True}  # (no dataset to make it from)
     await db_session.flush()
-    [task] = [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
+    [task] = [t for t in (await task_routes.get_my_tasks(BackgroundTasks(), user=s.student, session=db_session)).tasks
               if t.kind == "quiz_test"]
     assert task.steps[2].kind == "test_recheck" and task.steps[2].status == "current"
     look = await routes.start_my_quiz_test(created.id, attempt=2, user=s.student, session=db_session)
@@ -133,7 +133,7 @@ async def test_teacher_creates_reviews_publishes_and_sees_results(db_session, mo
     await _answer(db_session, s, look, {R, U, B.APPLY, B.ANALYZE, B.EVALUATE, B.CREATE})
     await quiz_routes.finish_my_topic_quiz(look.id, background_tasks=BackgroundTasks(), user=s.student,
                                            session=db_session)
-    [task] = [t for t in (await task_routes.get_my_tasks(user=s.student, session=db_session)).tasks
+    [task] = [t for t in (await task_routes.get_my_tasks(BackgroundTasks(), user=s.student, session=db_session)).tasks
               if t.kind == "quiz_test"]
     assert (task.state, task.result) == ("done", "Mastered")
     results = await routes.get_quiz_test_results(created.id, user=s.teacher, session=db_session)
@@ -288,7 +288,7 @@ async def test_like_a_voice_co_learner_a_window_from_opening_and_chosen_students
     assert abs((out.due_at - out.opens_at).total_seconds() - 24 * 3600) < 1
 
     async def mine(student):
-        return [t for t in (await task_routes.get_my_tasks(user=student, session=db_session)).tasks
+        return [t for t in (await task_routes.get_my_tasks(BackgroundTasks(), user=student, session=db_session)).tasks
                 if t.kind == "quiz_test"]
     assert len(await mine(chosen)) == 1 and await mine(other) == []
     results = await routes.get_quiz_test_results(created.id, user=s.teacher, session=db_session)

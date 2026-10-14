@@ -475,11 +475,44 @@ async def prebuild(student_id, topic_id, attempt: int = 1) -> bool:
                     await start(session, student, str(topic_id), attempt, early=True)
                 await session.commit()
                 return True
-            except (ConflictError, NotFoundError):  # raised before anything is written
+            except (ConflictError, NotFoundError) as e:  # raised before anything is written
+                logger.info("topic_quiz_prebuild_skipped", extra={
+                    "student_id": str(student_id), "topic_id": str(topic_id), "attempt": attempt, "reason": str(e)[:200]})
                 return False
     except Exception:
         logger.exception("topic_quiz_prebuild_failed", extra={"student_id": str(student_id), "topic_id": str(topic_id)})
         return False
+
+
+_healing: set = set()
+
+
+async def heal(student_id) -> None:
+    """Self-heal, run after the student's task list loads: a topic they can see
+    whose checkpoint isn't built (its prebuild failed, or they joined the class
+    later), or a re-check not built while their homework is going, gets built
+    now - so it's ready by the time they tap it, not built while they wait.
+    One run per student at a time; logged, never raised."""
+    from src.repositories import get_session
+
+    if student_id in _healing:
+        return
+    _healing.add(student_id)
+    try:
+        async with get_session() as session:
+            student = await session.get(User, student_id)
+            if student is None:
+                return
+            loops = await loop_of(session, student)
+        todo = [(lp.topic.id, 1) for lp in loops if lp.quiz is None]
+        todo += [(lp.topic.id, 2) for lp in loops
+                 if lp.recheck is None and lp.stage in ("homework", "homework_pending", "recheck")]
+        for topic_id, attempt in todo:
+            await prebuild(student_id, topic_id, attempt=attempt)
+    except Exception:
+        logger.exception("topic_quiz_heal_failed", extra={"student_id": str(student_id)})
+    finally:
+        _healing.discard(student_id)
 
 
 async def prebuild_class(class_id, topic_id, notify: bool = False) -> None:

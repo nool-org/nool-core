@@ -467,3 +467,29 @@ async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, m
     assert a.per_bloom["ANALYZE"] == 100 and a.per_bloom["EVALUATE"] == 0 and "EVALUATE" in a.lagging
     assert list(a.per_bloom) == ["REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE", "EVALUATE"]  # Bloom order
     assert any(m["question"].startswith("(fix steps)") for m in calls[0]["missed"])
+
+
+async def test_heal_builds_a_shown_checkpoint_whose_prebuild_never_happened(db_session, monkeypatch):
+    import contextlib
+
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)  # taught long ago, never prebuilt (it failed, or the student joined later)
+    await _pools(db_session, s.ohm)
+    assert (await _stage(db_session, s, s.ohm)).quiz_id is None
+
+    class Proxy:
+        def __getattr__(self, name):
+            return getattr(db_session, name)
+
+        async def commit(self):
+            await db_session.flush()
+
+    @contextlib.asynccontextmanager
+    async def own_session():
+        yield Proxy()
+
+    monkeypatch.setattr("src.repositories.get_session", own_session)
+    await service.heal(s.student.id)
+
+    loop = await _stage(db_session, s, s.ohm)
+    assert loop.stage == "quiz" and loop.quiz_id is not None  # ready before the student taps it

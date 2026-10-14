@@ -44,7 +44,7 @@ def _steps(task):
 
 
 async def _task(db, student, task_id):
-    return next(t for t in (await routes.get_my_tasks(user=student, session=db)).tasks if t.id == task_id)
+    return next(t for t in (await routes.get_my_tasks(BackgroundTasks(), user=student, session=db)).tasks if t.id == task_id)
 
 
 async def test_topic_task_walks_quiz_homework_recheck(db_session, monkeypatch):
@@ -91,7 +91,7 @@ async def test_mastered_at_the_first_quiz_skips_homework_and_moves_down(db_sessi
     await _answer(db_session, s, quiz, {"REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE"})
     await _finish(db_session, s, quiz)
 
-    tasks = (await routes.get_my_tasks(user=s.student, session=db_session)).tasks
+    tasks = (await routes.get_my_tasks(BackgroundTasks(), user=s.student, session=db_session)).tasks
     assert [t.id for t in tasks] == [f"topic:{s.power.id}", f"topic:{s.ohm.id}"]  # open first, then done
     ohm = tasks[1]
     assert ohm.state == "done" and ohm.result == "Mastered"
