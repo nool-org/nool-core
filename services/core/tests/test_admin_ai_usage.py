@@ -204,3 +204,27 @@ def test_only_super_admin(_core_env, path, role):
 
 def test_requires_authentication(client):
     assert client.get("/api/v1/admin/ai-usage/summary").status_code == 401
+
+
+async def test_summary_end_to_end_cost_by_service_teacher_and_wasted(db_session):
+    seed = await _seed(db_session)
+    seed.events[3].service = "colearner"  # the live voice test
+    await db_session.flush()
+    s = await _summary(db_session, seed)
+    services = {x.service: (x.requests, x.cost_inr, x.errors) for x in s.by_service}
+    assert services == {"generation": (4, 19, 2), "colearner": (1, 5, 0)}
+    assert [(t.name, t.cost_inr) for t in s.top_teachers] == [("Mrs Rao", 4)]
+    assert (s.wasted.requests, s.wasted.cost_inr) == (2, 7)  # the 503 grading + the refused assistant
+    grade = next(f for f in s.by_feature if f.feature == "practice_grade")
+    assert grade.avg_cost_inr == 2.5  # one use, on average
+
+
+async def test_events_trace_by_service_student_and_teacher(db_session):
+    seed = await _seed(db_session)
+    seed.events[3].service = "colearner"
+    await db_session.flush()
+    assert [e.feature for e in (await _events(db_session, seed, service="colearner")).items] == ["voice_test"]
+    assert {e.feature for e in (await _events(db_session, seed, student_id=seed.asha.id)).items} == {
+        "homework", "practice_grade"}
+    [only] = (await _events(db_session, seed, teacher_id=seed.teacher.id)).items
+    assert only.feature == "assistant" and only.calls == 1 and only.models == []

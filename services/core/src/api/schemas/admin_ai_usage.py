@@ -40,6 +40,8 @@ class AiUsageFeatureOut(CamelModel):
     share: float  # of the range's total cost, 0-1
     avg_latency_ms: int | None
     error_rate: float
+    cost_usd: float = 0.0
+    avg_cost_inr: float = 0.0  # what one use costs: cost / requests
 
 
 class AiUsageModelOut(CamelModel):
@@ -67,6 +69,28 @@ class AiUsageStudentOut(CamelModel):
     cost_inr: float
 
 
+class AiUsageServiceOut(CamelModel):
+    service: str  # generation | colearner | kg
+    requests: int
+    cost_inr: float
+    cost_usd: float
+    errors: int
+
+
+class AiUsageTeacherOut(CamelModel):
+    teacher_id: str
+    name: str | None
+    school_name: str | None
+    requests: int
+    cost_inr: float
+
+
+class AiUsageWastedOut(CamelModel):
+    """Failed requests that still cost something (a model ran, the result was lost)."""
+    requests: int
+    cost_inr: float
+
+
 class AiUsageBudgetOut(CamelModel):
     monthly_inr: float | None  # AI_MONTHLY_BUDGET_INR; None = no budget set
     spent_this_month_inr: float  # platform-wide, current IST month
@@ -82,6 +106,9 @@ class AiUsageSummaryOut(CamelModel):
     by_school: list[AiUsageSchoolOut]
     top_students: list[AiUsageStudentOut]
     budget: AiUsageBudgetOut
+    by_service: list[AiUsageServiceOut] = []
+    top_teachers: list[AiUsageTeacherOut] = []
+    wasted: AiUsageWastedOut | None = None
 
 
 class AiUsageEventOut(CamelModel):
@@ -101,6 +128,10 @@ class AiUsageEventOut(CamelModel):
     latency_ms: int | None
     status: int
     error: str | None
+    models: list[str] = []
+    cached_input_tokens: int = 0
+    request_id: str | None = None  # find this request in the services' logs
+    calls: int = 1
 
 
 class AiUsageEventsOut(CamelModel):
@@ -116,4 +147,5 @@ class AiUsageSchoolOptionOut(CamelModel):
 class AiUsageFiltersOut(CamelModel):
     features: list[str]
     models: list[str]
+    services: list[str] = []
     schools: list[AiUsageSchoolOptionOut]

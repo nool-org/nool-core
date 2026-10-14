@@ -8,7 +8,7 @@ import base64
 import calendar
 import uuid
 from datetime import date, datetime, time, timedelta
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
@@ -30,6 +30,9 @@ from src.api.schemas.admin_ai_usage import (
     AiUsageRangeOut,
     AiUsageSchoolOptionOut,
     AiUsageSchoolOut,
+    AiUsageServiceOut,
+    AiUsageTeacherOut,
+    AiUsageWastedOut,
     AiUsageStudentOut,
     AiUsageSummaryOut,
     AiUsageTotalsOut,
@@ -147,9 +150,11 @@ async def get_ai_usage_summary(
 
     by_feature = [
         AiUsageFeatureOut(feature=feat, requests=n, cost_inr=round(float(c), 4), share=_ratio(float(c), inr),
-                          avg_latency_ms=_int(lat), error_rate=_ratio(n_err, n))
-        for feat, n, c, lat, n_err in (await session.execute(
-            select(E.feature, func.count(), cost, func.avg(E.latency_ms), func.count().filter(IS_ERROR))
+                          avg_latency_ms=_int(lat), error_rate=_ratio(n_err, n), cost_usd=round(float(u), 6),
+                          avg_cost_inr=_ratio(float(c), n))
+        for feat, n, c, lat, n_err, u in (await session.execute(
+            select(E.feature, func.count(), cost, func.avg(E.latency_ms), func.count().filter(IS_ERROR),
+                   func.coalesce(func.sum(E.usd), 0))
             .where(*where).group_by(E.feature).order_by(cost.desc(), E.feature)
         )).all()
     ]
@@ -182,10 +187,31 @@ async def get_ai_usage_summary(
             .group_by(E.student_id, User.display_name).order_by(cost.desc(), E.student_id).limit(TOP_STUDENTS)
         )).all()
     ]
+    by_service = [
+        AiUsageServiceOut(service=svc, requests=n, cost_inr=round(float(c), 4), cost_usd=round(float(u), 6),
+                          errors=n_err)
+        for svc, n, c, u, n_err in (await session.execute(
+            select(E.service, func.count(), cost, func.coalesce(func.sum(E.usd), 0), func.count().filter(IS_ERROR))
+            .where(*where).group_by(E.service).order_by(cost.desc())
+        )).all()
+    ]
+    top_teachers = [
+        AiUsageTeacherOut(teacher_id=str(tid), name=name, school_name=school_name, requests=n,
+                          cost_inr=round(float(c), 4))
+        for tid, name, school_name, n, c in (await session.execute(
+            select(E.teacher_id, User.display_name, func.max(School.name), func.count(), cost)
+            .outerjoin(User, User.id == E.teacher_id)
+            .outerjoin(School, School.id == E.school_id)
+            .where(*where, E.teacher_id.is_not(None))
+            .group_by(E.teacher_id, User.display_name).order_by(cost.desc(), E.teacher_id).limit(TOP_STUDENTS)
+        )).all()
+    ]
+    w = (await session.execute(select(func.count(), cost).where(*where, IS_ERROR, E.inr > 0))).one()
     return AiUsageSummaryOut(
         range=AiUsageRangeOut(from_=from_, to=to), totals=totals, by_day=list(by_day.values()),
         by_feature=by_feature, by_model=by_model, by_school=by_school, top_students=top_students,
-        budget=await _budget(session),
+        budget=await _budget(session), by_service=by_service, top_teachers=top_teachers,
+        wasted=AiUsageWastedOut(requests=w[0], cost_inr=round(float(w[1]), 4)),
     )
 
 
@@ -209,6 +235,9 @@ async def list_ai_usage_events(
     feature: str | None = Query(default=None, max_length=50),
     model: str | None = Query(default=None, max_length=100),
     status: Literal["ok", "error"] | None = Query(default=None),
+    service: Annotated[str | None, Query(max_length=20)] = None,
+    student_id: Annotated[uuid.UUID | None, Query(alias="studentId")] = None,
+    teacher_id: Annotated[uuid.UUID | None, Query(alias="teacherId")] = None,
     q: str | None = Query(default=None, max_length=100),
     cursor: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=50, ge=1, le=200),
@@ -228,6 +257,12 @@ async def list_ai_usage_events(
     )
     if status:
         stmt = stmt.where(IS_ERROR if status == "error" else ~IS_ERROR)
+    if service:
+        stmt = stmt.where(E.service == service)
+    if student_id:
+        stmt = stmt.where(E.student_id == student_id)
+    if teacher_id:
+        stmt = stmt.where(E.teacher_id == teacher_id)
     if q and q.strip():
         like = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         stmt = stmt.where(or_(*(col.ilike(like, escape="\\") for col in (
@@ -242,6 +277,8 @@ async def list_ai_usage_events(
             model=e.model, school_name=school_name, student_name=student_name, teacher_name=teacher_name,
             input_tokens=e.input_tokens, output_tokens=e.output_tokens, cost_usd=float(e.usd),
             cost_inr=float(e.inr), latency_ms=e.latency_ms, status=e.status, error=e.error,
+            models=list(e.models or []), cached_input_tokens=e.cached_input_tokens, request_id=e.request_id,
+            calls=e.calls,
         )
         for e, school_name, student_name, teacher_name in rows[:limit]
     ]
@@ -257,5 +294,6 @@ async def get_ai_usage_filters(
     features = (await session.execute(select(E.feature).distinct().order_by(E.feature))).scalars().all()
     models = (await session.execute(select(func.jsonb_array_elements_text(E.models)).distinct())).scalars().all()
     schools = (await session.execute(select(School.id, School.name).order_by(School.name))).all()
-    return AiUsageFiltersOut(features=list(features), models=sorted(models),
+    services = (await session.execute(select(E.service).distinct().order_by(E.service))).scalars().all()
+    return AiUsageFiltersOut(features=list(features), models=sorted(models), services=list(services),
                              schools=[AiUsageSchoolOptionOut(id=str(sid), name=name) for sid, name in schools])
