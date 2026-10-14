@@ -14,7 +14,7 @@ async def paper_plan(body: PlanRequest, request: Request) -> PlanResult:
     if llm is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
     settings = get_settings()
-    return await plan_paper(llm, body, plan_model=settings.verify_model, write_model=settings.generation_model)
+    return await plan_paper(llm, body, plan_model=settings.verify_model, write_model=settings.writer_model("paper"))
 
 
 @router.post("/transcribe", response_model=TranscribeResult)

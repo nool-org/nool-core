@@ -147,6 +147,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       NOOL_KG_BASE_URL: ${NOOL_KG_BASE_URL:-https://nool-data.draco-labs.in}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      KG_MODEL: ${KG_MODEL:-gpt-5.1}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     volumes:
       - ./shared:/app/shared
@@ -208,6 +209,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GENERATION_MODEL: ${GENERATION_MODEL:-gpt-5.1}
       VERIFY_MODEL: ${VERIFY_MODEL:-gpt-5-mini}
+      TASK_MODELS: ${TASK_MODELS:-{}}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     volumes:
       - ./shared:/app/shared

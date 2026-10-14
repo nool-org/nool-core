@@ -16,6 +16,6 @@ async def gap_fill(body: GapFillRequest, request: Request) -> GapFillResult:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
     settings = get_settings()
     return await fill_gaps(
-        llm, body, generation_model=settings.generation_model, verify_model=settings.verify_model,
+        llm, body, generation_model=settings.writer_model("gap_fill"), verify_model=settings.verify_model,
         timeout=settings.request_timeout_seconds,
     )

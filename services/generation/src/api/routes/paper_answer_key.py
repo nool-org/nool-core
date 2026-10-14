@@ -14,4 +14,4 @@ async def paper_answer_key(body: AnswerKeyRequest, request: Request) -> AnswerKe
     if llm is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
     settings = get_settings()
-    return await answer_key(llm, body, generation_model=settings.generation_model, verify_model=settings.verify_model)
+    return await answer_key(llm, body, generation_model=settings.writer_model("answer_key"), verify_model=settings.verify_model)

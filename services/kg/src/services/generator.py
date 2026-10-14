@@ -10,6 +10,7 @@ context plus a request shape into grounded questions.
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 
 from openai import AsyncOpenAI
@@ -17,7 +18,8 @@ from openai import AsyncOpenAI
 from shared import llm_gateway
 from src.services import cost
 
-MODEL = "gpt-5.1"
+# KG_MODEL swaps the paper/context writer (e.g. gpt-5-mini) once its eval holds up
+MODEL = os.environ.get("KG_MODEL") or "gpt-5.1"
 MAX_COMPLETION_TOKENS = 16000
 # max_retries gives the SDK's own exponential backoff on 429/5xx/timeouts.
 OPENAI_TIMEOUT_SECONDS = 90.0

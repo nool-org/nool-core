@@ -16,6 +16,6 @@ async def voice_test_prep(body: PrepRequest, request: Request) -> PrepResult:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
     settings = get_settings()
     return await prep_questions(
-        llm, body, generation_model=settings.generation_model, verify_model=settings.verify_model,
+        llm, body, generation_model=settings.writer_model("voice_prep"), verify_model=settings.verify_model,
         timeout=settings.request_timeout_seconds,
     )

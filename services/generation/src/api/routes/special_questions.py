@@ -12,5 +12,5 @@ async def special(body: service.SpecialRequest, request: Request) -> service.Spe
     if llm is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "OPENAI_API_KEY is not configured.")
     settings = get_settings()
-    return await service.write_questions(llm, body, model=settings.generation_model,
+    return await service.write_questions(llm, body, model=settings.writer_model("special_questions"),
                                          verify_model=settings.verify_model)
