@@ -145,7 +145,7 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
         steps = [voice, hw_step, check_step]
         out.append({"id": f"test:{test.id}", "kind": "test",
                     "title": chapter.name if chapter else "Co-learner",
-                    "subtitle": "Co-learner · talk it through with Milo",
+                    "subtitle": "Speak with Milo · talk it through",
                     "chapter_id": str(test.chapter_id), "chapter_name": chapter.name if chapter else None,
                     "subject": subject.name if subject else None,
                     "state": _chain_state(steps), "result": None, "steps": steps,
