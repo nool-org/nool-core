@@ -33,7 +33,10 @@ services:
       dockerfile: services/core/Dockerfile
     restart: "no"
     working_dir: /app/database
-    command: ["alembic", "upgrade", "head"]
+    # the AI gateway's database first (scripts/ensure_litellm_db.py), then Core's schema
+    command: ["sh", "-c", "python /app/scripts/ensure_litellm_db.py && alembic upgrade head"]
+    volumes:
+      - ./scripts/ensure_litellm_db.py:/app/scripts/ensure_litellm_db.py:ro
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -79,6 +82,13 @@ services:
       nool-kg:
         condition: service_started
         required: false
+
+  # The AI gateway (compose.yml): internal only, its database created by migrate.
+  litellm:
+    ports: !reset []
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   generation:
     command: !reset null
