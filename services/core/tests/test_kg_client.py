@@ -67,7 +67,7 @@ async def test_get_curriculum_tree_raises_service_unavailable_on_connection_erro
 async def test_generate_assessor_content_returns_context_and_no_reference_questions(monkeypatch):
     monkeypatch.setattr(kg_client, "_base_url", lambda: "http://kg-test")
 
-    async def fake_post(self, path, json=None):
+    async def fake_post(self, path, json=None, headers=None):
         assert path == "/voice-tests/generate"
         return _FakeResponse(200, {"textbook_context": "Rusting is...", "reference_questions": ["stale"]})
 

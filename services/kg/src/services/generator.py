@@ -14,6 +14,8 @@ from functools import lru_cache
 
 from openai import AsyncOpenAI
 
+from src.services import cost
+
 MODEL = "gpt-5.1"
 MAX_COMPLETION_TOKENS = 16000
 # max_retries gives the SDK's own exponential backoff on 429/5xx/timeouts.
@@ -186,6 +188,7 @@ async def generate_assessor_content(*, api_key: str, concept_context: list[dict]
         },
     )
 
+    cost.log_chat_usage(MODEL, getattr(response, "usage", None))
     message = response.choices[0].message
     if message.refusal or message.content is None:
         raise RuntimeError(f"Model refused or returned no content: {message.refusal}")
@@ -237,6 +240,7 @@ async def generate_questions(
         },
     )
 
+    cost.log_chat_usage(MODEL, getattr(response, "usage", None))
     message = response.choices[0].message
     if message.refusal or message.content is None:
         raise RuntimeError(f"Model refused or returned no content: {message.refusal}")

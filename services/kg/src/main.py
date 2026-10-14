@@ -9,6 +9,7 @@ from shared.observability import configure_observability
 
 from src.api.routes import curriculum, health, question_paper, ready, voice_test
 from src.config.settings import get_settings
+from src.services import cost
 from src.services.nool_kg_client import dispose_client, init_client
 
 
@@ -28,6 +29,19 @@ def create_app() -> FastAPI:
     app = FastAPI(title="nool-core KG Service", lifespan=lifespan)
 
     app.add_middleware(RequestContextMiddleware)
+
+    @app.middleware("http")
+    async def cost_header(request, call_next):
+        """Returns this request's model spend to Core as X-Nool-Cost (services/cost.py)."""
+        spend = cost.new_spend()
+        token = cost.spent.set(spend)
+        try:
+            response = await call_next(request)
+        finally:
+            cost.spent.reset(token)
+        if spend["calls"]:
+            response.headers["X-Nool-Cost"] = cost.cost_header(spend)
+        return response
     register_exception_handlers(app)
     configure_tracing(app, settings.service_name, settings.otel_exporter_otlp_endpoint)
     configure_observability(app, settings)

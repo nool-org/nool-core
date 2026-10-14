@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import logging
 
+import time
+
 import httpx
 
 from shared.errors import AppError
 
 from src.config.settings import get_settings
+from src.services import ai_context, ai_usage
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +33,28 @@ def _base_url() -> str:
     return settings.kg_service_url.rstrip("/")
 
 
+# kg's model calls, by path - each one's cost is logged (ai_usage_events) like generation's
+AI_FEATURES = {
+    "/question-papers/generate": "paper_kg",
+    "/question-papers/replacement-candidates": "paper_replace",
+    "/voice-tests/generate": "voice_context",
+}
+
+
 async def _post(path: str, json: dict, *, timeout: float) -> dict:
+    feature = AI_FEATURES.get(path)
+    started = time.perf_counter()
+    response = None
     try:
         async with httpx.AsyncClient(base_url=_base_url(), timeout=timeout) as client:
-            response = await client.post(path, json=json)
+            response = await client.post(path, json=json, headers=ai_context.headers(feature) if feature else None)
+            if feature:
+                await ai_usage.record("kg", path, feature, started=started, response=response)
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as exc:
+        if feature and response is None:  # never reached kg - a failed request, still on the books
+            await ai_usage.record("kg", path, feature, started=started, error=exc)
         logger.warning("kg_service_upstream_error", extra={"path": path, "reason": str(exc)})
         raise KgServiceUnavailableError("Could not reach the knowledge-graph service. Try again.") from exc
 
