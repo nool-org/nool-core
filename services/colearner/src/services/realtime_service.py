@@ -51,7 +51,7 @@ VOICE = "marin"
 _OPENAI = "https://api.openai.com/v1/realtime"
 # After the session's time limit the co-learner gets this long to wrap up,
 # then we hang up regardless - an abandoned call must not keep billing.
-_GRACE_SECONDS = 30
+_GRACE_SECONDS = 20  # the app closes the test 20 s after time's up (TIME_LIMIT_BACKSTOP_MS)
 # After end_session the goodbye (summary + sign-off) gets this long to play - the
 # test clock is off by then - then we hang up if the app hasn't finished the call.
 _CLOSING_GRACE_SECONDS = 60
@@ -209,6 +209,12 @@ class RealtimeCall:
     # Pending [SILENCE] check-in (see _arm_silence), cancelled as soon as anyone speaks.
     silence_task: asyncio.Task | None = None
     student_speaking: bool = False
+    # One reply at a time: the API refuses response.create while one is in progress
+    # (conversation_already_has_active_response) and the refused reply never comes -
+    # the student is left on "thinking". A reply asked for mid-reply waits here.
+    response_active: bool = False
+    response_since: float = 0.0  # loop time it went active - a stale flag can't block replies forever
+    pending_response: str | None = None
     # Client pauses (see _pause_marker): when the current one began (loop time), the
     # paused seconds credited to the clock so far, how many, and the live time limit.
     paused_at: float | None = None
@@ -362,7 +368,7 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
         ) as ws:
             # The model speaks first (greeting) - nothing arrives from the
             # student until they hear it.
-            await ws.send(json.dumps({"type": "response.create"}))
+            await _send_response(call, ws, json.dumps({"type": "response.create"}))
             try:
                 # absolute cap until question 1 starts the real clock (_start_clock)
                 limit = call_time_limit(call.state.config) + READY_ALLOWANCE_SECONDS
@@ -385,7 +391,7 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
                     "type": "conversation.item.create",
                     "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "[TIME_UP]"}]},
                 }))
-                await ws.send(json.dumps({"type": "response.create"}))
+                await _send_response(call, ws, json.dumps({"type": "response.create"}))
                 try:
                     await asyncio.wait_for(_record(call, ws), timeout=_GRACE_SECONDS)
                 except asyncio.TimeoutError:
@@ -433,6 +439,8 @@ async def _record(call: RealtimeCall, ws) -> None:
         elif kind == "output_audio_buffer.started":
             _cancel_silence(call)  # Milo is speaking
         elif kind == "response.created":
+            call.response_active = True
+            call.response_since = asyncio.get_running_loop().time()
             _cancel_silence(call)
             if call.paused_at is not None and not call.time_up:
                 # the app asks for no reply while paused - but nothing may talk to an empty room
@@ -463,6 +471,10 @@ async def _record(call: RealtimeCall, ws) -> None:
             entry = call.items.setdefault(event["item_id"], {"role": "assistant", "text": ""})
             entry["text"] = (event.get("transcript") or "").strip()
         elif kind == "response.done":
+            call.response_active = False
+            if call.pending_response is not None:  # the reply asked for while this one was going
+                waiting, call.pending_response = call.pending_response, None
+                await _send_response(call, ws, waiting)
             add_realtime_usage(call.usage, (event.get("response") or {}).get("usage"))
             outputs = (event.get("response") or {}).get("output") or []
             if any(o.get("type") == "message" for o in outputs):
@@ -481,7 +493,7 @@ async def _record(call: RealtimeCall, ws) -> None:
                     "item": {"type": "function_call_output", "call_id": end.get("call_id"),
                              "output": json.dumps({"error": "The test can't end before every question is answered."})},
                 }))
-                await ws.send(json.dumps({
+                await _send_response(call, ws, json.dumps({
                     "type": "response.create",
                     "response": {"instructions": END_REFUSED_INSTRUCTIONS, "tool_choice": "none",
                                  "max_output_tokens": reply_tokens(call.state.config)},
@@ -498,7 +510,7 @@ async def _record(call: RealtimeCall, ws) -> None:
                     "item": {"type": "function_call_output", "call_id": end.get("call_id"), "output": "{\"ok\": true}"},
                 }))
                 call.closing_sent = True
-                await ws.send(json.dumps({
+                await _send_response(call, ws, json.dumps({
                     "type": "response.create",
                     "response": {"instructions": CLOSING_INSTRUCTIONS, "tool_choice": "none",
                                  "max_output_tokens": MAX_CLOSING_TOKENS},
@@ -507,7 +519,7 @@ async def _record(call: RealtimeCall, ws) -> None:
                 # the model's reply to the final answer was cancelled above -
                 # now make it end the session (which then triggers the goodbye)
                 call.forced_end_sent = True
-                await ws.send(json.dumps({
+                await _send_response(call, ws, json.dumps({
                     "type": "response.create",
                     "response": {
                         "instructions": "The student has answered the final question. Call end_session now, without speaking.",
@@ -521,6 +533,11 @@ async def _record(call: RealtimeCall, ws) -> None:
                 _arm_silence(call, ws)
         elif kind == "error":
             logger.warning("realtime_event_error call_id=%s error=%s", call.call_id, event.get("error"))
+            if (event.get("error") or {}).get("code") != "conversation_already_has_active_response":
+                call.response_active = False  # whatever was asked for isn't coming - don't hold the next one
+                if call.pending_response is not None:
+                    waiting, call.pending_response = call.pending_response, None
+                    await _send_response(call, ws, waiting)
 
 
 END_REFUSED_INSTRUCTIONS = (
@@ -596,10 +613,27 @@ def _arm_silence(call: RealtimeCall, ws) -> None:
         call.silence_task = asyncio.create_task(_silence_after(call, ws, n))
 
 
+RESPONSE_STALE_SECONDS = 30  # a reply "in progress" longer than this is presumed lost
+
+
+async def _send_response(call: RealtimeCall, ws, raw: str) -> None:
+    """Asks for Milo's next reply - at once, or (if one is still in progress)
+    as soon as it's done; the latest ask wins."""
+    now = asyncio.get_running_loop().time()
+    if call.response_active and now - call.response_since < RESPONSE_STALE_SECONDS:
+        call.pending_response = raw
+        return
+    call.response_active = True  # until response.done - also covers the gap before response.created
+    call.response_since = now
+    await ws.send(raw)
+
+
 async def _silence_after(call: RealtimeCall, ws, n: int) -> None:
     await asyncio.sleep(SILENCE_SECONDS)
     call.silence_task = None
     if not _awaiting_answer(call, n) or _progress(call, n)["silences"]:
+        return
+    if call.response_active:  # Milo is mid-reply - the student isn't the quiet one
         return
     _progress(call, n)["silences"] += 1
     with contextlib.suppress(Exception):  # the call may have just closed
@@ -607,7 +641,7 @@ async def _silence_after(call: RealtimeCall, ws, n: int) -> None:
             "type": "conversation.item.create",
             "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "[SILENCE]"}]},
         }))
-        await ws.send(json.dumps({"type": "response.create",
+        await _send_response(call, ws, json.dumps({"type": "response.create",
                                   "response": {"max_output_tokens": reply_tokens(call.state.config)}}))
 
 
@@ -732,14 +766,14 @@ async def _questions_done(call: RealtimeCall, ws, outputs: list[dict]) -> None:
             "item": {"type": "function_call_output", "call_id": fc.get("call_id"), "output": json.dumps(output)},
         }))
     if reply_needed:
-        await ws.send(json.dumps({"type": "response.create",
+        await _send_response(call, ws, json.dumps({"type": "response.create",
                                   "response": {"max_output_tokens": reply_tokens(call.state.config)}}))
     elif (messages and not calls and not call.forcing_end and call.current == len(call.state.config.questions)
           and _progress(call, call.current)["first_item"] is not None and not spoken.rstrip().endswith("?")):
         # Milo acknowledged the final answer but didn't end - make it (the goodbye follows).
         # A reply ending in "?" is a follow-up probe ("Can you tell me why?") - let the student answer it.
         call.forcing_end = call.forced_end_sent = True
-        await ws.send(json.dumps({
+        await _send_response(call, ws, json.dumps({
             "type": "response.create",
             "response": {
                 "instructions": "The student has answered the final question. Call end_session now, without speaking.",
