@@ -328,8 +328,11 @@ async def test_checkpoints_are_built_when_a_topic_is_taught_and_only_then_announ
     monkeypatch.setattr(push, "notify", notify)
     await service.prebuild_class(s.cls.id, s.ohm.id, notify=True)
 
+    s.ohm.page = 175  # the NCERT page it starts on
+    await db_session.flush()
     loop = await _stage(db_session, s, s.ohm)
     assert loop.stage == "quiz" and loop.quiz_id is not None  # built, not started
+    assert loop.topic_page == 175
     assert sent == [([s.student.id], "Your checkpoint is ready", {"type": "topic_quiz", "topicId": str(s.ohm.id)})]
     assert (await _start(db_session, s, s.ohm)).id == loop.quiz_id
 

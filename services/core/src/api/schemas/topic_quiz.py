@@ -19,6 +19,7 @@ class TopicLoopOut(CamelModel):
     homework_id: str | None
     quiz_score: int | None
     recheck_score: int | None
+    topic_page: int | None = None  # the NCERT page it starts on
 
 
 class TopicLoopsOut(CamelModel):
@@ -52,6 +53,8 @@ class TopicQuizOut(CamelModel):
     xp_awarded: int
     analysis: QuizAnalysisOut | None
     quiz_test_id: str | None = None  # an attempt at a teacher's test (topic_id is then "")
+    # the NCERT page to read: the topic's, or for a teacher's test its weakest topic's
+    topic_page: int | None = None
 
 
 class QuizFinishOut(CamelModel):

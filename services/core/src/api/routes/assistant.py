@@ -1,11 +1,12 @@
 import logging
 import time
+import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ValidationError
+from shared.errors import NotFoundError, ValidationError
 
 from src.api.deps import get_db_session, require_feature, require_role
 from src.api.schemas.assistant import ChatMessageOut, SendMessageIn, TeacherSummaryOut
@@ -93,11 +94,24 @@ async def send_message(
     )).scalars().all()
     session.add(AssistantMessage(teacher_id=user.id, role=ChatRole.USER, text=text))
     try:
-        # real answers, grounded in this teacher's own classes, tests and homework
+        # real answers, grounded in this teacher's own classes, tests and homework - only the
+        # challenge they picked, when they picked one
+        scope = {}
+        for key, value in (("voice_test_id", body.test_id), ("quiz_test_id", body.quiz_test_id)):
+            if value:
+                try:
+                    scope[key] = uuid.UUID(value)
+                except ValueError:
+                    raise ValidationError("Unknown challenge.")
+        facts = await build_teacher_facts(session, user, **scope)
+        question = text
+        if body.focus_label:
+            facts["teacher_is_asking_about"] = body.focus_label
+            question = f"(About {body.focus_label}) {text}"
         answer = await generation_client.assistant_reply(
-            await build_teacher_facts(session, user),
+            facts,
             [{"role": "teacher" if m.role == ChatRole.USER else "assistant", "text": m.text} for m in reversed(history)],
-            text,
+            question,
         )
     except generation_client.GenerationServiceUnavailableError:
         logger.warning("assistant_llm_unavailable")
@@ -134,6 +148,44 @@ async def teacher_summary(
         bullets = [b for b in bullets if not b.strip().lower().startswith(("no ", "there are no", "nothing "))]
     except generation_client.GenerationServiceUnavailableError:
         logger.warning("teacher_summary_llm_unavailable")
+        return TeacherSummaryOut(bullets=[])
+    _summaries[key] = (time.monotonic(), bullets)
+    return TeacherSummaryOut(bullets=bullets)
+
+
+@router.get("/teacher/summary/challenge", summary="AI summary of one challenge's results")
+async def challenge_summary(
+    voice_test_id: str | None = Query(default=None, alias="testId"),
+    quiz_test_id: str | None = Query(default=None, alias="quizTestId"),
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.ASSISTANT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> TeacherSummaryOut:
+    """2-3 bullets on one Speak with Milo or Fix Milo challenge - how the
+    class did, who needs help, what to do next - shown on its results page.
+    Only the teacher's own challenges (the facts are scoped like GET /tests).
+    Cached 15 min per challenge; empty when there's nothing yet or the model is down."""
+    if (voice_test_id is None) == (quiz_test_id is None):
+        raise ValidationError("Give exactly one of testId or quizTestId.")
+    try:
+        target = uuid.UUID(voice_test_id or quiz_test_id)
+    except ValueError:
+        raise NotFoundError("No such challenge.")
+    key = f"{user.id}:{target}"
+    cached = _summaries.get(key)
+    if cached and time.monotonic() - cached[0] < SUMMARY_TTL_SECONDS:
+        return TeacherSummaryOut(bullets=cached[1])
+    facts = await build_teacher_facts(session, user, voice_test_id=target if voice_test_id else None,
+                                      quiz_test_id=target if quiz_test_id else None)
+    found = facts["recent_voice_tests"] or facts["open_challenges"]
+    if not found:
+        raise NotFoundError("No such challenge.")
+    if not any(t.get("class_average_percent") is not None for t in found):
+        return TeacherSummaryOut(bullets=[])  # no results yet - nothing worth a model call
+    try:
+        bullets = await generation_client.teacher_summary(facts)
+    except generation_client.GenerationServiceUnavailableError:
+        logger.warning("challenge_summary_llm_unavailable")
         return TeacherSummaryOut(bullets=[])
     _summaries[key] = (time.monotonic(), bullets)
     return TeacherSummaryOut(bullets=bullets)

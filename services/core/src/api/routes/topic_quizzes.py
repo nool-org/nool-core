@@ -3,6 +3,8 @@
 POST /me/daily-practice/{sessionId}/items/{itemId}/mcq - a quiz is a
 practice session."""
 
+import uuid
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,10 +44,12 @@ async def _quiz_out(session: AsyncSession, quiz: DailyPracticeSession) -> TopicQ
     if quiz.quiz_test_id is not None:
         test = await session.get(QuizTest, quiz.quiz_test_id)
         topic_id, name = "", test.title
+        focus = (quiz.analysis or {}).get("focus_topic_id")
+        page = (await session.get(Topic, uuid.UUID(focus))).page if focus else None
     else:
         topic = await session.get(Topic, quiz.topic_id)
-        topic_id, name = str(topic.id), daily_practice.tidy(topic.name)
-    return TopicQuizOut(id=str(quiz.id), topic_id=topic_id, topic_name=name, attempt=quiz.attempt,
+        topic_id, name, page = str(topic.id), daily_practice.tidy(topic.name), topic.page
+    return TopicQuizOut(id=str(quiz.id), topic_id=topic_id, topic_name=name, attempt=quiz.attempt, topic_page=page,
                         status=quiz.status, items=[_item_out(*row) for row in items],
                         xp_awarded=quiz.xp_awarded or 0, analysis=_analysis_out(quiz),
                         quiz_test_id=str(quiz.quiz_test_id) if quiz.quiz_test_id else None)
@@ -70,7 +74,7 @@ async def get_my_topic_loops(
         recheck_id=str(lp.recheck.id) if lp.recheck else None,
         homework_id=str(lp.quiz.homework_id) if lp.quiz and lp.quiz.homework_id else None,
         quiz_score=lp.quiz.score_percent if lp.quiz else None,
-        recheck_score=lp.recheck.score_percent if lp.recheck else None) for lp in loops])
+        recheck_score=lp.recheck.score_percent if lp.recheck else None, topic_page=lp.topic.page) for lp in loops])
 
 
 @router.post("/me/topic-quizzes/{topic_id}/start")

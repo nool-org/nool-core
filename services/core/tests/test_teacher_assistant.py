@@ -72,3 +72,39 @@ async def test_summary_is_cached_and_empty_when_the_model_is_down(db_session, mo
     monkeypatch.setattr(generation_client, "teacher_summary", down)
     other = await _teacher(db_session)
     assert (await assistant.teacher_summary(user=other, session=db_session)).bullets == []
+
+
+async def test_the_class_and_challenge_the_teacher_picked_go_to_the_model(db_session, monkeypatch):
+    teacher = await _teacher(db_session)
+    seen = {}
+
+    async def fake_reply(facts, history, message):
+        seen.update(facts=facts, message=message)
+        return "Class 10A is doing fine."
+
+    monkeypatch.setattr(generation_client, "assistant_reply", fake_reply)
+    await assistant.send_message(SendMessageIn(text="Who needs help?", focus_label="Class 10A"),
+                                 user=teacher, session=db_session)
+    assert seen["facts"]["teacher_is_asking_about"] == "Class 10A"
+    assert seen["message"] == "(About Class 10A) Who needs help?"
+
+
+async def test_a_challenge_summary_is_only_for_the_teachers_own_challenge_with_results(db_session, monkeypatch):
+    import pytest
+
+    from shared.errors import NotFoundError, ValidationError
+
+    teacher = await _teacher(db_session)
+    calls = []
+
+    async def fake_summary(facts):
+        calls.append(facts)
+        return ["x"]
+
+    monkeypatch.setattr(generation_client, "teacher_summary", fake_summary)
+    with pytest.raises(ValidationError):  # one of the two, not neither
+        await assistant.challenge_summary(voice_test_id=None, quiz_test_id=None, user=teacher, session=db_session)
+    with pytest.raises(NotFoundError):  # not this teacher's (or nobody's)
+        await assistant.challenge_summary(voice_test_id=str(uuid.uuid4()), quiz_test_id=None, user=teacher,
+                                          session=db_session)
+    assert calls == []  # no model call for a challenge that isn't theirs

@@ -69,7 +69,7 @@ def _homework_step(hw: Homework | None, progress: StudentHomeworkProgress | None
                      note=f"Done early · +{bonus} XP" if bonus else None)
     due = due_at(hw)
     return _step("homework", "Homework", "current", target_id=str(hw.id), due_at=due,
-                 note="Overdue - finish it now" if due and due < now else None)
+                 note="Past its date - still worth finishing" if due and due < now else None)
 
 
 def _chain_state(steps: list[dict]) -> str:

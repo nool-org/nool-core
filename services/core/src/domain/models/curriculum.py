@@ -85,6 +85,9 @@ class Topic(IdMixin, Base):
     # The section's own textbook text (markdown) - grounding for generated
     # questions, fetched by id. Filled by scripts/sync_curriculum_from_json.py.
     text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The NCERT textbook page the section starts on (printed number) - "read page N".
+    # Filled by scripts/topic_pages.py from the chapter PDFs.
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Subtopic(IdMixin, Base):

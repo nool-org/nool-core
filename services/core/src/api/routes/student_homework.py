@@ -42,7 +42,7 @@ from src.domain.models import (
 from src.domain.models.homework import HomeworkAnswer
 from src.services.colearner_insight_client import ColearnerInsightUnavailableError, generate_homework_insight
 from src.services.practice_bank import archive_homework_questions
-from src.services import mcq_test, student_tasks
+from src.services import daily_practice, mcq_test, student_tasks
 
 router = APIRouter(prefix="/api/v1", tags=["homework-student"])
 logger = get_logger(__name__)
@@ -110,6 +110,20 @@ def _overview(progress: StudentHomeworkProgress, hw: Homework) -> CurrentHomewor
             expired=progress.expired,
         )
     )
+
+
+async def _textbook_reference(session: AsyncSession, topic_id) -> dict | None:
+    """"Read it in your textbook": the NCERT chapter and the page the topic
+    starts on (Topic.page) - a fact, so it isn't left to the generated insight."""
+    topic = await session.get(Topic, topic_id) if topic_id else None
+    if topic is None or topic.page is None:
+        return None
+    chapter = await session.get(Chapter, topic.chapter_id)
+    subject = await session.get(Subject, chapter.subject_id) if chapter else None
+    title = f"NCERT {subject.name if subject else 'textbook'}"
+    if chapter is not None:
+        title += f" · Chapter {chapter.order_index}"
+    return {"title": title, "subtitle": f"{daily_practice.tidy(topic.name)} · page {topic.page}"}
 
 
 def _placeholder_insight(gap_topic: str) -> dict:
@@ -222,11 +236,12 @@ async def get_homework_context(
         chapter_id = (await session.execute(select(VoiceTest.chapter_id).where(VoiceTest.id == hw.test_id))).scalar()
         topic_id = (await session.execute(select(Topic.id).where(
             Topic.chapter_id == chapter_id, Topic.name == hw.gap_topic).limit(1))).scalar() if chapter_id else None
+    book = await _textbook_reference(session, topic_id)
     return HomeworkLearningContextOut(
         homework_id=str(hw.id),
         topic_label=hw.gap_topic,
         what_needs_understanding=insight["what_needs_understanding"],
-        references=[HomeworkReference(**ref) for ref in insight["references"]],
+        references=[HomeworkReference(**ref) for ref in ([book] if book else []) + insight["references"]],
         key_idea_title=insight["key_idea_title"],
         key_idea_body=insight["key_idea_body"],
         connection_prompt=insight["connection_prompt"],

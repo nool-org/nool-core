@@ -39,7 +39,11 @@ def _class_label(c: SchoolClass) -> str:
     return f"Class {c.grade}{c.section}"
 
 
-async def build_teacher_facts(session: AsyncSession, teacher: User) -> dict:
+async def build_teacher_facts(session: AsyncSession, teacher: User, *, voice_test_id=None,
+                              quiz_test_id=None) -> dict:
+    """The teacher's world - or, with `voice_test_id` / `quiz_test_id`, just
+    that one challenge (its own AI summary on its results page)."""
+    scoped = voice_test_id is not None or quiz_test_id is not None
     assignments = (await session.execute(
         select(SchoolClass, Subject)
         .join(TeacherClassAssignment, TeacherClassAssignment.class_id == SchoolClass.id)
@@ -61,10 +65,11 @@ async def build_teacher_facts(session: AsyncSession, teacher: User) -> dict:
             TeacherClassAssignment.class_id == VoiceTest.class_id,
             TeacherClassAssignment.subject_id == VoiceTest.subject_id,
             TeacherClassAssignment.teacher_id == teacher.id))
-        .where(SchoolClass.school_id == teacher.school_id)
+        .where(SchoolClass.school_id == teacher.school_id,
+               *([VoiceTest.id == voice_test_id] if scoped else []))
         .order_by(VoiceTest.created_at.desc())
         .limit(RECENT_TESTS)
-    )).all()
+    )).all() if not (scoped and voice_test_id is None) else []
     test_ids = [t.id for t, _, _ in tests]
 
     avg_mastery = dict((await session.execute(
@@ -117,14 +122,15 @@ async def build_teacher_facts(session: AsyncSession, teacher: User) -> dict:
         select(QuestionPaper.name, QuestionPaper.status)
         .where(QuestionPaper.created_by == teacher.id)
         .order_by(QuestionPaper.created_at.desc()).limit(5)
-    )).all()
+    )).all() if not scoped else []
 
     from src.services import quiz_tests  # lazy: quiz_tests pulls in the practice services
 
     challenges = []
     for test in (await session.execute(
-            select(QuizTest).where(QuizTest.created_by == teacher.id, QuizTest.status == "published")
-            .order_by(QuizTest.created_at.desc()).limit(5))).scalars():
+            select(QuizTest).where(QuizTest.created_by == teacher.id, QuizTest.status == "published",
+                                   *([QuizTest.id == quiz_test_id] if scoped else []))
+            .order_by(QuizTest.created_at.desc()).limit(0 if scoped and quiz_test_id is None else 5))).scalars():
         r = await quiz_tests.results(session, test)
         challenges.append({
             "title": test.title, "finished": f"{r['done']}/{r['student_count']}",

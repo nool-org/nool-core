@@ -14,6 +14,11 @@ class ChatMessageOut(CamelModel):
 
 class SendMessageIn(CamelModel):
     text: str
+    # What the teacher picked to talk about (the app asks first): a class, and
+    # within it one challenge - a Speak with Milo test or a Fix Milo challenge
+    focus_label: str | None = None  # e.g. "Class 10A · Electricity", shown to the model
+    test_id: str | None = None
+    quiz_test_id: str | None = None
 
 
 class TeacherSummaryOut(CamelModel):
