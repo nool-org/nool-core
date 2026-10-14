@@ -83,9 +83,12 @@ async def _seed(db, students=1) -> SimpleNamespace:
                            ohm=ohm, power=power, dataset=dataset)
 
 
-async def _teach(db, s, topic, days_ago=0):
+async def _teach(db, s, topic, days_ago=0, just_now=False):
+    """Marked taught - by default long enough ago that its checkpoint shows
+    even unbuilt (topic_quiz.READY_GRACE); `just_now` for the moment itself."""
+    marked = datetime.now(timezone.utc) - (timedelta(0) if just_now else timedelta(hours=1))
     db.add(ClassTopicProgress(class_id=s.cls.id, chapter_id=topic.chapter_id, topic_id=topic.id,
-                              taught_on=service.today_ist() - timedelta(days=days_ago)))
+                              taught_on=service.today_ist() - timedelta(days=days_ago), created_at=marked))
     await db.flush()
 
 
@@ -640,29 +643,30 @@ def sent(monkeypatch):
 
 
 async def test_marking_a_topic_taught_today_notifies_the_class_once_per_lesson(db_session, sent):
+    """The notice itself waits for the checkpoints (topic_quiz.prebuild_class) - here, whether one is due."""
     s = await _seed(db_session, students=2)
     cid = str(s.cls.id)
-    yesterday = service.today_ist() - timedelta(days=1)
-    await routes.set_topic_taught(cid, str(s.current.id), TopicTaughtIn(taught=True, taught_on=yesterday),
-                                  background_tasks=BackgroundTasks(), user=s.teacher, session=db_session)
-    assert sent == []  # back-dated: not a lesson today
+
+    async def mark(topic, **kw):
+        tasks = BackgroundTasks()
+        await routes.set_topic_taught(cid, str(topic.id), TopicTaughtIn(taught=True, **kw), background_tasks=tasks,
+                                      user=s.teacher, session=db_session)
+        return next(t.args[2] for t in tasks.tasks if t.func.__name__ == "prebuild_class")
+
+    assert await mark(s.current, taught_on=service.today_ist() - timedelta(days=1)) is False  # not a lesson today
     for row in (await db_session.execute(select(ClassTopicProgress).where(
             ClassTopicProgress.class_id == s.cls.id))).scalars().all():
         row.created_at = datetime.now(timezone.utc) - timedelta(hours=1)
     await db_session.flush()
-    await routes.set_topic_taught(cid, str(s.ohm.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher, session=db_session)
-    [call] = sent
-    assert call["user_ids"] == {k.id for k in s.students} and call["title"] == "New topic quiz"
-    assert call["body"] == "Your teacher just taught Ohm's law. Take the quiz."
-    assert call["data"] == {"type": "topic_quiz", "topicId": str(s.ohm.id)}
-    await routes.set_topic_taught(cid, str(s.power.id), TopicTaughtIn(taught=True), background_tasks=BackgroundTasks(), user=s.teacher,
-                                  session=db_session)
-    assert len(sent) == 1  # Ohm's law was marked within 30 minutes
+    assert await mark(s.ohm) is True
+    assert await mark(s.power) is False  # Ohm's law was marked within 30 minutes
+    assert sent == []  # nothing before the checkpoints are ready
 
 
-async def test_marking_a_topic_taught_queues_its_revision_cards(db_session):
+async def test_marking_a_topic_taught_queues_its_revision_cards_and_checkpoints(db_session):
     s = await _seed(db_session)
     tasks = BackgroundTasks()
     await routes.set_topic_taught(str(s.cls.id), str(s.ohm.id), TopicTaughtIn(taught=True),
                                   background_tasks=tasks, user=s.teacher, session=db_session)
-    assert [(t.func.__name__, t.args) for t in tasks.tasks] == [("pregenerate_for_topic", (s.ohm.id,))]
+    assert [(t.func.__name__, t.args) for t in tasks.tasks] == [
+        ("pregenerate_for_topic", (s.ohm.id,)), ("prebuild_class", (s.cls.id, s.ohm.id, True))]

@@ -33,7 +33,7 @@ from src.api.schemas.daily_practice import (
 from src.domain.models import Chapter, ClassTopicProgress, Role, StudentProfile, Topic, User
 from src.repositories.lookups import get_class_in_school
 from src.repositories.roster_repository import teaches_class, teaches_class_subject
-from src.services import daily_practice, push, question_types, revision_cards
+from src.services import daily_practice, push, question_types, revision_cards, topic_quiz
 
 router = APIRouter(prefix="/api/v1", tags=["daily-practice"])
 NOTIFY_QUIET_MINUTES = 30
@@ -179,20 +179,15 @@ async def get_chapter_progress(
                 for n, t in enumerate(topics, start=1)])
 
 
-async def _notify_taught(session: AsyncSession, class_id: uuid.UUID, topic: Topic) -> None:
-    """Tells the class's students the quiz on today's lesson is ready -
-    once per lesson: skipped when another topic was marked in the last 30
-    minutes (a teacher ticks several topics in a row)."""
+async def _notify_taught(session: AsyncSession, class_id: uuid.UUID, topic: Topic) -> bool:
+    """Whether to tell the class about today's lesson once their checkpoints are
+    ready (topic_quiz.prebuild_class sends it) - once per lesson: not when
+    another topic was marked in the last 30 minutes (a teacher ticks several
+    topics in a row)."""
     recent = (await session.execute(select(ClassTopicProgress.id).where(
         ClassTopicProgress.class_id == class_id, ClassTopicProgress.topic_id != topic.id,
         ClassTopicProgress.created_at > func.now() - dt.timedelta(minutes=NOTIFY_QUIET_MINUTES)).limit(1))).first()
-    if recent:
-        return
-    student_ids = (await session.execute(
-        select(StudentProfile.user_id).where(StudentProfile.class_id == class_id))).scalars().all()
-    await push.notify(session, student_ids, "New topic quiz",
-                      f"Your teacher just taught {daily_practice.tidy(topic.name)}. Take the quiz.",
-                      {"type": "topic_quiz", "topicId": str(topic.id)})
+    return recent is None
 
 
 @router.put("/classes/{class_id}/topics/{topic_id}/taught")
@@ -225,8 +220,10 @@ async def set_topic_taught(
     if body.taught:
         # revision cards are made once per topic; have them ready before students look
         background_tasks.add_task(revision_cards.pregenerate_for_topic, topic.id)
-    if taught_on == daily_practice.today_ist():
-        await _notify_taught(session, class_uuid, topic)
+        # and every student's checkpoint, so opening it doesn't wait on question writing - students
+        # hear about it (a lesson today) only once theirs is ready
+        notify = taught_on == daily_practice.today_ist() and await _notify_taught(session, class_uuid, topic)
+        background_tasks.add_task(topic_quiz.prebuild_class, class_uuid, topic.id, notify)
     order = [t.id for t in await _chapter_topics(session, chapter.id)].index(topic.id) + 1
     return TopicProgressOut(id=str(topic.id), name=topic.name, order=order, taught_on=taught_on)
 

@@ -286,6 +286,53 @@ async def test_lagging_quiz_builds_personal_homework_on_the_lagging_levels(db_se
     await service.build_homework(row.id)  # once only
     assert len(sent) == 1
 
+    # the re-check was built while the homework is going - still shut until it's done
+    assert loop.recheck_id is not None
+    with pytest.raises(ConflictError):
+        await _start(db_session, s, s.ohm, attempt=2)
+    hw_progress = (await db_session.execute(select(StudentHomeworkProgress).where(
+        StudentHomeworkProgress.homework_id == hw.id))).scalar_one()
+    hw_progress.status = StudentHomeworkStatus.COMPLETED
+    await db_session.flush()
+    assert (await _start(db_session, s, s.ohm, attempt=2)).id == loop.recheck_id  # opens at once, already built
+
+
+async def test_checkpoints_are_built_when_a_topic_is_taught_and_only_then_announced(db_session, monkeypatch):
+    import contextlib
+
+    from src.services import push
+
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm, just_now=True)
+    await _pools(db_session, s.ohm)
+    assert not [t for t in (await routes.get_my_topic_loops(None, None, user=s.student, session=db_session)).topics
+                if t.topic_id == str(s.ohm.id)]  # not shown before its questions are ready
+
+    class Proxy:  # the background task's own session -> the test's, commit = flush
+        def __getattr__(self, name):
+            return getattr(db_session, name)
+
+        async def commit(self):
+            await db_session.flush()
+
+    @contextlib.asynccontextmanager
+    async def own_session():
+        yield Proxy()
+
+    sent = []
+
+    async def notify(session, ids, title, body, data=None):
+        sent.append((list(ids), title, data))
+
+    monkeypatch.setattr("src.repositories.get_session", own_session)
+    monkeypatch.setattr(push, "notify", notify)
+    await service.prebuild_class(s.cls.id, s.ohm.id, notify=True)
+
+    loop = await _stage(db_session, s, s.ohm)
+    assert loop.stage == "quiz" and loop.quiz_id is not None  # built, not started
+    assert sent == [([s.student.id], "Your checkpoint is ready", {"type": "topic_quiz", "topicId": str(s.ohm.id)})]
+    assert (await _start(db_session, s, s.ohm)).id == loop.quiz_id
+
 
 async def test_each_question_is_on_its_own_bloom_level_generated_when_the_pool_has_none(db_session, monkeypatch):
     from types import SimpleNamespace

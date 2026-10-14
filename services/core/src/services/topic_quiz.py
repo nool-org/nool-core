@@ -16,6 +16,7 @@ The stage of each topic is derived (loop_of), never stored.
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -65,6 +66,7 @@ VOICE_LEVELS = [BloomLevel.UNDERSTAND, BloomLevel.APPLY]  # the 2 spoken answers
 LAGGING_BELOW = daily_practice.GOOD_SCORE  # a level under 70% right is lagging
 HOMEWORK_QUESTIONS = 5
 HOMEWORK_WINDOW_HOURS = 12  # topic homework is due the same day
+READY_GRACE = timedelta(minutes=15)  # a just-taught topic waits this long at most for its checkpoint
 
 
 # ------------------------------------------------------------------ pure parts
@@ -203,6 +205,7 @@ class Loop:
     stage: str  # quiz | homework_pending | homework | recheck | mastered | needs_teacher
     quiz: DailyPracticeSession | None
     recheck: DailyPracticeSession | None
+    marked_at: datetime | None = None  # when the teacher marked it taught
 
 
 def stage_of(quiz, recheck, homework_status) -> str:
@@ -235,7 +238,8 @@ async def loops_for(session: AsyncSession, student_ids, class_id, topic_ids=None
         for progress, topic in taught:
             quiz, recheck = quizzes.get((sid, topic.id, 1)), quizzes.get((sid, topic.id, 2))
             status = statuses.get(quiz.homework_id) if quiz and quiz.homework_id else None
-            loops.append(Loop(topic, progress.taught_on, stage_of(quiz, recheck, status), quiz, recheck))
+            loops.append(Loop(topic, progress.taught_on, stage_of(quiz, recheck, status), quiz, recheck,
+                              progress.created_at))
         out[sid] = loops
     return out
 
@@ -250,22 +254,30 @@ async def loop_of(session: AsyncSession, student: User, chapter_id=None, subject
     elif subject_id is not None:
         topic_ids = (await session.execute(select(Topic.id).join(Chapter, Chapter.id == Topic.chapter_id).where(
             Chapter.subject_id == subject_id))).scalars().all()
-    return (await loops_for(session, [student.id], school_class.id, topic_ids))[student.id]
+    loops = (await loops_for(session, [student.id], school_class.id, topic_ids))[student.id]
+    # a just-taught topic shows once its checkpoint is built (prebuild_class) - or after
+    # READY_GRACE regardless, so a failed build never hides it
+    cutoff = datetime.now(timezone.utc) - READY_GRACE
+    return [lp for lp in loops if lp.quiz is not None or lp.marked_at is None or lp.marked_at <= cutoff]
 
 
 # ------------------------------------------------------------------ quiz
-async def start(session: AsyncSession, student: User, topic_id: str, attempt: int) -> DailyPracticeSession:
+async def start(session: AsyncSession, student: User, topic_id: str, attempt: int,
+                early: bool = False) -> DailyPracticeSession:
     """The student's quiz (attempt 1) or re-check (attempt 2) on a taught
     topic - built on first call, the same one after. A re-check only once
-    the homework is done. 409 when it isn't open yet. Caller commits."""
+    the homework is done (409 before) - except `early`, prebuild's: built
+    while the homework is still going, it stays shut until then. Caller commits."""
     school_class = await _student_class(session, student)
     topic = await _taught_topic(session, school_class, topic_id)
     loop = (await loops_for(session, [student.id], school_class.id, [topic.id]))[student.id][0]
+    if attempt == 2:
+        waiting = loop.stage in ("homework", "homework_pending")
+        if (waiting and not early) or (not waiting and loop.stage != "recheck" and loop.recheck is None):
+            raise ConflictError("Finish the homework first - then the re-check quiz opens.")
     existing = loop.quiz if attempt == 1 else loop.recheck
     if existing is not None:
         return existing
-    if attempt == 2 and loop.stage != "recheck":
-        raise ConflictError("Finish the homework first - then the re-check quiz opens.")
     lagging = (loop.quiz.analysis or {}).get("lagging", []) if attempt == 2 else None
     created = (await session.execute(pg_insert(DailyPracticeSession).values(
         id=uuid.uuid4(), student_id=student.id, practice_date=daily_practice.today_ist(),
@@ -410,6 +422,7 @@ async def build_homework(quiz_id: uuid.UUID) -> None:
             if dataset_id is None:
                 quiz.analysis = {**(quiz.analysis or {}), "homework_skipped": True}
                 await session.commit()
+                await prebuild(student.id, topic.id, attempt=2)
                 return
             levels = [BloomLevel(v) for v in (quiz.analysis or {}).get("lagging", [])] or [BloomLevel.UNDERSTAND]
             weights = {level: HOMEWORK_QUESTIONS // len(levels) for level in levels}
@@ -437,9 +450,55 @@ async def build_homework(quiz_id: uuid.UUID) -> None:
             quiz.homework_id = hw.id
             await session.commit()
             await push.notify(session, [student.id], f"Homework ready: {hw.gap_topic}",
-                              "Made for the gaps in your check-in.", {"type": "homework", "homeworkId": str(hw.id)})
+                              "Made for the gaps in your checkpoint.", {"type": "homework", "homeworkId": str(hw.id)})
     except Exception:  # logged, never raised: the quiz result already stands
         logger.exception("topic_quiz_homework_failed", extra={"quiz_id": str(quiz_id)})
+        return
+    # while the student does the homework, their re-check gets built - it opens instantly after
+    await prebuild(student.id, topic.id, attempt=2)
+
+
+async def prebuild(student_id, topic_id, attempt: int = 1) -> bool:
+    """Builds a student's quiz (or, early, their re-check) ahead of time, so
+    opening it doesn't wait on the question pool or a model call. Own session;
+    a no-op when it exists or can't be built yet; logged, never raised.
+    True when it is ready."""
+    from src.repositories import get_session
+
+    try:
+        async with get_session() as session:
+            student = await session.get(User, student_id)
+            if student is None:
+                return False
+            try:
+                with ai_context.feature("topic_quiz_prebuild"):
+                    await start(session, student, str(topic_id), attempt, early=True)
+                await session.commit()
+                return True
+            except (ConflictError, NotFoundError):  # raised before anything is written
+                return False
+    except Exception:
+        logger.exception("topic_quiz_prebuild_failed", extra={"student_id": str(student_id), "topic_id": str(topic_id)})
+        return False
+
+
+async def prebuild_class(class_id, topic_id, notify: bool = False) -> None:
+    """Every student's checkpoint on a topic just marked taught - one at a
+    time: the first fills the shared pool (the only model calls), the rest
+    draw from it. With `notify` (a lesson today), the students whose
+    checkpoint is ready then hear about it - never before it is."""
+    from src.repositories import get_session
+
+    async with get_session() as session:
+        student_ids = (await session.execute(select(StudentProfile.user_id).where(
+            StudentProfile.class_id == class_id))).scalars().all()
+    ready = [sid for sid in student_ids if await prebuild(sid, topic_id, attempt=1)]
+    if notify and ready:
+        async with get_session() as session:
+            topic = await session.get(Topic, topic_id)
+            await push.notify(session, ready, "Your checkpoint is ready",
+                              f"Your teacher just taught {daily_practice.tidy(topic.name)}. Take the checkpoint.",
+                              {"type": "topic_quiz", "topicId": str(topic_id)})
 
 
 # ------------------------------------------------------------------ co-learner
