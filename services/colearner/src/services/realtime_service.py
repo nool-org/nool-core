@@ -3,8 +3,10 @@ voice over WebRTC (OpenAI Realtime).
 
 The app streams its mic straight to OpenAI over WebRTC and hears the reply
 as it's generated - server-side VAD decides when the student has finished.
-Speech never cuts Milo off (speakerphone echo of his own voice would); the
-app's "Tap to interrupt" button does that deliberately. The app never sees the API key or the
+Speech doesn't cut Milo off at once (speakerphone echo of his own voice
+would): the sideband decides - what the student said over him is
+transcribed, and only if it isn't his own words coming back (_barge_in)
+is he stopped and the student answered. The app never sees the API key or the
 instructions: it hands its SDP offer to us (via Core), we create the call
 with the session config ("unified interface"), and hand back the SDP answer.
 
@@ -209,6 +211,11 @@ class RealtimeCall:
     # Pending [SILENCE] check-in (see _arm_silence), cancelled as soon as anyone speaks.
     silence_task: asyncio.Task | None = None
     student_speaking: bool = False
+    # Talking over Milo (_barge_in): is he audible now, what he's saying this reply, and
+    # whether the student's current speech began while he was
+    milo_speaking: bool = False
+    milo_text: str = ""
+    over_milo: bool = False
     # Client pauses (see _pause_marker): when the current one began (loop time), the
     # paused seconds credited to the clock so far, how many, and the live time limit.
     paused_at: float | None = None
@@ -429,10 +436,16 @@ async def _record(call: RealtimeCall, ws) -> None:
                         _tag_user_turn(call, item["id"])
         elif kind in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
             call.student_speaking = kind.endswith("started")
+            if call.student_speaking:
+                call.over_milo = call.milo_speaking
             _cancel_silence(call)
         elif kind == "output_audio_buffer.started":
+            call.milo_speaking = True
             _cancel_silence(call)  # Milo is speaking
+        elif kind == "response.output_audio_transcript.delta":
+            call.milo_text += event.get("delta") or ""
         elif kind == "response.created":
+            call.milo_text = ""
             _cancel_silence(call)
             if call.paused_at is not None and not call.time_up:
                 # the app asks for no reply while paused - but nothing may talk to an empty room
@@ -459,6 +472,9 @@ async def _record(call: RealtimeCall, ws) -> None:
             elif call.item_kind.get(event["item_id"]) in ("answer", "follow_up") and _repeat_request(entry["text"]):
                 _not_an_answer(call, event["item_id"], "repeat_request")
             add_transcription_usage(call.usage, event.get("usage"))
+            if call.over_milo:
+                call.over_milo = False
+                await _barge_in(call, ws, entry["text"])
         elif kind == "response.output_audio_transcript.done":
             entry = call.items.setdefault(event["item_id"], {"role": "assistant", "text": ""})
             entry["text"] = (event.get("transcript") or "").strip()
@@ -515,12 +531,52 @@ async def _record(call: RealtimeCall, ws) -> None:
                     },
                 }))
         elif kind == "output_audio_buffer.stopped":
+            call.milo_speaking = False
             if call.closing_done:
                 return  # goodbye has finished playing
             if call.state.config.questions:
                 _arm_silence(call, ws)
         elif kind == "error":
             logger.warning("realtime_event_error call_id=%s error=%s", call.call_id, event.get("error"))
+
+
+BARGE_IN_WORDS = 2  # fewer is a cough, an "mm" or a stray word - Milo carries on
+ECHO_OVERLAP = 0.6  # this share of the heard words in Milo's own reply = his voice coming back
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def is_echo(heard: str, milo_said: str) -> bool:
+    """What the mic picked up is mostly Milo's own words (speakerphone)."""
+    words = _words(heard)
+    if not words:
+        return True
+    his = set(_words(milo_said))
+    return sum(w in his for w in words) / len(words) >= ECHO_OVERLAP
+
+
+def should_barge_in(call: "RealtimeCall", heard: str) -> bool:
+    """The student talked over Milo and meant it: real words, not his echo,
+    while he's still talking - and not while the test is wrapping up or paused."""
+    if not call.milo_speaking or call.forcing_end or call.closing_sent or call.state.is_completed:
+        return False
+    if call.paused_at is not None:
+        return False
+    return len(_words(heard)) >= BARGE_IN_WORDS and not is_echo(heard, call.milo_text)
+
+
+async def _barge_in(call: "RealtimeCall", ws, heard: str) -> None:
+    """Stops Milo mid-reply and has him answer what the student just said."""
+    if not should_barge_in(call, heard):
+        return
+    logger.info("realtime_barge_in call_id=%s words=%d", call.call_id, len(_words(heard)))
+    await ws.send(json.dumps({"type": "response.cancel"}))
+    await ws.send(json.dumps({"type": "output_audio_buffer.clear"}))
+    call.milo_speaking = False
+    await ws.send(json.dumps({"type": "response.create",
+                              "response": {"max_output_tokens": reply_tokens(call.state.config)}}))
 
 
 END_REFUSED_INSTRUCTIONS = (
