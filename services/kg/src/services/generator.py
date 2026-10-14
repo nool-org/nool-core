@@ -79,7 +79,12 @@ chapter_number/topic it belongs to. Provide a concise reference answer for
 each question. Avoid duplicating the same fact/question across different
 entries. Spread questions across ALL the provided topics as evenly as the
 requested count allows - do not concentrate on the first or introductory
-topic."""
+topic.
+
+Every question must be self-contained text a student can answer from the
+printed paper alone: never refer to a figure, diagram, table, activity or
+page "in your textbook" (no "Fig. 2.3", "the circuit shown", "the table
+above"). If the idea needs a diagram, describe the setup in words instead."""
 
 
 # ponytail: the 20-30% bank share is prompt-enforced, not checked after the
@@ -95,6 +100,7 @@ style). Use them as grounding for scope, style, difficulty and marking:
 - Every other question must be NEW: a different fact, scenario, numbers or
   angle on the same syllabus content - not a paraphrase of a bank question.
 - Never include the same underlying question twice.
+- Never take a bank question that needs a figure, diagram or table to answer.
 - Any fact in a new question must still come from the textbook context
   above or from these bank questions/answers - nothing outside them.
 

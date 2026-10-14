@@ -70,7 +70,8 @@ Exactly: type {question_type}, {marks} mark(s), Bloom level {bloom_level}, diffi
 - TRUE_FALSE: options ["True", "False"], answer one of them.
 - SHORT_ANSWER/LONG_ANSWER: options null; answer is the model answer worth the marks.
 - text is only the question as printed on the paper: no "Question:" label, no chapter/type/marks/difficulty lines.
-- No figures or diagrams.
+- No figures or diagrams, and never point to one in the textbook ("Fig. 2.3", "the circuit shown") -
+  describe the setup in words.
 """
 
 
