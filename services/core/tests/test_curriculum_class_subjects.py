@@ -98,3 +98,26 @@ async def test_a_school_the_super_admin_gave_no_subjects_has_none_even_with_an_a
     result = await curriculum.list_subjects_for_class(class_id, user=teacher, session=db_session)
 
     assert result.items == []
+
+
+async def test_a_student_sees_every_subject_taught_in_their_class_but_not_disabled_ones(db_session):
+    from src.domain.models import StudentProfile
+    teacher, school = await _seed_school_and_teacher(db_session)
+    maths, science, off = (Subject(name=f"{n}-{uuid.uuid4()}") for n in ("Mathematics", "Science", "Old"))
+    db_session.add_all([maths, science, off])
+    await db_session.flush()
+    for subject, on in ((maths, True), (science, True), (off, False)):
+        db_session.add(SchoolCurriculum(school_id=school.id, subject_id=subject.id, enabled=on))
+    class_id = await _seed_class_assignment(db_session, teacher=teacher, school=school, subject=maths)
+    for subject in (science, off):
+        db_session.add(TeacherClassAssignment(teacher_id=teacher.id, class_id=class_id, subject_id=subject.id))
+    student = User(firebase_uid=f"s-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com", display_name="S",
+                   role=Role.STUDENT, school_id=school.id, status=UserStatus.ACTIVE)
+    db_session.add(student)
+    await db_session.flush()
+    db_session.add(StudentProfile(user_id=student.id, class_id=class_id, roll_number=1))
+    await db_session.flush()
+
+    result = await curriculum.list_my_subjects(user=student, session=db_session)
+
+    assert [s.id for s in result.items] == [str(maths.id), str(science.id)]

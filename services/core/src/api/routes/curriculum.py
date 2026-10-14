@@ -12,6 +12,7 @@ from src.domain.models import (
     Chapter,
     Role,
     SchoolCurriculum,
+    StudentProfile,
     Subject,
     Subtopic,
     TeacherClassAssignment,
@@ -53,6 +54,29 @@ async def list_subjects(
     # `grade` narrows to that grade's subjects (legacy grade-less subjects always match)
     items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade, voice_tests=subject_rules.voice_tests_allowed(s.name), formats=list(subject_rules.formats(s.name))) for s in result.scalars().all()
              if grade is None or s.grade in (None, grade)]
+    return ListEnvelope(items=items, total=len(items))
+
+
+@router.get("/me/subjects", summary="The subjects taught in the student's class")
+async def list_my_subjects(
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> ListEnvelope[SubjectOut]:
+    """What the student's class is taught: a subject some teacher is assigned
+    to in their class, and that the school has enabled - so Learn can show
+    every subject from day one, before a topic of it is taught."""
+    rows = await session.execute(
+        select(Subject)
+        .join(TeacherClassAssignment, TeacherClassAssignment.subject_id == Subject.id)
+        .join(StudentProfile, StudentProfile.class_id == TeacherClassAssignment.class_id)
+        .join(SchoolCurriculum, (SchoolCurriculum.subject_id == Subject.id)
+              & (SchoolCurriculum.school_id == user.school_id) & SchoolCurriculum.enabled.is_(True))
+        .where(StudentProfile.user_id == user.id)
+        .distinct()
+    )
+    items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade, voice_tests=subject_rules.voice_tests_allowed(s.name),
+                        formats=list(subject_rules.formats(s.name)))
+             for s in sorted(rows.scalars().all(), key=lambda s: s.name)]
     return ListEnvelope(items=items, total=len(items))
 
 
