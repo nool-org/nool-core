@@ -20,6 +20,7 @@ class SchoolVoiceTestOut(CamelModel):
     id: str
     class_label: str
     subject_name: str
+    chapter_name: str | None = None
     teacher_name: str | None
     status: TestStatus
     assigned_count: int
@@ -35,6 +36,24 @@ class SchoolHomeworkOut(CamelModel):
     status: HomeworkStatus
     assigned_count: int
     completed_count: int
+    # what it follows: a Speak with Milo session or a topic checkpoint
+    source: str = "Speak with Milo"
+    created_at: datetime | None = None
+
+
+class SchoolChallengeOut(CamelModel):
+    """A teacher's Maths challenge (Fix Milo's homework) - school-wide."""
+
+    id: str
+    title: str
+    class_label: str
+    subject_name: str
+    teacher_name: str | None
+    status: str  # preparing | ready | failed | published
+    student_count: int
+    done_count: int
+    average_percent: int | None
+    created_at: datetime
 
 
 class SchoolQuestionPaperOut(CamelModel):

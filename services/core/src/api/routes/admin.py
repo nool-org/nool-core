@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Annotated
 import csv
 import io
@@ -104,6 +105,7 @@ from src.api.schemas.school_oversight import (
     SchoolLeaderboardEntryOut,
     SchoolQuestionBankEntryOut,
     SchoolQuestionPaperOut,
+    SchoolChallengeOut,
     SchoolVoiceTestOut,
 )
 from src.domain.models import (
@@ -152,6 +154,7 @@ from src.services.subject_grades import (
     ensure_class_grade_change_allowed, ensure_subjects_enabled_for_school, ensure_subjects_fit_grade,
 )
 from src.repositories.lookups import ensure_teachers_of_school, get_class_in_school
+from src.api.routes import school_oversight
 from src.api.routes.school_oversight import question_bank_entries
 from src.repositories.dataset_access import assign_catalog_datasets, school_dataset_listing, subject_names
 from src.repositories import audit_repository
@@ -2216,98 +2219,58 @@ async def _teacher_names_for(
     return names
 
 
-@router.get("/schools/{school_id}/voice-tests", summary="A school's Voice Tests (cross-tenant oversight)")
+def _as_school(school) -> SimpleNamespace:
+    """The school-admin oversight queries, run for any school (super admin)."""
+    return SimpleNamespace(school_id=school.id)
+
+
+@router.get("/schools/{school_id}/voice-tests", summary="A school's Speak with Milo sessions (cross-tenant oversight)")
 async def list_school_voice_tests_as_admin(
     school_id: str,
     class_id: str | None = Query(default=None, alias="classId"),
     teacher_id: str | None = Query(default=None, alias="teacherId"),
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolVoiceTestOut]:
-    await _get_school(session, school_id)
-    base = (
-        select(VoiceTest, SchoolClass, Subject)
-        .join(SchoolClass, SchoolClass.id == VoiceTest.class_id)
-        .join(Subject, Subject.id == VoiceTest.subject_id)
-        .where(SchoolClass.school_id == school_id)
-    )
-    if class_id is not None:
-        base = base.where(VoiceTest.class_id == class_id)
-    if teacher_id is not None:
-        base = base.where(
-            exists(
-                select(TeacherClassAssignment.id).where(
-                    TeacherClassAssignment.teacher_id == teacher_id,
-                    TeacherClassAssignment.class_id == VoiceTest.class_id,
-                    TeacherClassAssignment.subject_id == VoiceTest.subject_id,
-                )
-            )
-        )
-
-    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
-    rows = (
-        await session.execute(base.order_by(VoiceTest.created_at.desc()).limit(limit).offset(offset))
-    ).all()
-
-    teacher_names = await _teacher_names_for(
-        session, {(test.class_id, test.subject_id) for test, _, _ in rows}
-    )
-    items = [
-        SchoolVoiceTestOut(
-            id=str(test.id),
-            class_label=_class_label(school_class),
-            subject_name=subject.name,
-            teacher_name=teacher_names.get((test.class_id, test.subject_id)),
-            status=test.status,
-            assigned_count=test.assigned_count,
-            completed_count=test.completed_count,
-            created_at=test.created_at,
-        )
-        for test, school_class, subject in rows
-    ]
-    return ListEnvelope(items=items, total=total)
+    school = await _get_school(session, school_id)
+    return await school_oversight.list_school_voice_tests(
+        class_id=class_id, teacher_id=teacher_id, q=q, limit=limit, offset=offset, user=_as_school(school),
+        session=session)
 
 
 @router.get("/schools/{school_id}/homework", summary="A school's Homework (cross-tenant oversight)")
 async def list_school_homework_as_admin(
     school_id: str,
     class_id: str | None = Query(default=None, alias="classId"),
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolHomeworkOut]:
-    await _get_school(session, school_id)
-    base = (
-        select(Homework, SchoolClass, VoiceTest.subject_id)
-        .join(SchoolClass, SchoolClass.id == Homework.class_id)
-        .join(VoiceTest, VoiceTest.id == Homework.test_id)
-        .where(SchoolClass.school_id == school_id)
-    )
-    if class_id is not None:
-        base = base.where(Homework.class_id == class_id)
+    school = await _get_school(session, school_id)
+    return await school_oversight.list_school_homework(
+        class_id=class_id, q=q, limit=limit, offset=offset, user=_as_school(school), session=session)
 
-    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
-    rows = (await session.execute(base.limit(limit).offset(offset))).all()
 
-    teacher_names = await _teacher_names_for(
-        session, {(hw.class_id, subject_id) for hw, _, subject_id in rows}
-    )
-    items = [
-        SchoolHomeworkOut(
-            id=str(hw.id),
-            class_label=_class_label(school_class),
-            gap_topic=hw.gap_topic,
-            teacher_name=teacher_names.get((hw.class_id, subject_id)),
-            status=hw.status,
-            assigned_count=hw.assigned_count,
-            completed_count=hw.completed_count,
-        )
-        for hw, school_class, subject_id in rows
-    ]
-    return ListEnvelope(items=items, total=total)
+@router.get("/schools/{school_id}/challenges", summary="A school's Maths challenges (cross-tenant oversight)")
+async def list_school_challenges_as_admin(
+    school_id: str,
+    class_id: str | None = Query(default=None, alias="classId"),
+    teacher_id: str | None = Query(default=None, alias="teacherId"),
+    q: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _: User = Depends(require_role(Role.SUPER_ADMIN)),
+    session: AsyncSession = Depends(get_db_session),
+) -> ListEnvelope[SchoolChallengeOut]:
+    school = await _get_school(session, school_id)
+    return await school_oversight.list_school_challenges(
+        class_id=class_id, teacher_id=teacher_id, q=q, limit=limit, offset=offset, user=_as_school(school),
+        session=session)
 
 
 @router.get("/schools/{school_id}/question-papers", summary="A school's Question Papers (cross-tenant oversight)")
@@ -2315,43 +2278,16 @@ async def list_school_question_papers_as_admin(
     school_id: str,
     subject_id: str | None = Query(default=None, alias="subjectId"),
     created_by: str | None = Query(default=None, alias="createdBy"),
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     _: User = Depends(require_role(Role.SUPER_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolQuestionPaperOut]:
-    await _get_school(session, school_id)
-    base = (
-        select(QuestionPaper, Subject, User)
-        .join(Subject, Subject.id == QuestionPaper.subject_id)
-        .join(User, User.id == QuestionPaper.created_by)
-        .where(QuestionPaper.school_id == school_id)
-    )
-    if subject_id is not None:
-        base = base.where(QuestionPaper.subject_id == subject_id)
-    if created_by is not None:
-        base = base.where(QuestionPaper.created_by == created_by)
-
-    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
-    rows = (
-        await session.execute(base.order_by(QuestionPaper.created_at.desc()).limit(limit).offset(offset))
-    ).all()
-
-    items = [
-        SchoolQuestionPaperOut(
-            id=str(paper.id),
-            name=paper.name,
-            exam_type=paper.exam_type,
-            subject_id=str(paper.subject_id),
-            subject_name=subject.name,
-            grade=paper.grade,
-            created_by_name=creator.display_name,
-            status=paper.status,
-            created_at=paper.created_at,
-        )
-        for paper, subject, creator in rows
-    ]
-    return ListEnvelope(items=items, total=total)
+    school = await _get_school(session, school_id)
+    return await school_oversight.list_school_question_papers(
+        subject_id=subject_id, created_by=created_by, q=q, limit=limit, offset=offset, user=_as_school(school),
+        session=session)
 
 
 @router.get("/schools/{school_id}/leaderboard", summary="A school-wide leaderboard (cross-tenant oversight)")

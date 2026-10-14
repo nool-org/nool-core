@@ -9,7 +9,7 @@ questions) but only the school's own datasets can be changed.
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import func, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import ConflictError, NotFoundError, ValidationError
@@ -158,6 +158,7 @@ async def list_school_dataset_questions(
     subtopic_id: str | None = Query(default=None, alias="subtopicId"),
     bloom_level: BloomLevel | None = Query(default=None, alias="bloomLevel"),
     difficulty: PaperDifficultyLevel | None = None,
+    q: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
@@ -173,9 +174,13 @@ async def list_school_dataset_questions(
                           (DatasetQuestion.difficulty, difficulty)):
         if value is not None:
             query = query.where(column == value)
-    rows = (await session.execute(query.order_by(DatasetQuestion.created_at.desc()))).scalars().all()
-    items = [_dataset_question_out(q) for q in rows[offset: offset + limit]]
-    return ListEnvelope(items=items, total=len(rows))
+    if q and q.strip():
+        query = query.where(DatasetQuestion.text.ilike(f"%{q.strip()}%"))
+    # counted and paged in SQL - a dataset holds thousands of questions
+    total = (await session.execute(select(func.count()).select_from(query.subquery()))).scalar_one()
+    rows = (await session.execute(
+        query.order_by(DatasetQuestion.created_at.desc()).limit(limit).offset(offset))).scalars().all()
+    return ListEnvelope(items=[_dataset_question_out(row) for row in rows], total=total)
 
 
 @router.post("/datasets/{dataset_id}/questions", status_code=201)

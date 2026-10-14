@@ -216,3 +216,45 @@ async def test_question_bank_merges_paper_and_homework_sources_by_topic(db_sessi
         source=None, topic="nonexistent topic", collection_name=None, general_bank_only=False, limit=50, offset=0, user=admin, session=db_session,
     )
     assert no_match.total == 0
+
+
+async def test_school_lists_search_every_page_and_show_the_chapter(db_session):
+    school = await _seed_school(db_session)
+    admin = await _seed_admin(db_session, school.id)
+    school_class, subject, chapter = await _seed_class_subject_chapter(db_session, school.id)
+    for _ in range(3):
+        await _seed_voice_test(db_session, school_class, subject, chapter)
+
+    found = await school_oversight.list_school_voice_tests(
+        class_id=None, teacher_id=None, q=chapter.name[:5].upper(), limit=1, offset=0, user=admin, session=db_session)
+    assert found.total == 3 and found.items[0].chapter_name == chapter.name  # every page, not just the one shown
+    none = await school_oversight.list_school_voice_tests(
+        class_id=None, teacher_id=None, q="no-such-chapter", limit=50, offset=0, user=admin, session=db_session)
+    assert none.total == 0
+
+
+async def test_a_checkpoints_homework_and_a_maths_challenge_show_for_the_school(db_session):
+    from src.domain.models import (AssignmentTargetMode, Homework, HomeworkDifficulty, HomeworkStatus, QuizTest,
+                                   Topic)
+
+    school = await _seed_school(db_session)
+    admin = await _seed_admin(db_session, school.id)
+    school_class, subject, chapter = await _seed_class_subject_chapter(db_session, school.id)
+    topic = Topic(chapter_id=chapter.id, name="Ohm's law")
+    db_session.add(topic)
+    await db_session.flush()
+    db_session.add_all([
+        Homework(test_id=None, topic_id=topic.id, class_id=school_class.id, gap_topic="Ohm's law",
+                 gap_mastery_percent=40, total_questions=5, difficulty=HomeworkDifficulty.MIXED,
+                 target_mode=AssignmentTargetMode.SPECIFIC_STUDENTS, status=HomeworkStatus.ASSIGNED),
+        QuizTest(class_id=school_class.id, subject_id=subject.id, chapter_id=chapter.id, title="Real Numbers",
+                 status="ready", created_by=admin.id, topic_ids=[str(topic.id)], mix={"fix_steps": 5}),
+    ])
+    await db_session.flush()
+
+    homework = await school_oversight.list_school_homework(
+        class_id=None, q=None, limit=50, offset=0, user=admin, session=db_session)
+    assert [(h.gap_topic, h.source) for h in homework.items] == [("Ohm's law", "Topic checkpoint")]
+    challenges = await school_oversight.list_school_challenges(
+        class_id=None, teacher_id=None, q="real", limit=50, offset=0, user=admin, session=db_session)
+    assert [c.title for c in challenges.items] == ["Real Numbers"] and challenges.items[0].done_count == 0

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from src.api.schemas.school_oversight import (
     SchoolAuditLogEntryOut,
+    SchoolChallengeOut,
     SchoolHomeworkOut,
     SchoolLeaderboardEntryOut,
     SchoolQuestionBankEntryOut,
@@ -32,6 +33,7 @@ from src.domain.models import (
     DatasetQuestion,
     Homework,
     HomeworkQuestion,
+    QuizTest,
     QuestionPaper,
     QuestionPaperQuestion,
     QuestionPaperTopic,
@@ -81,21 +83,37 @@ async def _teacher_names_for(
     return names
 
 
+Limit = Annotated[int, Query(ge=1, le=200)]
+Offset = Annotated[int, Query(ge=0)]
+
+
+def _search(q: str | None, *columns):
+    """`q` matched (case-insensitive, anywhere) against any of the columns -
+    the search box on each paged list, done in SQL so it covers every page."""
+    from sqlalchemy import or_
+    term = (q or "").strip()
+    return or_(*[c.ilike(f"%{term}%") for c in columns]) if term else None
+
+
 @router.get("/voice-tests")
 async def list_school_voice_tests(
     class_id: str | None = Query(default=None, alias="classId"),
     teacher_id: str | None = Query(default=None, alias="teacherId"),
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: Limit = 50,
+    offset: Offset = 0,
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolVoiceTestOut]:
     base = (
-        select(VoiceTest, SchoolClass, Subject)
+        select(VoiceTest, SchoolClass, Subject, Chapter.name)
         .join(SchoolClass, SchoolClass.id == VoiceTest.class_id)
         .join(Subject, Subject.id == VoiceTest.subject_id)
+        .outerjoin(Chapter, Chapter.id == VoiceTest.chapter_id)
         .where(SchoolClass.school_id == user.school_id)
     )
+    if (match := _search(q, Chapter.name, Subject.name)) is not None:
+        base = base.where(match)
     if class_id is not None:
         base = base.where(VoiceTest.class_id == class_id)
     if teacher_id is not None:
@@ -115,20 +133,21 @@ async def list_school_voice_tests(
     ).all()
 
     teacher_names = await _teacher_names_for(
-        session, {(test.class_id, test.subject_id) for test, _, _ in rows}
+        session, {(test.class_id, test.subject_id) for test, _, _, _ in rows}
     )
     items = [
         SchoolVoiceTestOut(
             id=str(test.id),
             class_label=_class_label(school_class),
             subject_name=subject.name,
+            chapter_name=chapter_name,
             teacher_name=teacher_names.get((test.class_id, test.subject_id)),
             status=test.status,
             assigned_count=test.assigned_count,
             completed_count=test.completed_count,
             created_at=test.created_at,
         )
-        for test, school_class, subject in rows
+        for test, school_class, subject, chapter_name in rows
     ]
     return ListEnvelope(items=items, total=total)
 
@@ -136,22 +155,30 @@ async def list_school_voice_tests(
 @router.get("/homework")
 async def list_school_homework(
     class_id: str | None = Query(default=None, alias="classId"),
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: Limit = 50,
+    offset: Offset = 0,
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolHomeworkOut]:
+    """Every homework in the school - after a Speak with Milo session (test_id)
+    or a topic checkpoint (topic_id, no voice test), newest first."""
+    subject_id = func.coalesce(VoiceTest.subject_id, Chapter.subject_id)
     base = (
-        select(Homework, SchoolClass, VoiceTest.subject_id)
+        select(Homework, SchoolClass, subject_id)
         .join(SchoolClass, SchoolClass.id == Homework.class_id)
-        .join(VoiceTest, VoiceTest.id == Homework.test_id)
+        .outerjoin(VoiceTest, VoiceTest.id == Homework.test_id)
+        .outerjoin(Topic, Topic.id == Homework.topic_id)
+        .outerjoin(Chapter, Chapter.id == Topic.chapter_id)
         .where(SchoolClass.school_id == user.school_id)
     )
     if class_id is not None:
         base = base.where(Homework.class_id == class_id)
+    if (match := _search(q, Homework.gap_topic)) is not None:
+        base = base.where(match)
 
     total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
-    rows = (await session.execute(base.limit(limit).offset(offset))).all()
+    rows = (await session.execute(base.order_by(Homework.created_at.desc()).limit(limit).offset(offset))).all()
 
     teacher_names = await _teacher_names_for(
         session, {(hw.class_id, subject_id) for hw, _, subject_id in rows}
@@ -165,6 +192,8 @@ async def list_school_homework(
             status=hw.status,
             assigned_count=hw.assigned_count,
             completed_count=hw.completed_count,
+            source="Speak with Milo" if hw.test_id else "Topic checkpoint",
+            created_at=hw.created_at,
         )
         for hw, school_class, subject_id in rows
     ]
@@ -175,8 +204,9 @@ async def list_school_homework(
 async def list_school_question_papers(
     subject_id: str | None = Query(default=None, alias="subjectId"),
     created_by: str | None = Query(default=None, alias="createdBy"),
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: Limit = 50,
+    offset: Offset = 0,
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolQuestionPaperOut]:
@@ -190,6 +220,8 @@ async def list_school_question_papers(
         base = base.where(QuestionPaper.subject_id == subject_id)
     if created_by is not None:
         base = base.where(QuestionPaper.created_by == created_by)
+    if (match := _search(q, QuestionPaper.name, Subject.name)) is not None:
+        base = base.where(match)
 
     total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
@@ -213,11 +245,54 @@ async def list_school_question_papers(
     return ListEnvelope(items=items, total=total)
 
 
+@router.get("/challenges", summary="Every Maths challenge (Fix Milo's homework) in the school")
+async def list_school_challenges(
+    class_id: str | None = Query(default=None, alias="classId"),
+    teacher_id: str | None = Query(default=None, alias="teacherId"),
+    q: str | None = None,
+    limit: Limit = 50,
+    offset: Offset = 0,
+    user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
+    session: AsyncSession = Depends(get_db_session),
+) -> ListEnvelope[SchoolChallengeOut]:
+    """Teachers' written challenges (Maths: Fix Milo's homework), newest first,
+    with how many of the class finished and their average - the Maths side of
+    what Speak with Milo is for Science."""
+    from src.services import quiz_tests
+
+    base = (
+        select(QuizTest, SchoolClass, Subject, User.display_name)
+        .join(SchoolClass, SchoolClass.id == QuizTest.class_id)
+        .join(Subject, Subject.id == QuizTest.subject_id)
+        .outerjoin(User, User.id == QuizTest.created_by)
+        .where(SchoolClass.school_id == user.school_id)
+    )
+    if class_id is not None:
+        base = base.where(QuizTest.class_id == class_id)
+    if teacher_id is not None:
+        base = base.where(QuizTest.created_by == teacher_id)
+    if (match := _search(q, QuizTest.title, Subject.name)) is not None:
+        base = base.where(match)
+
+    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    rows = (await session.execute(base.order_by(QuizTest.created_at.desc()).limit(limit).offset(offset))).all()
+    items = []
+    for test, school_class, subject, teacher in rows:
+        r = await quiz_tests.results(session, test) if test.status == "published" else None
+        items.append(SchoolChallengeOut(
+            id=str(test.id), title=test.title, class_label=_class_label(school_class), subject_name=subject.name,
+            teacher_name=teacher, status=test.status, student_count=r["student_count"] if r else 0,
+            done_count=r["done"] if r else 0, average_percent=r["average_percent"] if r else None,
+            created_at=test.created_at))
+    return ListEnvelope(items=items, total=total)
+
+
 @router.get("/leaderboard")
 async def get_school_leaderboard(
     class_id: str | None = Query(default=None, alias="classId"),
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: Limit = 50,
+    offset: Offset = 0,
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolLeaderboardEntryOut]:
@@ -238,12 +313,15 @@ async def get_school_leaderboard(
     )
     if class_id is not None:
         base = base.where(StudentProfile.class_id == class_id)
-    total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
-    rows = (
-        await session.execute(
-            base.order_by(StudentPoints.points.desc().nulls_last()).limit(limit).offset(offset)
-        )
-    ).all()
+    ordered = base.order_by(StudentPoints.points.desc().nulls_last())
+    if q and q.strip():
+        # a name search keeps each student's real rank: rank everyone, then filter
+        term = q.strip().lower()
+        matched = [r for r in (await session.execute(ordered)).all() if term in (r[1] or "").lower()]
+        total, rows = len(matched), matched[offset: offset + limit]
+    else:
+        total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+        rows = (await session.execute(ordered.limit(limit).offset(offset))).all()
     items = [
         SchoolLeaderboardEntryOut(
             student_id=str(student_id),
@@ -259,8 +337,9 @@ async def get_school_leaderboard(
 
 @router.get("/audit-log", summary="This school's own activity log")
 async def list_school_audit_log(
-    limit: int = 50,
-    offset: int = 0,
+    q: str | None = None,
+    limit: Limit = 50,
+    offset: Offset = 0,
     user: User = Depends(require_role(Role.SCHOOL_ADMIN)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[SchoolAuditLogEntryOut]:
@@ -273,6 +352,8 @@ async def list_school_audit_log(
         .join(User, User.id == AuditLog.actor_id)
         .where(User.school_id == user.school_id)
     )
+    if (match := _search(q, AuditLog.action, AuditLog.detail, User.display_name)) is not None:
+        base = base.where(match)
     total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
         await session.execute(base.order_by(AuditLog.created_at.desc()).limit(limit).offset(offset))
