@@ -20,12 +20,20 @@ class EasierVersion(BaseModel):
     hints: List[RubricText] = Field(default_factory=list, max_length=4)
 
 
+class FixCard(BaseModel):
+    """A Fix Milo card the app shows for this question: Milo's steps (one wrong) and the fixes to pick from."""
+    steps: List[RubricText] = Field(..., min_length=3, max_length=7)
+    fixes: List[RubricText] = Field(..., min_length=3, max_length=4)
+
+
 class LiveQuestion(EasierVersion):
     """One prepared voice-test question (contract C3) - the realtime co-learner asks exactly these."""
     id: Union[int, Annotated[str, StringConstraints(max_length=64)]]
     order: int = Field(..., ge=1, le=10)
     bloom_level: ShortText
     easier: Optional[EasierVersion] = None
+    # on screen, not spoken: the student taps the wrong step and its fix, then says why
+    card: Optional[FixCard] = None
 
 
 class SessionConfig(BaseModel):

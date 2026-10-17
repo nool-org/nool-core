@@ -42,9 +42,11 @@ from src.domain.models import (
     DailyPracticeSession,
     DatasetQuestion,
     DatasetType,
+    Feature,
     PracticeQuestion,
     QuestionType,
     SchoolClass,
+    SchoolDataset,
     StudentProfile,
     StudentTopicMastery,
     Subject,
@@ -52,6 +54,8 @@ from src.domain.models import (
     User,
 )
 from src.repositories.dataset_access import visible_datasets
+from src.repositories.subscription_repository import get_active_plan
+from src.services.feature_entitlements import is_feature_enabled
 from src.services import ai_context, answer_checks, generation_client, question_types
 from src.services.homework_builder import _sections
 from src.services.mcq_test import award_points, correct_index, explanation_of, strip_inline_options
@@ -160,12 +164,22 @@ async def _seen(session: AsyncSession, student_id: uuid.UUID, today: date) -> se
                DailyPracticeSession.practice_date >= today - timedelta(days=NO_REPEAT_DAYS)))).scalars().all())
 
 
+def from_enabled_bank():
+    """A pool question made from a bank question counts only while its dataset is
+    switched on somewhere - switching a dataset off retires what came from it.
+    ponytail: the pool is shared, so "on for any school"; per-school if schools
+    ever differ in which banks they use."""
+    return or_(PracticeQuestion.source_question_id.is_(None), PracticeQuestion.source_question_id.in_(
+        select(DatasetQuestion.id).join(SchoolDataset, SchoolDataset.dataset_id == DatasetQuestion.dataset_id)
+        .where(SchoolDataset.enabled.is_(True))))
+
+
 async def _from_pool(session: AsyncSession, topic: Topic, kind: str, level: BloomLevel,
                      exclude: set[uuid.UUID], exact: bool = False) -> PracticeQuestion | None:
     """The least used pool question on the topic - the slot's Bloom level first
     (only that level when `exact`), then real question-bank ones before written ones."""
     query = select(PracticeQuestion).where(PracticeQuestion.topic_id == topic.id, PracticeQuestion.kind == kind,
-                                           PracticeQuestion.id.not_in(list(exclude)))
+                                           PracticeQuestion.id.not_in(list(exclude)), from_enabled_bank())
     if exact:
         query = query.where(PracticeQuestion.bloom_level == level)
     return (await session.execute(
@@ -181,7 +195,8 @@ async def _import_bank(session: AsyncSession, dataset_ids: list[uuid.UUID], topi
     if not dataset_ids:
         return 0
     query = select(DatasetQuestion).where(
-        DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.topic_id == topic.id, text_only_filter(),
+        DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.topic_id == topic.id,
+        text_only_filter(pictures=kind == "mcq"),  # a spoken answer can't show a picture
         ~exists().where(PracticeQuestion.source_question_id == DatasetQuestion.id))
     if kind == "mcq":
         query = query.where(DatasetQuestion.question_type.in_((QuestionType.MCQ, QuestionType.TRUE_FALSE)),
@@ -485,6 +500,24 @@ async def _extend(session: AsyncSession, student: User, school_class: SchoolClas
     logger.info("daily_practice_extended", extra={"student_id": str(student.id), "items": len(chosen)})
 
 
+async def spoken_allowed(session: AsyncSession, student: User, today: date) -> bool:
+    """Whether today's practice may include spoken answers: the plan has them,
+    and the student has had them on fewer than its spoken_days_per_week days
+    this week (Monday on; NULL = every day)."""
+    found = await get_active_plan(session, student.school_id) if student.school_id else None
+    if not is_feature_enabled(Feature.SPOKEN_ANSWERS, plan=found):
+        return False
+    if found is None or found.spoken_days_per_week is None:
+        return True
+    days = (await session.execute(
+        select(func.count(func.distinct(DailyPracticeSession.practice_date)))
+        .join(DailyPracticeItem, DailyPracticeItem.session_id == DailyPracticeSession.id)
+        .where(DailyPracticeSession.student_id == student.id, DailyPracticeItem.kind == "voice",
+               DailyPracticeSession.practice_date >= today - timedelta(days=today.weekday()),
+               DailyPracticeSession.practice_date < today))).scalar_one()
+    return days < found.spoken_days_per_week
+
+
 async def ensure_today(session: AsyncSession, student: User) -> tuple[DailyPracticeSession | None, str | None]:
     """Today's session, built on first call; or (None, empty reason). The
     insert is ON CONFLICT DO NOTHING on (student, date): a concurrent open
@@ -529,8 +562,10 @@ async def ensure_today(session: AsyncSession, student: User) -> tuple[DailyPract
     mastery = {m.topic_id: m for m in (await session.execute(select(StudentTopicMastery).where(
         StudentTopicMastery.student_id == student.id))).scalars().all()}
     # ponytail: holds the session row and a connection through the LLM calls on a cold pool (~1 min)
-    chosen = await _fill(session, student, school_class, plan(taught, mastery, datetime.now(timezone.utc)),
-                         today, str(practice.id))
+    slots = plan(taught, mastery, datetime.now(timezone.utc))
+    if not await spoken_allowed(session, student, today):
+        slots = [replace(s, kind="mcq") if s.kind == "voice" else s for s in slots]
+    chosen = await _fill(session, student, school_class, slots, today, str(practice.id))
     if not chosen:
         await session.delete(practice)
         await session.flush()

@@ -1,5 +1,5 @@
-"""Teacher-set challenges for subjects without voice tests - in Maths, Fix
-Milo's homework (subject_rules.CHALLENGE_FORMATS): the teacher picks a
+"""Fix Milo's homework, the written challenge a teacher sets in any subject
+(subject_rules.challenge_formats): the teacher picks a
 chapter's topics and how many problems; the questions are chosen once - the
 same for every student - from the shared practice pool (bank, then
 generation; daily_practice._fill), reviewed, then published to the class.
@@ -84,7 +84,7 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
     unfit = sorted(k for k, n in mix.items() if int(n) > 0 and k not in subject_rules.challenge_formats(subject.name))
     if unfit:
         raise ValidationError(f"{subject.name} doesn't use: {', '.join(unfit)}.")
-    await challenge_rules.ensure_one_per_chapter(session, class_uuid, chapter.id)
+    await challenge_rules.ensure_one_per_chapter(session, class_uuid, chapter.id, "fix_steps")
     test = QuizTest(id=uuid.uuid4(), class_id=class_uuid, subject_id=chapter.subject_id, chapter_id=chapter.id,
                     # a default name a teacher can tell apart from last week's: "Real Numbers test · 13 Oct"
                     title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} challenge · "
@@ -147,7 +147,7 @@ async def publish(session: AsyncSession, test: QuizTest, opens_at: datetime | No
     if test.status not in ("ready", "scheduled"):
         raise ConflictError("The questions aren't ready yet.")
     if test.status == "ready":
-        await challenge_rules.ensure_one_per_chapter(session, test.class_id, test.chapter_id, ignore_id=test.id)
+        await challenge_rules.ensure_one_per_chapter(session, test.class_id, test.chapter_id, "fix_steps", ignore_id=test.id)
     now = datetime.now(timezone.utc)
     later = opens_at is not None and opens_at > now
     test.status, test.published_at = ("scheduled", opens_at) if later else ("published", now)

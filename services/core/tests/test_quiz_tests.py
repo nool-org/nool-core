@@ -312,6 +312,10 @@ async def test_one_challenge_cycle_per_chapter_per_class(db_session, monkeypatch
         await routes.publish_quiz_test(second.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
     with pytest.raises(ConflictError):
         await _create(db_session, s, monkeypatch)
+    # one per format: a Speak with Milo on the same chapter is still free
+    from src.services import challenge_rules
+    assert await challenge_rules.taken_formats(db_session, s.cls.id, s.electricity.id) == {"fix_steps"}
+    await challenge_rules.ensure_one_per_chapter(db_session, s.cls.id, s.electricity.id, "voice")
 
 
 async def _noop():

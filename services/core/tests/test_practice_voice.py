@@ -96,7 +96,10 @@ async def test_answer_is_transcribed_graded_and_stored_without_the_audio(flow):
                    "feedback": {"good": "You said the speed changes.", "add": "Add which way it bends."},
                    "xp_awarded": 15}
     assert flow.recorded == [80] and session.commits == 1
-    assert flow.transcribed[0][1] == "audio/m4a" and "Science. Light" in flow.transcribed[0][2]
+    prompt = flow.transcribed[0][2]
+    assert flow.transcribed[0][1] == "audio/m4a" and "Science: Light" in prompt
+    # never the question: the generative transcriber then "hears" a written answer to it
+    assert "light bend in water" not in prompt
     assert flow.transcribed[0][3] == "auto"  # mixed-language answers aren't forced into English
     assert flow.graded[0]["expected_points"] == ["its speed changes"] and flow.graded[0]["subject"] == "Science"
     item = flow.item
@@ -191,3 +194,12 @@ async def test_prepare_failure_leaves_rows_untouched(monkeypatch):
     row = _question(text="Explain refraction.", expected_points=[], explanation="Bending of light.")
     await practice_voice.prepare_voice_questions(FakeSession(), [row])
     assert row.text == "Explain refraction." and row.expected_points == [] and row.misconceptions == []
+
+
+async def test_a_question_without_a_rubric_is_graded_against_the_book_answer(flow):
+    source = DatasetQuestion(id=uuid.uuid4(), answer="Carbonic acid and sodium hydroxide; it is basic, pH about 8.")
+    flow.question = _question(expected_points=[], source_question_id=source.id)
+    session = FakeSession()
+    session.rows[source.id] = source
+    await _answer(session)
+    assert flow.graded[0]["expected_points"] == [f"Reference answer: {source.answer}"]

@@ -83,3 +83,33 @@ class TopicQuizSummaryOut(CamelModel):
 
 class ChapterTopicQuizzesOut(CamelModel):
     topics: list[TopicQuizSummaryOut]
+
+
+class SuggestedTopicOut(CamelModel):
+    topic_id: str
+    name: str
+
+
+class SuggestedFormatOut(CamelModel):
+    format: str  # voice | fix_steps
+    label: str
+    why: str
+    fix_cards: int = 0  # voice: Fix Milo cards to mix into the talk
+    topics: list[SuggestedTopicOut] = []  # the topics worked on paper (what Fix Milo covers)
+
+
+class FocusTopicOut(CamelModel):
+    topic_id: str
+    name: str
+    average_percent: int | None
+
+
+class ChallengeSuggestionOut(CamelModel):
+    """What the teacher could set for this chapter and class, and why - best fit first."""
+    nature: str
+    taken: bool  # the class already has every challenge it could get on this chapter
+    options: list[SuggestedFormatOut]
+    bloom_levels: list[str]
+    focus_topics: list[FocusTopicOut]
+    evidence: list[str]
+    note: str | None

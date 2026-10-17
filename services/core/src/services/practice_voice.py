@@ -111,7 +111,7 @@ async def answer_voice_item(session: AsyncSession, session_id: str, item_id: str
     subject = await _subject_name(session, question.chapter_id)
     try:
         graded = await colearner_client.grade_answer(
-            question=question.text, expected_points=list(question.expected_points or []),
+            question=question.text, expected_points=await _expected_points(session, question),
             misconceptions=list(question.misconceptions or []), transcript=transcript, subject=subject, token=token)
         score = max(0, min(100, int(graded["score"])))
         feedback = {"good": str(graded.get("good") or ""), "add": str(graded.get("add") or "")}
@@ -126,6 +126,17 @@ async def answer_voice_item(session: AsyncSession, session_id: str, item_id: str
     return _result(item)
 
 
+async def _expected_points(session: AsyncSession, question: PracticeQuestion) -> list[str]:
+    """The rubric, or - most rows never got one - the book's answer as the one point
+    to check against, so the grader isn't judging from the question alone."""
+    if question.expected_points:
+        return list(question.expected_points)
+    answer = (await session.get(DatasetQuestion, question.source_question_id)
+              if question.source_question_id else None)
+    reference = ((answer.answer if answer else None) or question.explanation or "").strip()
+    return [f"Reference answer: {reference[:1500]}"] if reference else []
+
+
 def _result(item) -> dict:
     return {"transcript": item.transcript, "score": item.score,
             "feedback": item.feedback or dict(UNGRADED_FEEDBACK), "xp_awarded": item.xp_awarded or 0}
@@ -138,9 +149,12 @@ async def _subject_name(session: AsyncSession, chapter_id: uuid.UUID) -> str | N
 
 
 async def _vocabulary(session: AsyncSession, question: PracticeQuestion) -> str:
-    """Transcription prompt: the subject/chapter/topic words, so terms come out right."""
+    """Transcription prompt: the subject/chapter/topic words, so terms come out right.
+    Never the question itself - gpt-4o-mini-transcribe is generative: given the
+    question, unclear audio came back as a neat written answer to it (graded 100%)."""
     chapter = await session.get(Chapter, question.chapter_id)
     topic = await session.get(Topic, question.topic_id) if question.topic_id else None
     subject = await session.get(Subject, chapter.subject_id) if chapter else None
-    words = [subject.name if subject else None, chapter.name if chapter else None, topic.name if topic else None]
-    return (". ".join(w for w in words if w) + f". Question: {question.text}")[:900]
+    about = ", ".join(w for w in [chapter.name if chapter else None, topic.name if topic else None] if w)
+    return (f"A school student in India speaking about {subject.name if subject else 'a school subject'}"
+            + (f": {about}" if about else "") + ", sometimes mixing in Tamil, Hindi or other Indian-language words.")[:900]

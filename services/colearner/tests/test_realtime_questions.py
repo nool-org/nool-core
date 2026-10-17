@@ -354,7 +354,6 @@ def test_prompt_has_the_new_rules_and_the_student_when_given():
     bare = rs.build_session(_config())["instructions"]
     assert "first name is" not in bare and "LAST TEST" not in bare
     assert "easier" in rs.ASK_QUESTION_TOOL["parameters"]["properties"]
-    assert "first name" in rs.CLOSING_INSTRUCTIONS and "strength" in rs.CLOSING_INSTRUCTIONS
 
 
 def test_prompt_carries_the_chapter_quiz_focus_when_given():
@@ -493,3 +492,54 @@ def test_prompts_keep_milo_quiet_while_paused():
         text = rs.build_session(config)["instructions"]
         assert 'If you receive "[PAUSED]", say nothing.' in text
         assert '"[RESUMED]", say one short welcome back line and repeat the current question exactly.' in text
+
+
+CARD = {"steps": ["H2 + O2 -> H2O", "H2 + O2 -> H2O2", "Balanced."],
+        "fixes": ["2H2 + O2 -> 2H2O", "H2 + O2 -> H2O2", "H2 + 2O2 -> H2O"]}
+
+
+def _card_tap(item_id, step, fix):
+    return [{"type": "conversation.item.added", "item": {
+        "id": item_id, "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": f"[CARD_ANSWERED step={step} fix={fix}] The student tapped."}]}}]
+
+
+def test_a_fix_milo_card_is_on_screen_answered_by_a_tap_then_the_why(monkeypatch, short_call):
+    config = SessionConfig(questions=[_q(1), _q(2, card=CARD), _q(3)])
+    text = rs.build_session(config)["instructions"]
+    assert "Q2 [Understanding] (ON SCREEN)" in text and "[CARD_ANSWERED" in text
+    assert "H2O2" not in text  # the steps are on the screen, never in Milo's mouth
+    assert "(ON SCREEN)" not in rs.build_session(_config())["instructions"]
+
+    ws = FakeWS([
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"), *_user("u1", "Flow of charge"),
+        _tool("ask_question", 2, "c2"), *_assistant("a2", "Question 2 text?"),
+        *_card_tap("t2", 1, 0),
+        *_assistant("a2b", "Why was that step wrong?"), *_user("u2", "You can't change a subscript"),
+        _tool("ask_question", 3, "c3"), *_assistant("a3", "Question 3 text?"), *_user("u3", "Heat"),
+        *_assistant("a3b", "Got it."),
+        _done({"type": "function_call", "name": "end_session", "call_id": "e1"}),
+        *_assistant("bye", "That concludes all questions for our session."),
+    ])
+    call, _ = _run_sideband(monkeypatch, ws, config)
+
+    # the tap is question 2's answer, written out for the grader; the spoken "why" follows it
+    assert call.progress[2]["first_item"] == "t2" and call.item_kind["u2"] == "follow_up"
+    assert call.items["t2"]["text"] == ('(tapped on the screen) Step 2 is the wrong one: "H2 + O2 -> H2O2". '
+                                        'The fix: "2H2 + O2 -> 2H2O".')
+    assert call.progress[2]["silences"] == 0  # no "take your time" while they tap
+    turns = [t for t in rs.transcript_turns(call) if t["question_number"] == 2]
+    assert [t["role"] for t in turns] == ["assistant", "user", "assistant", "user"]
+    assert call.state.is_completed
+
+
+def test_a_card_tap_out_of_range_or_off_a_card_is_ignored():
+    config = SessionConfig(questions=[_q(1), _q(2, card=CARD)])
+    call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.SessionState(session_id="s", config=config))
+    for current, step in ((1, 0), (2, 9)):
+        call.current = current
+        item = _card_tap(f"t{current}", step, 0)[0]["item"]
+        call.items[item["id"]] = {"role": "user", "text": ""}
+        rs._card_answer(call, item)
+        assert call.items[item["id"]]["text"] == "" and call.spoken_turns == 0

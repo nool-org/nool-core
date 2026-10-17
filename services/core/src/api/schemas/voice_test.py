@@ -36,6 +36,8 @@ class CreateTestIn(CamelModel):
     duration_minutes: int
     completion_window_hours: int
     target: AssignmentTarget
+    # Fix Milo cards mixed into the talk - suggested for chapters with equations or calculations
+    fix_cards: int = Field(default=0, ge=0, le=2)
 
 
 class VoiceTestQuestionOut(CamelModel):
@@ -55,6 +57,7 @@ class VoiceTestQuestionOut(CamelModel):
     expected_points: list[str]
     misconceptions: list[str]
     hints: list[str]
+    card: dict | None = None  # a Fix Milo card (with its answer - this is the teacher's view)
     status: VoiceTestQuestionStatus
     # quality loop across students (ai_assessor.py's _count_confusion) - reword when flagged
     needs_rewording: bool = False

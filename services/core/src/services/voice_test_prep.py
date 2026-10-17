@@ -16,6 +16,7 @@ case logs a warning. VoiceTest.prep_status tells sessions whether to wait
 stems, {tex} markup, broken encoding - are never picked (logged).
 """
 
+import asyncio
 import logging
 import re
 import uuid
@@ -46,7 +47,7 @@ from src.domain.models.question_paper import PaperDifficultyLevel
 from src.domain.models.voice_test import VoiceTestPrepStatus
 from src.repositories import get_session
 from src.repositories.dataset_access import visible_datasets
-from src.services import ai_context, generation_client, kg_client
+from src.services import ai_context, challenge_suggester, daily_practice, generation_client, kg_client, question_types
 from src.services.question_selector import Slot, select_questions
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,17 @@ async def prepare_test(session: AsyncSession, test: VoiceTest, teacher: User) ->
 
 
 async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> bool:
-    """True when the test has its questions."""
+    """True when the test has its questions. Fix Milo cards are written alongside, from the start."""
+    cards = (asyncio.create_task(_cards(test.id, test.chapter_id, test.class_id, test.fix_cards))
+             if test.fix_cards else None)
+    try:
+        return await _prepare_questions(session, test, teacher, cards)
+    finally:
+        if cards and not cards.done():
+            cards.cancel()  # already prepared, or nothing to ask
+
+
+async def _prepare_questions(session: AsyncSession, test: VoiceTest, teacher: User, cards_task) -> bool:
     ctx = await _context(session, test)
     if ctx is None:
         return False
@@ -114,7 +125,11 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
             continue
         picked.append(question)
 
-    prepped = await _prep(test, ctx, picked) if picked else []
+    # a question another test already has worded for speech (and nobody flagged) is reused, not rewritten
+    reused = await _reused(session, [q.id for q in picked])
+    fresh = [q for q in picked if q.id not in reused]
+    written_now = dict(zip([q.id for q in fresh], await _prep(test, ctx, fresh) if fresh else []))
+    prepped = [reused.get(q.id) or written_now.get(q.id) for q in picked]
     # A question generation could not reword for speech is swapped for another
     # of the same level (up to REWORD_RETRIES rounds), then dropped - never asked
     # in its raw dataset wording.
@@ -149,10 +164,81 @@ async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> boo
         return False
 
     kept.sort(key=lambda qp: order.index(qp[0].bloom_level))
-    for number, (question, p) in enumerate(kept, start=1):
-        session.add(VoiceTestQuestion(voice_test_id=test.id, order=number, **_fields(question, p)))
+    rows = [_fields(question, p) for question, p in kept]
+    cards = await cards_task if cards_task else []
+    # a card after each spoken question but the last - never the closing one
+    mixed = []
+    for i, row in enumerate(rows):
+        mixed.append(row)
+        if cards and i < len(rows) - 1:
+            mixed.append(cards.pop(0))
+    for number, fields in enumerate(mixed + cards, start=1):
+        session.add(VoiceTestQuestion(voice_test_id=test.id, order=number, **fields))
     await session.commit()
     return True
+
+
+CARD_SAY = ("Have a look at your screen - that's my homework, and I slipped in one step. Tap the step I got wrong "
+            "and pick the right fix. Then tell me why it was wrong.")
+CARD_HINTS = ["Go line by line - does each step really follow from the one before it?",
+              "Check every line carefully: the numbers and units, or the atoms on each side."]
+
+
+SPARE_CARDS = 1  # one more card is asked for than needed - a card that fails its check mustn't leave the test short
+
+
+async def _cards(test_id: uuid.UUID, chapter_id: uuid.UUID, class_id: uuid.UUID, wanted: int) -> list[dict]:
+    """Up to `wanted` Fix Milo cards, one per worked topic of the chapter
+    (challenge_suggester.topic_work), from the shared practice pool or written
+    by generation - every topic at once, each in its own session, so this runs
+    alongside the spoken questions' prep (_prepare). Each is a question row: on
+    screen, tapped, then the "why" spoken - graded on all three. Fewer when
+    they can't be made (logged), never an MCQ in their place."""
+    async with get_session() as session:
+        work = await challenge_suggester.topic_work(session, chapter_id)
+    worked = sorted((w for w in work if w["equations"] + w["calculations"] >= challenge_suggester.WORKED_SHARE),
+                    key=lambda w: -(w["equations"] + w["calculations"]))[:wanted + SPARE_CARDS]
+
+    async def one(topic_id: str) -> tuple[uuid.UUID, str, dict] | None:
+        async with get_session() as session:
+            topic = await session.get(Topic, uuid.UUID(topic_id))
+            q = await daily_practice._from_pool(session, topic, "fix_steps", BloomLevel.EVALUATE, set())
+            if q is None:
+                slot = daily_practice.Slot(topic, "fix_steps", BloomLevel.EVALUATE)
+                q = (await daily_practice._generate_special(
+                    session, await session.get(SchoolClass, class_id), [slot], [0])).get(0)
+            if q is None:
+                return None
+            q.used_count = (q.used_count or 0) + 1  # the least used first next time
+            await session.commit()
+            return topic.id, q.text, dict(q.spec)
+
+    found = await asyncio.gather(*(one(w["topic_id"]) for w in worked), return_exceptions=True)
+    cards = []
+    for got in found:
+        if isinstance(got, BaseException):
+            logger.warning("voice_test_prep_card_failed", extra={"test_id": str(test_id), "error": repr(got)})
+            continue
+        if got is None or len(cards) == wanted:
+            continue
+        topic_id, text, spec = got
+        spec = question_types.shuffle("fix_steps", spec, str(test_id))
+        right = next(f["text"] for f in spec["fixes"] if f.get("correct"))
+        cards.append({
+            "dataset_question_id": None, "bloom_level": BloomLevel.EVALUATE, "topic_id": topic_id,
+            "subtopic_id": None, "concepts": [], "original_text": spec.get("problem") or text,
+            "reworded_text": spec.get("problem") or text, "spoken_text": CARD_SAY,
+            "expected_points": [f"Finds the wrong step: step {spec['wrong_step'] + 1} "
+                                f"(\"{spec['steps'][spec['wrong_step']]}\")",
+                                f"Picks the right fix: \"{right}\"",
+                                f"Says why it was wrong: {spec.get('explanation', '')}"],
+            "misconceptions": [f["mistake"].replace("_", " ") for f in spec["fixes"] if f.get("mistake")],
+            "hints": CARD_HINTS, "easier_version": None, "card": spec, "status": VoiceTestQuestionStatus.DRAFT,
+        })
+    if len(cards) < wanted:
+        logger.warning("voice_test_prep_fewer_cards", extra={"test_id": str(test_id), "wanted": wanted,
+                                                             "made": len(cards)})
+    return cards
 
 
 async def swap_question(
@@ -160,7 +246,9 @@ async def swap_question(
 ) -> bool:
     """Replaces `question` in place (same id/order) by another dataset
     question of its Bloom level not already in the test, re-prepped.
-    False when there is no other candidate."""
+    False when there is no other candidate (or it's a Fix Milo card)."""
+    if question.card:
+        return False
     ctx = await _context(session, test)
     if ctx is None:
         return False
@@ -186,7 +274,9 @@ async def swap_question(
 async def reword_question(session: AsyncSession, test: VoiceTest, question: VoiceTestQuestion) -> bool:
     """Re-preps `question` in place from its source, asked to come out
     clearer and simpler to hear (the teacher's answer to needs_rewording);
-    its quality counters start over. False when generation gave nothing new."""
+    its quality counters start over. False when generation gave nothing new (or it's a card)."""
+    if question.card:
+        return False
     ctx = await _context(session, test)
     if ctx is None:
         return False
@@ -451,6 +541,23 @@ async def _write_for_levels(session: AsyncSession, test: VoiceTest, levels: list
 
 
 REWORD_RETRIES = 2
+
+
+async def _reused(session: AsyncSession, question_ids: list) -> dict:
+    """dataset question id -> its speech wording and rubric from an earlier test, as _prep returns them."""
+    rows = (await session.execute(
+        select(VoiceTestQuestion).where(
+            VoiceTestQuestion.dataset_question_id.in_([i for i in question_ids if i]),
+            VoiceTestQuestion.needs_rewording.is_(False), VoiceTestQuestion.card.is_(None))
+        .order_by(VoiceTestQuestion.created_at.desc()))).scalars().all()
+    found = {}
+    for r in rows:
+        if r.dataset_question_id not in found and r.expected_points and r.spoken_text != r.original_text:
+            found[r.dataset_question_id] = {
+                "reworded_text": r.reworded_text, "spoken_text": r.spoken_text, "concepts": r.concepts,
+                "expected_points": r.expected_points, "misconceptions": r.misconceptions, "hints": r.hints,
+                "easier": r.easier_version}
+    return found
 
 
 def _reworded(question: DatasetQuestion, prepped: dict | None) -> bool:

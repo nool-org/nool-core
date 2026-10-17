@@ -128,7 +128,7 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
         subject = await session.get(Subject, test.subject_id)
         done = test.id in taken
         hw, progress = homework.get(test.id, (None, None))
-        voice = _step("voice_test", "Co-learner", "done" if done else "current", target_id=str(test.id),
+        voice = _step("voice_test", "Speak with Milo", "done" if done else "current", target_id=str(test.id),
                       due_at=None if done else test.due_at)
         hw_step = (_homework_step(hw, progress, waiting=True, now=now) if done
                    else _step("homework", "Homework", "locked"))
@@ -144,7 +144,7 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
                 check_step["note"] = "Opening soon"
         steps = [voice, hw_step, check_step]
         out.append({"id": f"test:{test.id}", "kind": "test",
-                    "title": chapter.name if chapter else "Co-learner",
+                    "title": chapter.name if chapter else "Challenge",
                     "subtitle": "Speak with Milo · talk it through",
                     "chapter_id": str(test.chapter_id), "chapter_name": chapter.name if chapter else None,
                     "subject": subject.name if subject else None,
@@ -173,7 +173,7 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
         finished = attempt is not None and attempt.outcome is not None
         if test.due_at and test.due_at < now and not finished:
             continue  # missed - gone, like a voice test past its deadline
-        step = _step("test", "Co-learner", "done" if finished else "current", target_id=str(test.id),
+        step = _step("test", "Fix Milo's homework", "done" if finished else "current", target_id=str(test.id),
                      due_at=None if finished else test.due_at,
                      note=f"{attempt.score_percent}%" if finished else None)
         # like a check-in: the homework, then a second look in the same format
@@ -198,8 +198,8 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
         chapter = await session.get(Chapter, test.chapter_id)
         out.append({"id": f"quiz_test:{test.id}", "kind": "quiz_test",
                     "title": chapter.name if chapter else test.title,
-                    "subtitle": "Co-learner · fix Milo's homework" if set(test.mix or {}) == {"fix_steps"}
-                    else "Co-learner",
+                    "subtitle": "Fix Milo's homework · find the slip" if set(test.mix or {}) == {"fix_steps"}
+                    else "Challenge",
                     "chapter_id": str(test.chapter_id), "chapter_name": chapter.name if chapter else None,
                     "subject": (await session.get(Subject, test.subject_id)).name,
                     "state": _chain_state(steps),

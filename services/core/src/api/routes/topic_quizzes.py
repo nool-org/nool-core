@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import get_db_session, require_role
 from src.api.routes.daily_practice import _get, _item_out, _teaches
 from src.api.schemas.topic_quiz import (
+    ChallengeSuggestionOut,
     ChapterTopicQuizzesOut,
     QuizAnalysisOut,
     QuizFinishOut,
@@ -21,7 +22,8 @@ from src.api.schemas.topic_quiz import (
     TopicQuizSummaryOut,
 )
 from src.domain.models import Chapter, DailyPracticeSession, QuizTest, Role, Subject, Topic, User
-from src.services import daily_practice, topic_quiz
+from src.services import challenge_suggester, daily_practice, topic_quiz
+from src.services.question_selector import figure_svgs
 
 router = APIRouter(prefix="/api/v1", tags=["topic-quizzes"])
 
@@ -49,8 +51,9 @@ async def _quiz_out(session: AsyncSession, quiz: DailyPracticeSession) -> TopicQ
     else:
         topic = await session.get(Topic, quiz.topic_id)
         topic_id, name, page = str(topic.id), daily_practice.tidy(topic.name), topic.page
+    svgs = await figure_svgs(session, [q.source_question_id for _, q, _ in items])
     return TopicQuizOut(id=str(quiz.id), topic_id=topic_id, topic_name=name, attempt=quiz.attempt, topic_page=page,
-                        status=quiz.status, items=[_item_out(*row) for row in items],
+                        status=quiz.status, items=[_item_out(*row, svgs) for row in items],
                         xp_awarded=quiz.xp_awarded or 0, analysis=_analysis_out(quiz),
                         quiz_test_id=str(quiz.quiz_test_id) if quiz.quiz_test_id else None)
 
@@ -126,3 +129,18 @@ async def get_class_topic_quizzes(
     rows = await topic_quiz.class_topic_summary(session, class_uuid, chapter.id)
     return ChapterTopicQuizzesOut(topics=[TopicQuizSummaryOut.model_validate(r) for r in rows])
 
+
+
+@router.get("/classes/{class_id}/chapters/{chapter_id}/challenge-suggestion",
+            summary="Which challenge to set for this chapter, and why")
+async def get_challenge_suggestion(
+    class_id: str,
+    chapter_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> ChallengeSuggestionOut:
+    """A suggestion only - the teacher picks the format and settings themselves
+    (services/challenge_suggester.py)."""
+    chapter = await _get(session, Chapter, chapter_id, "Chapter")
+    class_uuid = await _teaches(session, user, class_id, chapter.subject_id)
+    return ChallengeSuggestionOut.model_validate(await challenge_suggester.suggest(session, class_uuid, chapter))

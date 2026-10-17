@@ -5,6 +5,11 @@
 # Live voice (WebRTC realtime) can't be proxied and goes to OpenAI directly.
 
 model_list:
+  # Gemini models as "gemini/<model>" (question-bank writing; text only, never student data)
+  - model_name: "gemini/*"
+    litellm_params:
+      model: "gemini/*"
+      api_key: os.environ/GEMINI_API_KEY
   # any OpenAI model the services ask for, by its own name (gpt-5.1, gpt-5-mini, ...)
   - model_name: "*"
     litellm_params:

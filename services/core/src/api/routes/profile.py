@@ -54,6 +54,8 @@ async def get_me(
             school_logo_data_uri=school_logo_data_uri,
             must_change_password=app_user.must_change_password,
             enabled_features=effective_enabled_features(plan=plan),
+            plan_name=plan.name if plan else None,
+            extra_challenges_per_month=plan.extra_challenges_per_month or 0 if plan else 0,
             avatar=app_user.avatar,
         )
     )

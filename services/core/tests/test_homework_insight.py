@@ -222,3 +222,31 @@ async def test_insight_client_forwards_the_students_token(monkeypatch):
     )
     assert out == _FAKE_INSIGHT
     assert seen["auth"] == "Bearer student-token"
+
+
+async def test_the_explanation_is_about_the_weakest_topic_the_questions_target(db_session, monkeypatch):
+    from src.domain.models import StudentTestResultTopicScore, Topic
+
+    hw, student = await _seed_homework_with_student(db_session)
+    test = await db_session.get(VoiceTest, hw.test_id)
+    weak = Topic(chapter_id=test.chapter_id, name="12.3 FORCE ON A CURRENT-CARRYING CONDUCTOR",
+                 text_content="Fleming's left-hand rule gives the force.")
+    db_session.add(weak)
+    await db_session.flush()
+    result = StudentTestResult(test_id=hw.test_id, student_id=student.id, mastery_percent=40)
+    db_session.add(result)
+    await db_session.flush()
+    db_session.add(StudentTestResultTopicScore(student_test_result_id=result.id, topic_id=weak.id, percent=20,
+                                               answered=1))
+    await db_session.flush()
+    captured = {}
+
+    async def fake_generate(**kwargs):
+        captured.update(kwargs)
+        return _FAKE_INSIGHT
+
+    monkeypatch.setattr(student_homework, "generate_homework_insight", fake_generate)
+    await student_homework.get_homework_context(homework_id=str(hw.id), user=student, session=db_session)
+
+    assert captured["topic"] == f"{hw.gap_topic} - 12.3 Force on a Current-carrying Conductor"
+    assert captured["textbook_context"] == "Fleming's left-hand rule gives the force."

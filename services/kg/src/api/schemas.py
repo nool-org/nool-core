@@ -72,6 +72,9 @@ class PaperSlot(BaseModel):
     bloom_level: ShortText
     difficulty: ShortText
     question_type: ShortText
+    # set when the teacher gave chapter weightage - the question must come from this chapter
+    chapter: ShortText | None = None
+    chapter_number: int | None = None
 
 
 class GenerateQuestionsIn(BaseModel):

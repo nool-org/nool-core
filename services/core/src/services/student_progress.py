@@ -28,11 +28,11 @@ WEAK_BELOW = 70  # a level under this is worth working on (topic_quiz.LAGGING_BE
 
 
 def _kind(session: DailyPracticeSession, test: QuizTest | None) -> str:
-    """The names the app uses: a topic checkpoint, a chapter's co-learner, and either's re-check."""
+    """The names the app uses: a topic checkpoint, a teacher's challenge, and either's re-check."""
     if session.attempt == 2:
         return "Re-check"
     if test is not None:
-        return "Co-learner · Fix Milo's homework" if set(test.mix or {}) == {"fix_steps"} else "Co-learner"
+        return "Fix Milo's homework" if set(test.mix or {}) == {"fix_steps"} else "Challenge"
     return "Topic checkpoint"
 
 
@@ -57,7 +57,7 @@ async def by_subject(session: AsyncSession, student: User) -> list[dict]:
                 levels[rid][level.value] = percent
     for rid, test_id, mastery, at, sid, sname, chapter in voice:
         names[sid] = sname
-        results[sid].append({"label": chapter or sname, "kind": "Co-learner", "score_percent": round(mastery or 0),
+        results[sid].append({"label": chapter or sname, "kind": "Speak with Milo", "score_percent": round(mastery or 0),
                              "per_bloom": levels.get(rid, {}), "at": at, "test_id": str(test_id), "quiz_id": None})
 
     finished = (await session.execute(

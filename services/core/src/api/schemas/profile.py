@@ -22,6 +22,10 @@ class ProfileOut(CamelModel):
     # endpoint (in addition to Auth's claim-only /me) specifically to read
     # this field - see services/api/meClient.ts's getMyProfile().
     enabled_features: list[Feature] | None
+    # the school's plan name ("Core", "Plus", "Pro"; None = no subscription yet) and its
+    # extra challenges a month - the create screens let a taken chapter be picked again when > 0
+    plan_name: str | None = None
+    extra_challenges_per_month: int = 0
     # the picture they picked (src/services/avatars.py), None = initials
     avatar: str | None = None
 

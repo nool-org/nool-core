@@ -21,7 +21,9 @@ from types import SimpleNamespace
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.models import BloomLevel, Chapter, DatasetQuestion, PracticeQuestion, QuestionType, Subject, Topic
+from src.domain.models import (
+    BloomLevel, Chapter, DatasetQuestion, PracticeQuestion, QuestionType, SchoolDataset, Subject, Topic,
+)
 from src.services import ai_context, answer_checks, daily_practice, generation_client, question_types
 from src.services.homework_builder import _sections
 
@@ -52,8 +54,10 @@ async def derive(session: AsyncSession, chapter_id: uuid.UUID, grade: int = 10, 
     done = {(sid, kind) for sid, kind in (await session.execute(select(
         PracticeQuestion.source_question_id, PracticeQuestion.kind).where(
         PracticeQuestion.chapter_id == chapter_id, PracticeQuestion.kind.in_(tuple(LEVEL))))).all()}
+    enabled = select(SchoolDataset.dataset_id).where(SchoolDataset.enabled.is_(True))  # never a switched-off bank
     candidates = [(q, k) for q in (await session.execute(select(DatasetQuestion).where(
-        DatasetQuestion.chapter_id == chapter_id, DatasetQuestion.topic_id.is_not(None))
+        DatasetQuestion.chapter_id == chapter_id, DatasetQuestion.topic_id.is_not(None),
+        DatasetQuestion.dataset_id.in_(enabled))
         .order_by(DatasetQuestion.id))).scalars().all() if (k := kind_for(q)) and (q.id, k) not in done][:limit]
     made = {"fix_steps": 0, "who_is_right": 0}
     for topic_id in dict.fromkeys(q.topic_id for q, _ in candidates):

@@ -40,3 +40,4 @@ class HomeworkQaConfirmationOut(CamelModel):
     recheck_topic_id: str | None = None  # a topic quiz's homework: its re-check quiz is open now
     recheck_test_id: str | None = None  # a teacher's challenge's homework: its second look is open now
     early_bonus_xp: int = 0  # for finishing before the window ran out (student_tasks.EARLY_BONUS)
+    xp_awarded: int = 0  # all XP this completion earned (COMPLETE_XP + the early bonus) - first time only

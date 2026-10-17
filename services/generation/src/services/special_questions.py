@@ -28,7 +28,8 @@ BASE = """You write one question for a CBSE Class {grade} {subject} student in I
 English, short sentences. Write maths as plain text with symbols: √5, 2 × 3, x², 2³, ≠, ≤, π - powers as superscripts, never ^, LaTeX or $.
 In Mathematics, build the question around a calculation or a worked problem (numbers to work with, a short
 word problem) the way CBSE board papers do - not around a definition. Keep every line short: it is read on a
-phone."""
+phone. Data with more than 4 values (grouped data, a frequency distribution) goes in a table, as pipe rows with
+a header row first, one per line: | Class interval | 0-10 | 10-20 |"""
 
 PROMPTS = {
     "who_is_right": BASE + """
@@ -49,6 +50,10 @@ TYPE "Fix Milo's homework": Milo, the class owl, solved a problem and made ONE m
 - problem: the problem Milo solved, one or two sentences.
 - steps: Milo's worked solution, 3 to 6 steps, each one line. Exactly one step is wrong (a real student
   mistake - e.g. taking the highest power for the HCF); every later step follows from it honestly.
+  In Science, Milo's work is something done on paper: writing and balancing a chemical equation (the slip:
+  changing a subscript instead of a coefficient, an atom left unbalanced, a wrong product), or a numerical
+  (formula, substitution, units - the slip: adding resistors in parallel like series, a sign convention, a
+  unit not converted). Write equations as plain text with subscripts and an arrow: 2H₂ + O₂ → 2H₂O.
 - wrong_step: index (from 0) of the wrong step.
 - fixes: 3 or 4 versions of that step; exactly one is correct (correct: true); the others are other common
   mistakes, each with a snake_case mistake tag. All about the same length and written as Milo would write

@@ -26,16 +26,42 @@ from src.domain.models.question_paper import PaperDifficultyLevel
 
 
 
-def text_only_filter():
-    """Questions a text-only client can show: no figure, no reference to a
-    figure the import couldn't attach, no blank MCQ option."""
+def _has(path: str):
+    return DatasetQuestion.figures.op("@?")(literal_column(f"'$[*] ? (exists(@.{path}))'::jsonpath"))
+
+
+def text_only_filter(*, pictures: bool = False):
+    """Questions the app can show: no figure, no reference to a figure the
+    import couldn't attach, no blank MCQ option. `pictures`: also ones whose
+    figures are all drawn inline (an "svg" - Nool's picture questions), for
+    screens that render them; never an imported image file (a "blob")."""
+    drawn = and_(_has("svg"), not_(_has("blob")))
+    no_figure = DatasetQuestion.figures.is_(None)
+    unattached = DatasetQuestion.text.op("~*")(r"\[image|(given|following|shown|adjacent) (figure|diagram|graph)|fig\.")
     return and_(
-        DatasetQuestion.figures.is_(None),
-        not_(DatasetQuestion.text.op("~*")(r"\[image|(given|following|shown|adjacent) (figure|diagram|graph)|fig\.")),
+        or_(no_figure, drawn) if pictures else no_figure,
+        or_(drawn, not_(unattached)) if pictures else not_(unattached),
         or_(DatasetQuestion.options.is_(None),
             not_(DatasetQuestion.options.op("@?")(literal_column(
                 """'$[*] ? (@.type() == "string" && @ like_regex "^[[:space:]]*$")'::jsonpath""")))),
     )
+
+
+def figure_svg(question: DatasetQuestion | None) -> str | None:
+    """The question's inline picture (SVG markup), if it has one."""
+    for figure in (question.figures or []) if question is not None else []:
+        if figure.get("svg"):
+            return figure["svg"]
+    return None
+
+
+async def figure_svgs(session: AsyncSession, question_ids) -> dict[uuid.UUID, str]:
+    """{bank question id: its inline picture} for those of `question_ids` with one."""
+    ids = {i for i in question_ids if i is not None}
+    if not ids:
+        return {}
+    rows = (await session.execute(select(DatasetQuestion).where(DatasetQuestion.id.in_(ids), _has("svg")))).scalars()
+    return {q.id: svg for q in rows if (svg := figure_svg(q))}
 
 
 _DIFFICULTY_ORDER = [PaperDifficultyLevel.EASY, PaperDifficultyLevel.MEDIUM, PaperDifficultyLevel.HARD]
@@ -112,6 +138,7 @@ async def select_questions(
     exclude_uids: set[str] | frozenset[str] = frozenset(),
     seed: int | str | None = None,
     text_only: bool = False,
+    pictures: bool = False,
     focus_concepts: set[str] | frozenset[str] = frozenset(),
 ) -> Selection:
     """Fill `slots` from the chapter's questions in `dataset_ids`.
@@ -124,7 +151,7 @@ async def select_questions(
     confident curriculum link, most often asked in past papers, then a
     seeded shuffle so two homeworks on the same gap aren't identical.
     `text_only` skips questions that need a figure (for clients that can't
-    show images yet). `focus_concepts` (the student's weak concepts) ranks a
+    show images yet) - with `pictures`, drawn (inline SVG) pictures are kept. `focus_concepts` (the student's weak concepts) ranks a
     question covering any of them above everything else.
     """
     selection = Selection()
@@ -139,7 +166,7 @@ async def select_questions(
         DatasetQuestion.bloom_level.in_({s.bloom_level for s in slots}),
     )
     if text_only:
-        query = query.where(text_only_filter())
+        query = query.where(text_only_filter(pictures=pictures))
     rows = (await session.execute(query)).scalars().all()
 
     # One candidate per question: the same question sits in several datasets.

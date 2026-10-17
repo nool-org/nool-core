@@ -34,6 +34,9 @@ class Feature(str, Enum):
     ASSISTANT = "assistant"
     LEADERBOARD = "leaderboard"
     IMPROVEMENT_ANALYSIS = "improvement_analysis"
+    # Plus and Pro: the student's daily MCQ practice, and the recorded (spoken) answers inside it
+    DAILY_PRACTICE = "daily_practice"
+    SPOKEN_ANSWERS = "spoken_answers"
 
 
 class UserStatus(str, Enum):
@@ -77,6 +80,10 @@ class Plan(IdMixin, Base):
     # two). Enforced by src/api/deps.py's require_feature dependency, set
     # via GET/PUT /admin/plans/{id}/features.
     enabled_features: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # Days a week a student's daily practice may include spoken answers (Plus: 3). NULL = every day.
+    spoken_days_per_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Challenges a class may take a month on a chapter it already has one of that kind on (Pro: 1).
+    extra_challenges_per_month: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Soft-disable so a retired plan doesn't break FK references from
     # schools/subscriptions still on it.
     active: Mapped[bool] = mapped_column(Boolean, default=True)

@@ -61,3 +61,14 @@ def test_topic_scores_map_question_numbers_to_topics():
     ]}
     assert topic_scores(report, {1: t1, 2: t1, 3: t2, 4: None, 5: t2}) == {t1: (60, 1), t2: (100, 1)}
     assert topic_scores(None, {1: t1}) == {}
+
+
+def test_a_level_asked_but_not_ticked_is_still_scored():
+    # a Fix Milo card is Evaluate even when the teacher ticked only Understand
+    report = {"qa_transcripts": [
+        {"blooms_attribute": "Understanding", "score_percent": 40},
+        {"blooms_attribute": "Evaluating", "score_percent": 80},
+    ]}
+    mastery, levels = evaluate_colearner_session(report, [BloomLevel.UNDERSTAND])
+    assert mastery == 60
+    assert levels == {BloomLevel.UNDERSTAND: 40, BloomLevel.EVALUATE: 80}

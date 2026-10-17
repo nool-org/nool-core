@@ -253,6 +253,21 @@ def _has_concept(q: DatasetQuestion, concept: str) -> bool:
     return concept.lower() in {c.lower() for c in q.concepts or []}
 
 
+async def _concept_topics(session: AsyncSession, test: VoiceTest) -> tuple[dict[str, set], set]:
+    """(concept -> the topics of the voice-test questions that carry it, every topic the
+    test asked about): how a bank question (topic-tagged, rarely concept-tagged) is matched
+    to a weak concept - the test's topics for a concept with none (an older test)."""
+    by_concept: dict[str, set] = {}
+    asked: set = set()
+    for topic_id, concepts in (await session.execute(
+            select(VoiceTestQuestion.topic_id, VoiceTestQuestion.concepts)
+            .where(VoiceTestQuestion.voice_test_id == test.id, VoiceTestQuestion.topic_id.is_not(None)))).all():
+        asked.add(topic_id)
+        for c in concepts or []:
+            by_concept.setdefault(c.lower(), set()).add(topic_id)
+    return by_concept, asked
+
+
 async def _bank(session: AsyncSession, student: User, test: VoiceTest) -> list[DatasetQuestion]:
     school_class = await session.get(SchoolClass, test.class_id)
     visible = await visible_datasets(session, student, subject_id=test.subject_id,
@@ -264,7 +279,7 @@ async def _bank(session: AsyncSession, student: User, test: VoiceTest) -> list[D
         select(DatasetQuestion).where(
             DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.chapter_id == test.chapter_id,
             DatasetQuestion.question_type.in_((QuestionType.MCQ, QuestionType.TRUE_FALSE)),
-            DatasetQuestion.options.is_not(None), text_only_filter())
+            DatasetQuestion.options.is_not(None), text_only_filter(pictures=True))
         .order_by(DatasetQuestion.id))).scalars().all()
     return [q for q in rows if correct_index(q.options, q.answer) is not None]
 
@@ -335,20 +350,22 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
                       correct_index(q.options, q.answer), q.id)
 
     drafts: dict[int, _Draft] = {}
-    # The generation service designs every question first - aimed at the student's own
-    # weak concepts, wrong options from their own voice-test misconceptions; the bank
-    # only fills slots it couldn't.
+    # The bank first: a checked question at the slot's level on the weak concept (tagged
+    # with it, or on a topic the voice test asked it under) - cheap and already verified.
+    # Only the slots it can't fill are designed by the generation service, aimed at the
+    # student's own weak concepts with wrong options from their voice-test misconceptions.
+    topics_of, asked = await _concept_topics(session, test)
+    for i, (level, concept) in enumerate(slots):
+        on_concept = topics_of.get(concept.lower()) or asked
+        q = take(lambda q: q.bloom_level == level and (_has_concept(q, concept) or q.topic_id in on_concept))
+        if q is not None:
+            drafts[i] = from_bank(q, concept)
+    counts = {"bank": len(drafts)}
     # ponytail: holds this McqTest's row lock and a connection through the LLM call (~1 min);
     # prebuild() runs it right after homework is confirmed so the student rarely waits
-    await _generate(session, test=test, slots=slots, open_slots=list(range(len(slots))),
+    await _generate(session, test=test, slots=slots, open_slots=[i for i in range(len(slots)) if i not in drafts],
                     scores=scores, drafts=drafts, seed=mcq.id)
-    counts = {"generated": len(drafts)}
-    for i, (level, concept) in enumerate(slots):
-        if i not in drafts:
-            q = take(lambda q: q.bloom_level == level and _has_concept(q, concept))
-            if q is not None:
-                drafts[i] = from_bank(q, concept)
-    counts["bank"] = len(drafts) - counts["generated"]
+    counts["generated"] = len(drafts) - counts["bank"]
     boss = len(slots) - 1
     hardest_first = sorted(bank, key=lambda q: _BLOOM_ORDER.index(q.bloom_level), reverse=True)
     for i in sorted(range(len(slots)), key=lambda i: i != boss):  # the boss picks first

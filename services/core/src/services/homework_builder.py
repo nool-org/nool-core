@@ -33,7 +33,7 @@ from src.domain.models import (
 from src.domain.models.curriculum import Subtopic
 from src.domain.models.homework import Homework
 from src.repositories.dataset_access import visible_datasets
-from src.services import generation_client, homework_content_resolver
+from src.services import gap_packs, generation_client, homework_content_resolver
 from src.services.question_selector import Slot, plan_slots, select_questions, text_only_filter
 
 logger = logging.getLogger(__name__)
@@ -96,15 +96,20 @@ async def build_homework_questions(
     boss's concept and comes back is_boss."""
     school_class = await session.get(SchoolClass, test.class_id)
     grade = school_class.grade if school_class else None
+    if school_class is not None:  # questions already written for other students are this school's to reuse
+        await gap_packs.enable_for_school(session, test.subject_id, school_class.school_id)
     visible = await visible_datasets(session, user, subject_id=test.subject_id, grade=grade)
     picked = {str(d) for d in picked_dataset_ids} if picked_dataset_ids else None
-    dataset_ids = [d.id for d in visible if d.type == DatasetType.QA and (picked is None or str(d.id) in picked)]
+    # the teacher's picks - plus the gap pack, which only holds questions Nool already wrote for these gaps
+    dataset_ids = [d.id for d in visible if d.type == DatasetType.QA
+                   and (picked is None or str(d.id) in picked or d.name.startswith(gap_packs.PREFIX))]
 
     slots = plan_slots(total, bloom_weights, difficulty)
     seen = await _seen_uids(session, test.class_id, student_id) | {d.source_uid for d in keep if d.source_uid}
     focus = focus or Focus()
     topic_id = focus.topic_id or test.topic_id
-    select_args = dict(dataset_ids=dataset_ids, chapter_id=test.chapter_id, seed=seed, text_only=True)
+    select_args = dict(dataset_ids=dataset_ids, chapter_id=test.chapter_id, seed=seed, text_only=True,
+                       pictures=True)  # the homework screen draws them
     drafts: dict[int, QuestionDraft] = {}
     picked: list[DatasetQuestion] = []
 
@@ -140,7 +145,7 @@ async def build_homework_questions(
     if open_slots:
         await _generate(session, test=test, topic_id=topic_id, slots=slots, open_slots=open_slots, drafts=drafts,
                         examples=picked, fallback_dataset_id=fallback_dataset_id,
-                        release_before_generation=release_before_generation, keep=keep)
+                        release_before_generation=release_before_generation, keep=keep, user=user)
     counts["generated"] = len(drafts) - counts["bank"] - counts["reused"]
     still_open = [i for i in range(len(slots)) if i not in drafts]
     if still_open:
@@ -255,7 +260,7 @@ async def _sections(session: AsyncSession, test: VoiceTest, topic_id=None) -> tu
 
 
 async def _generate(session, *, test, topic_id, slots, open_slots, drafts, examples, fallback_dataset_id,
-                    release_before_generation=False, keep=()) -> None:
+                    release_before_generation=False, keep=(), user=None) -> None:
     if not generation_client.is_configured():
         return
     chapter_name, sections = await _sections(session, test, topic_id)
@@ -286,8 +291,19 @@ async def _generate(session, *, test, topic_id, slots, open_slots, drafts, examp
         if q.get("options"):
             text += "\n" + "\n".join(f"({'abcd'[i]}) {o}" for i, o in enumerate(q["options"][:4]))
         answer = q["answer"] if not q.get("solution") else f"{q['answer']}\n\n{q['solution']}"
-        drafts[slot_index] = QuestionDraft(bloom_level=slots[slot_index].bloom_level, text=text, answer=answer,
-                                           dataset_id=fallback_dataset_id)
+        draft = QuestionDraft(bloom_level=slots[slot_index].bloom_level, text=text, answer=answer,
+                              dataset_id=fallback_dataset_id)
+        if user is not None and school_class is not None:
+            # written once, kept in the subject's gap pack: the next student on this topic
+            # and level - any class, any school - gets it from the bank
+            row = await gap_packs.keep(
+                session, subject_id=test.subject_id, school_id=school_class.school_id, grade=school_class.grade,
+                chapter_id=test.chapter_id,
+                topic_id=topic_id, created_by=user.id, bloom_level=slots[slot_index].bloom_level,
+                difficulty=slots[slot_index].difficulty, text=q["text"], options=(q.get("options") or [])[:4] or None,
+                answer=q["answer"], solution=q.get("solution"))
+            draft.dataset_id, draft.source_question_id, draft.source_uid = row.dataset_id, row.id, row.external_uid
+        drafts[slot_index] = draft
 
 
 async def _bank_relaxed_fill(session, *, test, topic_id, dataset_ids, open_slots, drafts, exclude_uids) -> None:
@@ -298,7 +314,7 @@ async def _bank_relaxed_fill(session, *, test, topic_id, dataset_ids, open_slots
     used_uids = set(exclude_uids) | {d.source_uid for d in drafts.values() if d.source_uid}
     query = (select(DatasetQuestion)
              .where(DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.chapter_id == test.chapter_id,
-                    text_only_filter())
+                    text_only_filter(pictures=True))
              # same topic first, then the rest of the chapter
              .order_by((DatasetQuestion.topic_id == topic_id).desc().nulls_last(), DatasetQuestion.id))
     free = iter(open_slots)

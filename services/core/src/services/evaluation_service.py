@@ -83,7 +83,9 @@ def evaluate_colearner_session(
 
     mastery_percent = round(sum(all_scores) / len(all_scores))
     bloom_scores: dict[BloomLevel, int] = {}
-    for level in bloom_levels or list(scores_by_level.keys()):
+    # the levels the test was set at, and any other level actually asked and scored
+    # (a Fix Milo card is Evaluate whatever the teacher ticked)
+    for level in dict.fromkeys([*bloom_levels, *scores_by_level]):
         levels_scores = scores_by_level.get(level)
         bloom_scores[level] = round(sum(levels_scores) / len(levels_scores)) if levels_scores else mastery_percent
 

@@ -8,6 +8,7 @@ from src.domain.models import BloomLevel, PaperDifficultyLevel, QuestionPaperSta
 from .bloom import BloomTarget
 from .common import CamelModel
 from .dataset import DatasetShare
+from .school_logo import LogoDataUri
 
 
 class PaperSection(CamelModel):
@@ -50,6 +51,12 @@ class PaperValidationOut(CamelModel):
     issues: list[str]  # non-empty only when VALIDATION_FAILED
 
 
+class ChapterMarks(CamelModel):
+    """Chapter weightage: how many of the paper's marks come from this chapter."""
+    chapter_id: str
+    marks: int = Field(ge=0, le=200)
+
+
 class QuestionPaperOut(CamelModel):
     id: str
     name: str
@@ -60,6 +67,7 @@ class QuestionPaperOut(CamelModel):
     subject_id: str
     dataset_shares: list[DatasetShare]
     chapter_ids: list[str]
+    chapter_marks: list[ChapterMarks] = []
     topic_ids: list[str]
     total_marks: int | None
     duration_minutes: int | None
@@ -87,6 +95,8 @@ class CreateQuestionPaperIn(CamelModel):
     language: str
     subject_id: str
     chapter_ids: list[str] | None = None
+    # weightage for some or all of chapter_ids; chapters missing here get none
+    chapter_marks: list[ChapterMarks] | None = Field(default=None, max_length=50)
     topic_ids: list[str] | None = None
     dataset_shares: list[DatasetShare] | None = None
     question_types: list[str] | None = None
@@ -96,7 +106,7 @@ class CreateQuestionPaperIn(CamelModel):
     bloom_distribution: list[BloomTarget] | None = None
     difficulty_distribution: list[PaperDifficultyTarget] | None = None
     custom_header_text: str | None = None
-    logo_data_uri: str | None = None
+    logo_data_uri: LogoDataUri | None = None
     instructions: list[str] | None = None
     # C9 - win over bloomDistribution/difficultyDistribution when both are sent.
     bloom_targets: list[BloomTargetPercent] | None = None

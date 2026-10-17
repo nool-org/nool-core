@@ -99,3 +99,11 @@ async def test_get_me_includes_the_schools_logo(db_session):
 
     assert response.profile is not None
     assert response.profile.school_logo_data_uri == _SAMPLE_LOGO
+
+
+def test_logo_must_be_an_uploaded_image():
+    import pytest
+    from pydantic import ValidationError
+    for bad in ("https://tracker.example/logo.png", "javascript:alert(1)", "data:text/html;base64,PGI+"):
+        with pytest.raises(ValidationError):
+            UpdateSchoolLogoIn(logo_data_uri=bad)

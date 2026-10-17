@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import ForbiddenError, NotFoundError
-from src.api.deps import get_db_session, require_role
+from src.api.deps import get_db_session, require_feature, require_role
 from src.api.schemas.daily_practice import (
     ChapterProgressOut,
     ChapterRefOut,
@@ -30,10 +30,11 @@ from src.api.schemas.daily_practice import (
     VoiceFeedbackOut,
     VoiceResultOut,
 )
-from src.domain.models import Chapter, ClassTopicProgress, Role, StudentProfile, Topic, User
+from src.domain.models import Chapter, ClassTopicProgress, Feature, Role, StudentProfile, Topic, User
 from src.repositories.lookups import get_class_in_school
 from src.repositories.roster_repository import teaches_class, teaches_class_subject
 from src.services import daily_practice, push, question_types, revision_cards, topic_quiz
+from src.services.question_selector import figure_svgs
 
 router = APIRouter(prefix="/api/v1", tags=["daily-practice"])
 NOTIFY_QUIET_MINUTES = 30
@@ -46,7 +47,7 @@ def _special_result(item, question) -> SpecialResultOut:
                             reveal=question_types.reveal(item.kind, question.spec or {}))
 
 
-def _item_out(item, question, topic_name) -> PracticeItemOut:
+def _item_out(item, question, topic_name, svgs: dict | None = None) -> PracticeItemOut:
     result = None
     if item.answered_at is not None:
         result = (McqResultOut(correct=bool(item.correct), correct_index=question.correct_index,
@@ -60,12 +61,14 @@ def _item_out(item, question, topic_name) -> PracticeItemOut:
         # never the answer of an unanswered question: correct_index stays server-side
         options=question.options if item.kind == "mcq" else None,
         spec=question_types.public(item.kind, question.spec or {}) if item.kind in question_types.KINDS else None,
+        figure_svg=(svgs or {}).get(question.source_question_id),
         answered=item.answered_at is not None, result=result)
 
 
 @router.get("/me/daily-practice/today")
 async def get_my_daily_practice(
     user: User = Depends(require_role(Role.STUDENT)),
+    _feature: User = Depends(require_feature(Feature.DAILY_PRACTICE)),
     session: AsyncSession = Depends(get_db_session),
 ) -> DailyPracticeTodayOut:
     practice, empty_reason = await daily_practice.ensure_today(session, user)
@@ -73,12 +76,13 @@ async def get_my_daily_practice(
     chapter = await session.get(Chapter, practice.chapter_id) if practice and practice.chapter_id else None
     items = await daily_practice.items_of(session, practice.id) if practice else []
     new_items, new_topics = daily_practice.latest_extension(items)
+    svgs = await figure_svgs(session, [q.source_question_id for _, q, _ in items])
     return DailyPracticeTodayOut(
         session_id=str(practice.id) if practice else None,
         date=practice.practice_date if practice else daily_practice.today_ist(),
         chapter=ChapterRefOut(id=str(chapter.id), name=chapter.name) if chapter else None,
         status=practice.status if practice else "none",
-        items=[_item_out(*row) for row in items],
+        items=[_item_out(*row, svgs) for row in items],
         xp_awarded=practice.xp_awarded if practice else 0,
         streak_days=await daily_practice.student_streak(session, user.id),
         empty_reason=empty_reason,

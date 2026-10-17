@@ -431,6 +431,7 @@ def _plan_out(p: Plan) -> PlanOut:
         id=str(p.id), name=p.name, price_label=p.price_label,
         teacher_limit=p.teacher_limit, student_limit=p.student_limit,
         test_limit=p.test_limit, question_paper_limit=p.question_paper_limit,
+        spoken_days_per_week=p.spoken_days_per_week, extra_challenges_per_month=p.extra_challenges_per_month or 0,
         enabled_features=p.enabled_features, active=p.active,
     )
 
@@ -481,6 +482,7 @@ async def create_plan(
         name=body.name, price_label=body.price_label,
         teacher_limit=body.teacher_limit, student_limit=body.student_limit,
         test_limit=body.test_limit, question_paper_limit=body.question_paper_limit,
+        spoken_days_per_week=body.spoken_days_per_week, extra_challenges_per_month=body.extra_challenges_per_month,
     )
     session.add(plan)
     await session.flush()
@@ -507,12 +509,12 @@ async def update_plan(
     if body.name is not None and await _plan_name_taken(session, body.name, exclude_plan_id=plan_id):
         raise ConflictError(f'A plan named "{body.name}" already exists.')
 
-    for field in ("name", "price_label", "teacher_limit", "student_limit", "active"):
+    for field in ("name", "price_label", "teacher_limit", "student_limit", "active", "extra_challenges_per_month"):
         value = getattr(body, field)
         if value is not None:
             setattr(plan, field, value)
     # these may be unlimited: an explicit null clears the limit, omitted keeps it
-    for field in ("test_limit", "question_paper_limit"):
+    for field in ("test_limit", "question_paper_limit", "spoken_days_per_week"):
         if field in body.model_fields_set:
             setattr(plan, field, getattr(body, field))
 

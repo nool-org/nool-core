@@ -43,6 +43,7 @@ from src.domain.models import (
 from src.repositories.dataset_access import ensure_datasets_visible
 from src.repositories.lookups import ensure_students_in_class, get_homework_for_teacher
 from src.repositories.roster_repository import teaches_class_subject
+from src.services.question_selector import figure_svgs
 from src.services import push
 from src.services.bloom_defaults import resolve_bloom_targets
 from src.services.homework_builder import QuestionDraft, build_homework_questions, grounding_dataset_id, question_uid
@@ -99,6 +100,7 @@ async def _serialize(session: AsyncSession, hw: Homework) -> HomeworkOut:
         assigned_count=hw.assigned_count,
         completed_count=hw.completed_count,
         chapter_name=chapter_name,
+        created_at=hw.created_at,
         target_student_names=student_names,
     )
 
@@ -273,6 +275,8 @@ async def _questions_out(session: AsyncSession, homework_id: str) -> ListEnvelop
         .where(HomeworkQuestion.homework_id == homework_id)
         .order_by(HomeworkQuestion.order)
     )
+    rows = result.scalars().all()
+    svgs = await figure_svgs(session, [q.source_question_id for q in rows])
     items = [
         HomeworkQuestionOut(
             id=str(q.id),
@@ -283,8 +287,9 @@ async def _questions_out(session: AsyncSession, homework_id: str) -> ListEnvelop
             text=q.text,
             answer=q.answer,
             is_boss=q.is_boss,
+            figure_svg=svgs.get(q.source_question_id),
         )
-        for q in result.scalars().all()
+        for q in rows
     ]
     return ListEnvelope(items=items, total=len(items))
 

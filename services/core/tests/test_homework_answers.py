@@ -295,7 +295,7 @@ async def _xp(db, student_id) -> int:
     return row.xp if row else 0
 
 
-async def test_answer_is_saved_and_awards_xp_once_double_for_the_boss(schema):
+async def test_answers_are_saved_without_xp_and_finishing_the_homework_earns_it_once(schema):
     db = schema
     s = await _seed(db)
     hw, plain, boss = await _homework_with_questions(db, s)
@@ -305,47 +305,30 @@ async def test_answer_is_saved_and_awards_xp_once_double_for_the_boss(schema):
         return await student_homework.answer_question(str(hw.id), question.id, HomeworkAnswerIn(**body),
                                                       user=student, session=db)
 
-    first = await answer(plain, answer_text="R adds up", self_rating="got_it")
-    assert (first.saved, first.xp_awarded) == (True, 10)
-    assert first.model_dump(by_alias=True) == {"saved": True, "xpAwarded": 10}
-    again = await answer(plain, selfRating="confused")  # camelCase accepted too; no text keeps the old one
-    assert again.xp_awarded == 0
-    assert (await answer(boss, answer_text="V = IR", self_rating="got_it")).xp_awarded == 20
-    assert await _xp(db, student.id) == 30
+    first = await answer(plain, answer_text="(b) red", self_rating="got_it")
+    assert first.model_dump(by_alias=True) == {"saved": True, "xpAwarded": 0}
+    await answer(plain, selfRating="confused")  # camelCase accepted too; no text keeps the old one
+    await answer(boss, self_rating="got_it")
+    assert await _xp(db, student.id) == 0  # answering earns nothing
 
     rows = (await db.execute(select(HomeworkAnswer).where(HomeworkAnswer.student_id == student.id)
-                             .order_by(HomeworkAnswer.xp_awarded))).scalars().all()
-    assert [(r.homework_question_id, r.answer_text, r.self_rating, r.xp_awarded) for r in rows] == [
-        (plain.id, "R adds up", "confused", 10), (boss.id, "V = IR", "got_it", 20)]
+                             .order_by(HomeworkAnswer.answer_text))).scalars().all()
+    assert {(r.homework_question_id, r.answer_text, r.self_rating, r.xp_awarded) for r in rows} == {
+        (plain.id, "(b) red", "confused", 0), (boss.id, None, "got_it", 0)}
     progress = (await db.execute(select(StudentHomeworkProgress).where(
         StudentHomeworkProgress.homework_id == hw.id))).scalar_one()
     assert progress.status == StudentHomeworkStatus.IN_PROGRESS and not progress.qa_completed
 
-    # confirm-completion still works once everything is answered
-    await student_homework.confirm_completion(str(hw.id), background_tasks=BackgroundTasks(), user=student, session=db)
+    # finishing it earns the homework's XP (plus any early bonus) - once
+    done = await student_homework.confirm_completion(str(hw.id), background_tasks=BackgroundTasks(),
+                                                     user=student, session=db)
+    assert done.xp_awarded == student_homework.COMPLETE_XP + done.early_bonus_xp
+    assert await _xp(db, student.id) == done.xp_awarded
+    again = await student_homework.confirm_completion(str(hw.id), background_tasks=BackgroundTasks(),
+                                                      user=student, session=db)
+    assert again.xp_awarded == 0 and await _xp(db, student.id) == done.xp_awarded
     await db.refresh(progress)
     assert progress.status == StudentHomeworkStatus.COMPLETED
-
-
-async def test_blank_answer_earns_no_xp_until_a_real_answer_then_only_once(schema):
-    db = schema
-    s = await _seed(db)
-    hw, plain, boss = await _homework_with_questions(db, s)
-    student = s["student"]
-
-    async def answer(question, **body):
-        return await student_homework.answer_question(str(hw.id), question.id, HomeworkAnswerIn(**body),
-                                                      user=student, session=db)
-
-    assert (await answer(plain, self_rating="confused")).xp_awarded == 0
-    assert (await answer(boss, answer_text="  ok ", self_rating="got_it")).xp_awarded == 0  # < 3 chars trimmed
-    assert await _xp(db, student.id) == 0
-    # writing a real answer after a blank tap earns the XP once
-    assert (await answer(plain, answer_text="R adds up", self_rating="got_it")).xp_awarded == 10
-    assert (await answer(boss, answer_text="Series resistors add", self_rating="confused")).xp_awarded == 20
-    # ...and never again
-    assert (await answer(plain, answer_text="R1 + R2", self_rating="got_it")).xp_awarded == 0
-    assert await _xp(db, student.id) == 30
 
 
 async def test_answer_rejects_another_homeworks_question_and_unassigned_students(schema):

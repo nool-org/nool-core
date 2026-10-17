@@ -53,7 +53,6 @@ def _short_clock(monkeypatch, seconds):
     monkeypatch.setattr(rs, "MAX_CALL_SECONDS", seconds)
     monkeypatch.setattr(rs, "READY_ALLOWANCE_SECONDS", 0)
     monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
-    monkeypatch.setattr(rs, "_CLOSING_GRACE_SECONDS", 0.05)
 
 
 def _done(*outputs):
@@ -98,13 +97,12 @@ def test_time_clamp_applies_to_live_call(monkeypatch):
 
 
 def test_reply_cap_forces_wrap_up_and_hangs_up(monkeypatch, caplog):
+    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)  # the hang-up backstop when the app doesn't finish the call
     cap = rs.reply_cap(10)  # the default session in _run_sideband has 10 questions
     events = [_done(MESSAGE) for _ in range(cap)] + [
         {"type": "response.created"},  # the reply past the cap starts -> cancelled
         _done(),  # cancelled reply -> forced end_session
-        _done({"type": "function_call", "name": "end_session", "call_id": "fc_1"}),  # -> closing turn
-        _done(MESSAGE),  # goodbye generated
-        {"type": "output_audio_buffer.stopped"},  # goodbye played -> hang up
+        _done({"type": "function_call", "name": "end_session", "call_id": "fc_1"}),  # -> over, no goodbye
     ]
     ws = FakeWS(events)
     with caplog.at_level(logging.INFO, logger=rs.logger.name):
@@ -114,11 +112,11 @@ def test_reply_cap_forces_wrap_up_and_hangs_up(monkeypatch, caplog):
     assert "response.cancel" in kinds
     forced = [m for m in ws.sent if m.get("response", {}).get("tool_choice") == {"type": "function", "name": "end_session"}]
     assert len(forced) == 1
-    closing = [m for m in ws.sent if m.get("response", {}).get("instructions") == rs.CLOSING_INSTRUCTIONS]
-    assert closing[0]["response"]["max_output_tokens"] == rs.MAX_CLOSING_TOKENS
+    # the app hangs up at end_session: no spoken goodbye is asked for (paid audio nobody would hear)
+    assert not [m for m in ws.sent[ws.sent.index(forced[0]) + 1:] if m.get("type") == "response.create"]
     assert call.state.is_completed and hangups == ["call_1"]
     cost_log = next(r for r in caplog.records if r.getMessage().startswith("realtime_call_cost"))
-    assert cost_log.call_id == "call_1" and cost_log.replies == cap + 1
+    assert cost_log.call_id == "call_1" and cost_log.replies == cap
     assert cost_log.total_usd == 0 and cost_log.duration_seconds >= 0
 
 
@@ -165,11 +163,11 @@ def test_clock_starts_at_the_first_question_not_at_connect(monkeypatch):
     asyncio.run(run())
 
 
-def test_time_up_never_fires_during_the_goodbye(monkeypatch):
-    # end_session lands just before the time limit: the test clock stops, the goodbye
-    # plays out under its own grace and no [TIME_UP] is ever sent.
+def test_time_up_never_fires_after_the_end(monkeypatch):
+    # end_session lands just before the time limit: the test clock stops, no goodbye is
+    # asked for, no [TIME_UP] is ever sent, and an abandoned call is still hung up.
     _short_clock(monkeypatch, 0.2)
-    monkeypatch.setattr(rs, "_CLOSING_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.5)
     ws = FakeWS([
         {"type": "conversation.item.created",
          "item": {"id": "u1", "type": "message", "role": "user", "content": [{"type": "input_audio"}]}},
@@ -181,9 +179,10 @@ def test_time_up_never_fires_during_the_goodbye(monkeypatch):
     ])
     call, hangups = _run_sideband(monkeypatch, ws, SessionConfig(num_questions=2))
     texts = [c.get("text") for m in ws.sent for c in m.get("item", {}).get("content") or []]
-    assert call.state.is_completed and call.closing_sent
+    assert call.state.is_completed
+    assert not [m for m in ws.sent if m.get("type") == "response.create" and m.get("response", {}).get("instructions")]
     assert "[TIME_UP]" not in texts and not call.time_up
-    assert hangups == ["call_1"]  # the closing grace still hangs up an abandoned call
+    assert hangups == ["call_1"]  # the grace still hangs up an abandoned call
     assert (call.ended_at - call.state.created_at).total_seconds() >= 0.4
 
 
@@ -204,7 +203,7 @@ def test_asking_to_exit_early_is_refused_and_the_test_continues(monkeypatch):
             {"type": "function_call", "name": "end_session", "call_id": "c1", "arguments": "{}"}]}},
     ])
     call, hangups = _run_sideband(monkeypatch, ws, SessionConfig(num_questions=5))
-    assert not call.state.is_completed and not call.closing_sent
+    assert not call.state.is_completed
     instructions = [m["response"].get("instructions") for m in ws.sent
                     if m.get("type") == "response.create" and "response" in m]
     assert rs.END_REFUSED_INSTRUCTIONS in instructions

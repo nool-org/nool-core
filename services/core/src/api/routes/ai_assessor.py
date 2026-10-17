@@ -39,7 +39,7 @@ from src.domain.models import (
     VoiceTestTargetStudent,
 )
 from src.repositories import get_session
-from src.services import ai_usage, topic_quiz
+from src.services import ai_usage, question_types, topic_quiz
 from src.services.colearner_client import create_realtime_call, finish_realtime_call
 from src.api.routes.gamification import apply_xp, session_xp
 from src.services.evaluation_service import evaluate_colearner_session, topic_scores
@@ -82,7 +82,9 @@ async def open_session(
             raise ConflictError("This test's deadline has passed, so it can't be taken any more.")
         prep_status = await db.scalar(select(VoiceTest.prep_status).where(VoiceTest.id == body.test_id))
         if prep_status == VoiceTestPrepStatus.PENDING:
-            raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.")
+            # the app waits and tries again on its own for this code (voice-session.tsx)
+            raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.",
+                                code="QUESTIONS_PREPARING")
     ai_session = AiAssessorSession(
         student_id=app_user.id,
         test_id=body.test_id,
@@ -95,8 +97,10 @@ async def open_session(
         db.add(AiAssessorSessionBloomLevel(session_id=ai_session.id, bloom_level=level))
     await db.commit()
 
-    return OpenSessionOut(session_id=str(ai_session.id),
-                          question_count=len(await _test_questions(db, body.test_id)))
+    questions = await _test_questions(db, body.test_id)
+    # Fix Milo cards: what the screen shows when Milo asks that question - never the answer
+    cards = [{"number": n, **question_types.public("fix_steps", q.card)} for n, q in enumerate(questions, 1) if q.card]
+    return OpenSessionOut(session_id=str(ai_session.id), question_count=len(questions), cards=cards)
 
 
 async def _test_questions(db: AsyncSession, test_id) -> list[VoiceTestQuestion]:
@@ -144,6 +148,7 @@ async def _colearner_config(
             "id": str(q.id), "order": q.order, "bloom_level": q.bloom_level.value, "spoken_text": q.spoken_text,
             "expected_points": q.expected_points or [], "misconceptions": q.misconceptions or [],
             "hints": q.hints or [], "easier": q.easier_version,
+            **({"card": {"steps": q.card["steps"], "fixes": [f["text"] for f in q.card["fixes"]]}} if q.card else {}),
         } for q in questions]
     student = await db.get(User, ai_session.student_id)
     if student and (first_name := (student.display_name or "").split()[:1]):

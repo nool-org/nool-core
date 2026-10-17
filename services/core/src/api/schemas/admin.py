@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from pydantic import Field
+
 from src.domain.models import Feature, SchoolStatus, SubscriptionStatus, UpgradeRequestStatus, UserStatus
 
 from .common import CamelModel
@@ -61,6 +63,8 @@ class PlanOut(CamelModel):
     student_limit: int
     test_limit: int | None
     question_paper_limit: int | None
+    spoken_days_per_week: int | None = None  # None = every day
+    extra_challenges_per_month: int = 0
     # None = the plan bundles every Feature. Set/cleared via the dedicated
     # GET/PUT /admin/plans/{id}/features (not this create/update body) -
     # same "can't tell explicit null from omitted" reason CreateSchoolIn/
@@ -77,6 +81,8 @@ class CreatePlanIn(CamelModel):
     student_limit: int
     test_limit: int | None = None
     question_paper_limit: int | None = None
+    spoken_days_per_week: int | None = Field(default=None, ge=0, le=7)
+    extra_challenges_per_month: int = Field(default=0, ge=0, le=10)
 
 
 class UpdatePlanIn(CamelModel):
@@ -86,6 +92,8 @@ class UpdatePlanIn(CamelModel):
     student_limit: int | None = None
     test_limit: int | None = None
     question_paper_limit: int | None = None
+    spoken_days_per_week: int | None = Field(default=None, ge=0, le=7)
+    extra_challenges_per_month: int | None = Field(default=None, ge=0, le=10)
     active: bool | None = None
 
 

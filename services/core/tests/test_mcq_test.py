@@ -177,6 +177,33 @@ def _no_generation(monkeypatch):
     monkeypatch.setattr(service.generation_client, "is_configured", lambda: False)
 
 
+async def _get_test(mcq_test_id, *, user, session):
+    """GET /me/mcq-tests/{id} as the app sees it once built: the first open answers
+    "preparing" and builds in the background (here: built in this session first)."""
+    from fastapi import BackgroundTasks
+
+    first = await routes.get_my_mcq_test(mcq_test_id, BackgroundTasks(), user=user, session=session)
+    if not first.preparing:
+        return first
+    mcq = await session.get(McqTest, uuid.UUID(str(mcq_test_id)))
+    await routes.mcq_test.ensure_questions(session, mcq, user)
+    return await routes.get_my_mcq_test(mcq_test_id, BackgroundTasks(), user=user, session=session)
+
+
+async def test_the_first_open_answers_at_once_and_builds_in_the_background(schema, monkeypatch):
+    from fastapi import BackgroundTasks
+
+    db = schema
+    s = await _seed(db, taken_hours_ago=49)
+    await _full_bank(db, s)
+    _no_generation(monkeypatch)
+    item = await _open(db, s)
+    tasks = BackgroundTasks()
+    out = await routes.get_my_mcq_test(item.id, tasks, user=s["student"], session=db)
+    assert out.preparing is True and out.questions == []
+    assert [t.func for t in tasks.tasks] == [routes.mcq_test.prebuild]  # built off the request
+
+
 # ---------------------------------------------------------------- unlock
 async def test_fresh_result_is_locked_until_48h_after_the_test(schema, monkeypatch):
     db = schema
@@ -185,7 +212,7 @@ async def test_fresh_result_is_locked_until_48h_after_the_test(schema, monkeypat
     assert item.status == "locked" and item.question_count == 10
     assert item.unlocks_at > datetime.now(timezone.utc) + timedelta(hours=46)
     with pytest.raises(ConflictError):
-        await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+        await _get_test(item.id, user=s["student"], session=db)
     with pytest.raises(ConflictError):
         await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=[]), user=s["student"], session=db)
 
@@ -235,7 +262,7 @@ async def test_questions_come_from_the_bank_and_never_reveal_answers(schema, mon
     await _full_bank(db, s)
     _no_generation(monkeypatch)
     item = await _open(db, s)
-    out = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    out = await _get_test(item.id, user=s["student"], session=db)
     assert len(out.questions) == 10
     assert [q.bloom_level for q in out.questions] == [lvl.value for lvl in LEVELS for _ in range(2)]
     assert sum(q.concept == "power" for q in out.questions) == 1
@@ -243,18 +270,18 @@ async def test_questions_come_from_the_bank_and_never_reveal_answers(schema, mon
     assert all(q.text.split()[1] == q.concept for q in out.questions)  # bank question on the slot's concept
     wire = out.model_dump(by_alias=True)
     assert wire["answered"] == [] and wire["speedMode"] is False and wire["lifelinesLeft"] == ["fifty_fifty", "ask_milo"]
-    assert all(set(q) == {"id", "text", "options", "bloomLevel", "concept", "isBoss", "gapConcept"}
+    assert all(set(q) == {"id", "text", "options", "bloomLevel", "concept", "isBoss", "gapConcept", "figureSvg"}
                for q in wire["questions"])
     assert [q.is_boss for q in out.questions] == [False] * 9 + [True]
     assert all(q.gap_concept == (q.concept if q.concept != "power" else None) for q in out.questions)
-    again = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)  # built once
+    again = await _get_test(item.id, user=s["student"], session=db)  # built once
     assert [q.id for q in again.questions] == [q.id for q in out.questions]
 
 
-async def test_generation_designs_every_mcq_first_with_misconception_distractors(schema, monkeypatch):
+async def test_bank_first_then_generation_with_misconception_distractors(schema, monkeypatch):
     db = schema
     s = await _seed(db, taken_hours_ago=49)
-    await _mcq(db, s, B.REMEMBER, "current")  # a bank MCQ exists, but generation comes first
+    await _mcq(db, s, B.REMEMBER, "current")  # a checked bank MCQ on the slot's level and concept: used as is
     calls = []
 
     async def fake(payload):
@@ -267,15 +294,40 @@ async def test_generation_designs_every_mcq_first_with_misconception_distractors
     monkeypatch.setattr(service.generation_client, "generate_mcq", fake)
 
     item = await _open(db, s)
-    out = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
-    assert len(out.questions) == 10 and sum(q.text.startswith("gen") for q in out.questions) == 10
+    out = await _get_test(item.id, user=s["student"], session=db)
+    assert len(out.questions) == 10
+    assert sum(q.text.startswith("gen") for q in out.questions) == 9  # only the slots the bank couldn't fill
+    assert any(q.text.startswith("REMEMBER current") for q in out.questions)
     [payload] = calls
-    assert len(payload["slots"]) == 10 and all(sl["question_type"] == "mcq" for sl in payload["slots"])
+    assert len(payload["slots"]) == 9 and all(sl["question_type"] == "mcq" for sl in payload["slots"])
+    assert any(a.startswith("REMEMBER current") for a in payload["avoid"])  # never the same question twice
     current = next(sl for sl in payload["slots"] if sl["concept"] == "current")
     assert set(current["misconceptions"]) == {"current misconception 1", "current misconception 2"}
     assert payload["sections"][0]["text"].startswith("V = IR")
     rows = await service.questions_of(db, uuid.UUID(item.id))
     assert all(r.options[r.correct_index] == "ok" for r in rows if r.text.startswith("gen"))
+
+
+async def test_an_untagged_bank_question_matches_through_its_topic(schema, monkeypatch):
+    """Nool's banks tag topics, not concepts: a question on the topic the voice test
+    asked a weak concept under fills that concept's slot without generation."""
+    db = schema
+    s = await _seed(db, taken_hours_ago=49)
+    q = await _mcq(db, s, B.REMEMBER, "current")
+    q.concepts, q.topic_id = [], s["test"].topic_id
+    await db.flush()
+    calls = []
+
+    async def fake(payload):
+        calls.append(payload)
+        return {"questions": []}
+    monkeypatch.setattr(service.generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(service.generation_client, "generate_mcq", fake)
+
+    item = await _open(db, s)
+    out = await _get_test(item.id, user=s["student"], session=db)
+    assert any(x.text.startswith("REMEMBER current") for x in out.questions)
+    assert len(calls[0]["slots"]) == 9  # the topic-matched slot never went to generation
 
 
 async def test_generation_down_falls_back_to_any_bank_mcq_of_the_chapter(schema, monkeypatch):
@@ -290,14 +342,14 @@ async def test_generation_down_falls_back_to_any_bank_mcq_of_the_chapter(schema,
     monkeypatch.setattr(service.generation_client, "generate_mcq", down)
 
     item = await _open(db, s)
-    out = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    out = await _get_test(item.id, user=s["student"], session=db)
     assert len(out.questions) == 10 and len({q.text for q in out.questions}) == 10
 
 
 # ------------------------------------------------------- marking, growth
 async def _attempt(db, s, *, wrong_levels=()):
     item = await _open(db, s)
-    await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    await _get_test(item.id, user=s["student"], session=db)
     rows = await service.questions_of(db, uuid.UUID(item.id))
     answers, seen = [], set()
     for r in rows:
@@ -356,7 +408,7 @@ async def test_attempt_before_opening_and_on_someone_elses_test(schema, monkeypa
     db.add(other)
     await db.flush()
     with pytest.raises(NotFoundError):
-        await routes.get_my_mcq_test(item.id, user=other, session=db)
+        await _get_test(item.id, user=other, session=db)
 
 
 async def test_teacher_sees_class_growth_and_others_do_not(schema, monkeypatch):
@@ -426,7 +478,7 @@ async def _ready(db, monkeypatch):
     await _full_bank(db, s)
     _no_generation(monkeypatch)
     item = await _open(db, s)
-    await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    await _get_test(item.id, user=s["student"], session=db)
     return s, item, await service.questions_of(db, uuid.UUID(item.id))
 
 
@@ -446,7 +498,7 @@ async def test_answer_keeps_only_the_first_answer_and_returns_the_marking(schema
     assert again == out
     out = await _answer(db, s, item, rows[1], rows[1].correct_index)
     assert (out.correct, out.combo, out.xp_so_far) == (True, 1, 10)
-    got = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    got = await _get_test(item.id, user=s["student"], session=db)
     assert [(a.question_id, a.correct) for a in got.answered] == [(str(rows[0].id), False), (str(rows[1].id), True)]
     assert got.answered[0].option_index == (q.correct_index + 1) % 4 and got.answered[0].correct_index == q.correct_index
     with pytest.raises(NotFoundError):
@@ -489,7 +541,7 @@ async def test_lifelines_once_each_never_reveal_and_cost_xp(schema, monkeypatch)
     assert milo.hint and "right" not in milo.hint.lower()
     with pytest.raises(ConflictError):
         await use("ask_milo", rows[3])
-    got = await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    got = await _get_test(item.id, user=s["student"], session=db)
     assert got.lifelines_left == []
     out = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(), user=s["student"], session=db)
     assert out.xp_breakdown.lifeline_cost == 10 and out.xp_breakdown.total == 0  # only q1 answered: 10 - 10
@@ -598,7 +650,7 @@ async def test_generated_mcqs_carry_explanation_and_a_safe_hint_and_a_hard_boss(
     monkeypatch.setattr(service.generation_client, "is_configured", lambda: True)
     monkeypatch.setattr(service.generation_client, "generate_mcq", fake)
     item = await _open(db, s)
-    await routes.get_my_mcq_test(item.id, user=s["student"], session=db)
+    await _get_test(item.id, user=s["student"], session=db)
     rows = await service.questions_of(db, uuid.UUID(item.id))
     assert [sl["difficulty"] for sl in calls[0]["slots"]] == ["MEDIUM"] * 9 + ["HARD"]
     assert rows[0].hint == f"Think about {rows[0].concept}." and rows[1].hint == "nudge 1"

@@ -1,7 +1,8 @@
 import difflib
+import uuid
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +14,7 @@ from src.api.schemas.common import ListEnvelope
 from src.api.schemas.dataset import DatasetShare
 from src.api.schemas.question_paper import (
     BloomTargetPercent,
+    ChapterMarks,
     CreateQuestionPaperIn,
     DifficultyMix,
     PaperDifficultyTarget,
@@ -79,9 +81,9 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
     shares = await session.execute(
         select(QuestionPaperDatasetShare).where(QuestionPaperDatasetShare.paper_id == paper.id)
     )
-    chapters = await session.execute(
-        select(QuestionPaperChapter.chapter_id).where(QuestionPaperChapter.paper_id == paper.id)
-    )
+    chapters = (await session.execute(
+        select(QuestionPaperChapter.chapter_id, QuestionPaperChapter.marks).where(QuestionPaperChapter.paper_id == paper.id)
+    )).all()
     topics = await session.execute(
         select(QuestionPaperTopic.topic_id).where(QuestionPaperTopic.paper_id == paper.id)
     )
@@ -114,7 +116,8 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
         dataset_shares=[
             DatasetShare(dataset_id=str(s.dataset_id), percent=s.percent) for s in shares.scalars().all()
         ],
-        chapter_ids=[str(row[0]) for row in chapters.all()],
+        chapter_ids=[str(row[0]) for row in chapters],
+        chapter_marks=[ChapterMarks(chapter_id=str(c), marks=m) for c, m in chapters if m is not None],
         topic_ids=[str(row[0]) for row in topics.all()],
         total_marks=paper.total_marks,
         duration_minutes=paper.duration_minutes,
@@ -188,8 +191,9 @@ async def _apply_body(session: AsyncSession, paper: QuestionPaper, body: CreateQ
         session.add(
             QuestionPaperDatasetShare(paper_id=paper.id, dataset_id=share.dataset_id, percent=share.percent)
         )
+    weightage = {c.chapter_id: c.marks for c in body.chapter_marks or []}
     for chapter_id in body.chapter_ids or []:
-        session.add(QuestionPaperChapter(paper_id=paper.id, chapter_id=chapter_id))
+        session.add(QuestionPaperChapter(paper_id=paper.id, chapter_id=chapter_id, marks=weightage.get(chapter_id)))
     for topic_id in body.topic_ids or []:
         session.add(QuestionPaperTopic(paper_id=paper.id, topic_id=topic_id))
     for section in body.sections or []:
@@ -258,6 +262,8 @@ async def _check_blueprint(session: AsyncSession, user: User, body: CreateQuesti
             select(Chapter.id).where(Chapter.id.in_(chapter_ids), Chapter.subject_id == body.subject_id))).all()}
         if chapter_ids - found:
             raise ValidationError("Every chapter must belong to the paper's subject.")
+    if any(c.chapter_id not in chapter_ids for c in body.chapter_marks or []):
+        raise ValidationError("Chapter marks are only for the paper's chapters.")
     topic_ids = {str(t) for t in body.topic_ids or []}
     if topic_ids:
         in_scope = Topic.chapter_id.in_(chapter_ids) if chapter_ids else Topic.chapter_id.in_(
@@ -273,6 +279,37 @@ async def _check_blueprint(session: AsyncSession, user: User, body: CreateQuesti
         if any(str(d.subject_id) != str(body.subject_id) or d.grade != body.grade for d in datasets):
             raise ValidationError(f"Every dataset must be for this subject and grade {body.grade}.")
         await ensure_datasets_visible(session, user, share_ids, subject_id=body.subject_id, grade=body.grade)
+
+
+# CBSE Class 10 unit-wise weightage (theory paper, 80 marks): (unit marks, its chapter numbers).
+# A unit's marks are split evenly across its chapters.
+_CBSE_10_UNITS = {
+    "Mathematics": [(6, [1]), (20, [2, 3, 4, 5]), (6, [7]), (15, [6, 10]), (12, [8, 9]), (10, [11, 12]),
+                    (11, [13, 14])],
+    "Science": [(25, [1, 2, 3, 4]), (25, [5, 6, 7, 8]), (12, [9, 10]), (13, [11, 12]), (5, [13])],
+}
+
+
+@router.get("/question-papers/chapter-weightage", summary="CBSE board weightage per chapter (tenths of a mark, out of 800)")
+async def chapter_weightage(
+    subject_id: str = Query(alias="subjectId"),
+    user: User = Depends(require_role(Role.TEACHER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ChapterMarks]:
+    """Each chapter's share of the CBSE board paper, as relative weights, for the
+    paper setup to scale to its own total. Empty for a subject without an official split."""
+    try:
+        subject = await session.get(Subject, uuid.UUID(subject_id))
+    except ValueError:
+        subject = None
+    units = _CBSE_10_UNITS.get(subject.name) if subject is not None and subject.grade == 10 else None
+    if not units:
+        return []
+    by_number = {n: marks / len(chapters) for marks, chapters in units for n in chapters}
+    chapters = (await session.execute(select(Chapter).where(Chapter.subject_id == subject.id))).scalars().all()
+    # in tenths of a mark (out of 800), so equal chapters stay equal - the app scales to its own total
+    out = {str(c.id): round(by_number[c.order_index] * 10) for c in chapters if c.order_index in by_number}
+    return [ChapterMarks(chapter_id=c, marks=m) for c, m in out.items()]
 
 
 @router.get("/question-papers")
@@ -464,7 +501,8 @@ async def _bank_slots(session: AsyncSession, paper: QuestionPaper, user: User, s
             break
         slot = slots[i]
         want = SimpleNamespace(bloom_level=BloomLevel(slot["bloom_level"]), marks=slot["marks"],
-                               question_type=_question_type(slot["question_type"]), difficulty=slot["difficulty"])
+                               question_type=_question_type(slot["question_type"]), difficulty=slot["difficulty"],
+                               chapter_id=slot.get("chapter_id"))
         bank = await _bank_pick(session, want, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken)
         if bank is None:
             continue
@@ -603,6 +641,23 @@ def _plan_slots(marks: list[int], labels: list[str | None], bloom: dict[str, int
             for m, label, b, d, own in zip(marks, labels, levels, diffs, own_types)]
 
 
+async def _weigh_chapters(session: AsyncSession, paper: QuestionPaper, slots: list[dict]) -> None:
+    """With the teacher's chapter weightage set, gives each slot a chapter so
+    each chapter's share of the paper's marks tracks its marks (same rule as
+    Bloom and difficulty). Without it, the generator spreads questions freely."""
+    rows = (await session.execute(
+        select(Chapter, QuestionPaperChapter.marks).join(QuestionPaperChapter, QuestionPaperChapter.chapter_id == Chapter.id)
+        .where(QuestionPaperChapter.paper_id == paper.id, QuestionPaperChapter.marks > 0)
+        .order_by(Chapter.order_index))).all()
+    if not rows or not slots:
+        return
+    chapters = {str(c.id): c for c, _ in rows}
+    picks = _by_marks([s["marks"] for s in slots], {str(c.id): m for c, m in rows}, list(chapters))
+    for slot, chapter_id in zip(slots, picks):
+        chapter = chapters[chapter_id]
+        slot.update(chapter_id=chapter.id, chapter=chapter.name, chapter_number=chapter.order_index)
+
+
 def _question_type(value: str | None) -> QuestionType | None:
     if not value:
         return None
@@ -644,6 +699,8 @@ async def generate_paper(
                         bloom_distribution, difficulty_distribution, paper.question_types or [],
                         [s.question_types for s in sections for _ in range(s.question_count)] or None)
 
+    await _weigh_chapters(session, paper, slots)
+
     questions: list[dict] = []
     references: list[dict] = []
     if chapter_refs:
@@ -662,7 +719,7 @@ async def generate_paper(
             question_types=paper.question_types or [],
             total_questions=len(open_slots),
             reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
-            slots=open_slots,
+            slots=[{k: v for k, v in s.items() if k != "chapter_id"} for s in open_slots],
         ) if open_slots else [])
         questions = [q for q in (from_bank.get(i) or next(generated, None) for i in range(len(slots))) if q]
 

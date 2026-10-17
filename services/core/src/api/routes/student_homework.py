@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import undefer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,16 +40,16 @@ from src.domain.models import (
     VoiceTest,
 )
 from src.domain.models.homework import HomeworkAnswer
+from src.services.question_selector import figure_svgs
 from src.services.colearner_insight_client import ColearnerInsightUnavailableError, generate_homework_insight
 from src.services.practice_bank import archive_homework_questions
-from src.services import daily_practice, mcq_test, student_tasks
+from src.services import daily_practice, homework_autogen, mcq_test, student_tasks
 
 router = APIRouter(prefix="/api/v1", tags=["homework-student"])
 logger = get_logger(__name__)
 
-ANSWER_XP = 10
-BOSS_ANSWER_XP = 2 * ANSWER_XP
-MIN_ANSWER_CHARS = 3  # shorter (or empty) answers earn no XP
+# Homework XP is for finishing it, once - answering questions earns none
+COMPLETE_XP = 30
 
 
 async def _progress_in(session: AsyncSession, homework_id: str, student_id) -> StudentHomeworkProgress:
@@ -187,14 +187,23 @@ async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student
         if assessed:
             weak_bloom_level = min(assessed, key=lambda s: s.percent).bloom_level.value
 
+    # the same gap the questions target: a challenge's homework is built on the student's
+    # weakest topic (homework_autogen.weak_spots) - the explanation must be about that one too
+    gap = topic
+    if gap is None and test is not None:
+        focus = (await homework_autogen.weak_spots(session, test_id=test.id, student_id=student_id)).get("focus")
+        gap = await session.get(Topic, focus.topic_id) if focus and focus.topic_id else None
+    gap_name = f"{hw.gap_topic} - {daily_practice.tidy(gap.name)}" if gap and topic is None else hw.gap_topic
+
     try:
         insight = await generate_homework_insight(
-            topic=hw.gap_topic,
+            topic=gap_name[:200],
             grade=f"Grade {school_class.grade}" if school_class else "Grade 10",
             subject=subject.name if subject else hw.gap_topic,
             mastery_percent=hw.gap_mastery_percent,
             weak_bloom_level=weak_bloom_level,
-            textbook_context=(test.textbook_context if test else None) or (chapter.name if chapter else None),
+            textbook_context=(gap.text_content if gap else None) or (test.textbook_context if test else None)
+            or (chapter.name if chapter else None),
             token=token,
         )
     except ColearnerInsightUnavailableError as exc:
@@ -265,6 +274,8 @@ async def get_my_homework_questions(
         .where(HomeworkQuestion.homework_id == homework_id)
         .order_by(HomeworkQuestion.order)
     )
+    rows = result.scalars().all()
+    svgs = await figure_svgs(session, [q.source_question_id for q in rows])
     items = [
         StudentHomeworkQuestionOut(
             id=str(q.id),
@@ -274,8 +285,9 @@ async def get_my_homework_questions(
             dataset_id=str(q.dataset_id),
             text=q.text,
             is_boss=q.is_boss,
+            figure_svg=svgs.get(q.source_question_id),
         )
-        for q in result.scalars().all()
+        for q in rows
     ]
     return ListEnvelope(items=items, total=len(items))
 
@@ -312,12 +324,12 @@ async def confirm_completion(
     await session.flush()
 
     hw = await session.get(Homework, homework_id)
-    early_xp = 0
+    early_xp = completion_xp = 0
     if hw is not None and first_time:
         early_xp = student_tasks.early_bonus_xp(hw.created_at, hw.completion_window_hours, progress.confirmed_at)
-        if early_xp:
-            await mcq_test.award_points(session, user.id, early_xp)
-            await apply_xp(session, user.id, early_xp)
+        completion_xp = COMPLETE_XP + early_xp
+        await mcq_test.award_points(session, user.id, completion_xp)
+        await apply_xp(session, user.id, completion_xp)
     if hw is not None:
         completed = await session.execute(
             select(func.count()).where(
@@ -354,7 +366,7 @@ async def confirm_completion(
                                      recheck_topic_id=str(hw.topic_id) if hw is not None and hw.topic_id
                                      and recheck_test is None else None,
                                      recheck_test_id=str(recheck_test) if recheck_test else None,
-                                     early_bonus_xp=early_xp)
+                                     early_bonus_xp=early_xp, xp_awarded=completion_xp)
 
 
 @router.post("/me/homework/{homework_id}/questions/{question_id}/answer")
@@ -365,10 +377,9 @@ async def answer_question(
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> HomeworkAnswerOut:
-    """Saves the student's answer and self-rating for one question. XP
-    (double for the boss question) is awarded only the first time, and only
-    if they actually wrote an answer - a repeat just updates the saved answer
-    and returns xpAwarded 0 (so a blank first submit can't earn XP later)."""
+    """Saves the student's self-rating (and, for a multiple-choice question,
+    the option they picked) for one question. No XP here - homework XP comes
+    once, on finishing it (confirm_completion); xpAwarded stays 0."""
     progress = await _progress_in(session, homework_id, user.id)
     question = (await session.execute(
         select(HomeworkQuestion).options(undefer(HomeworkQuestion.is_boss))
@@ -377,34 +388,15 @@ async def answer_question(
     if question is None:
         raise NotFoundError("This question isn't part of this Homework.")
 
-    # XP only for a real written attempt, whichever rating
-    attempted = len((body.answer_text or "").strip()) >= MIN_ANSWER_CHARS
-    xp = (BOSS_ANSWER_XP if question.is_boss else ANSWER_XP) if attempted else 0
-    # ON CONFLICT: two racing submits can't both count as the first
-    created = (await session.execute(
+    values = {"self_rating": body.self_rating}
+    if body.answer_text is not None:
+        values["answer_text"] = body.answer_text
+    await session.execute(
         insert(HomeworkAnswer)
-        .values(id=uuid.uuid4(), homework_question_id=question.id, student_id=user.id,
-                answer_text=body.answer_text, self_rating=body.self_rating, xp_awarded=xp)
-        .on_conflict_do_nothing(index_elements=["homework_question_id", "student_id"])
-        .returning(HomeworkAnswer.id)
-    )).scalar_one_or_none()
-    if created is None:
-        # a repeat: XP once if this is the first real written answer (a blank first tap earned 0);
-        # the guarded UPDATE keeps two racing repeats from both earning it
-        values = {"self_rating": body.self_rating}
-        if body.answer_text is not None:
-            values["answer_text"] = body.answer_text
-        mine = (HomeworkAnswer.homework_question_id == question.id, HomeworkAnswer.student_id == user.id)
-        earned = (await session.execute(
-            update(HomeworkAnswer).where(*mine, HomeworkAnswer.xp_awarded == 0)
-            .values(**values, xp_awarded=xp).returning(HomeworkAnswer.id)
-        )).scalar_one_or_none() if xp else None
-        if earned is None:
-            xp = 0
-            await session.execute(update(HomeworkAnswer).where(*mine).values(**values))
-    if xp:
-        await apply_xp(session, user.id, xp)
+        .values(id=uuid.uuid4(), homework_question_id=question.id, student_id=user.id, xp_awarded=0, **values)
+        .on_conflict_do_update(index_elements=["homework_question_id", "student_id"], set_=values)
+    )
     if progress.status == StudentHomeworkStatus.ASSIGNED:
         progress.status = StudentHomeworkStatus.IN_PROGRESS
     await session.commit()
-    return HomeworkAnswerOut(saved=True, xp_awarded=xp)
+    return HomeworkAnswerOut(saved=True, xp_awarded=0)

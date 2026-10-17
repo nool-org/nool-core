@@ -27,6 +27,7 @@ class McqQuestionOut(CamelModel):
     concept: str
     is_boss: bool = False
     gap_concept: str | None = None
+    figure_svg: str | None = None  # a picture question's drawing (SVG markup)
 
 
 class McqAnsweredOut(CamelModel):
@@ -46,6 +47,8 @@ class McqTestOut(CamelModel):
     lifelines_left: list[str] = []
     # already-answered questions (first answers), so the app can resume
     answered: list[McqAnsweredOut] = []
+    # questions still being built (a minute or so) - the app asks again shortly
+    preparing: bool = False
 
 
 class SpeedModeIn(CamelModel):

@@ -133,7 +133,8 @@ def _build_user_message(
         return "\n".join([
             f"Generate exactly {len(slots)} questions, IN THIS ORDER, one per slot below. Each question "
             "must match its slot's bloom_level, difficulty and question_type, and its length and depth "
-            "must suit its marks (1 mark = one quick fact or MCQ; 5 marks = a multi-step answer).",
+            "must suit its marks (1 mark = one quick fact or MCQ; 5 marks = a multi-step answer). "
+            "A slot that names a chapter must be answered from that chapter only (set chapter_number to it).",
             json.dumps(slots),
             "\nAvailable topics/subtopics (grounding context):",
             json.dumps(concept_context, indent=2),

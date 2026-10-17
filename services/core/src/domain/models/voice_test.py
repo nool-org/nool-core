@@ -70,6 +70,8 @@ class VoiceTest(IdMixin, TimestampMixin, Base):
     prep_status: Mapped[VoiceTestPrepStatus] = mapped_column(
         SAEnum(VoiceTestPrepStatus, name="voice_test_prep_status"), default=VoiceTestPrepStatus.READY
     )
+    # Fix Milo cards mixed into the talk (0-2): a worked solution on screen with one slip
+    fix_cards: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # When the teacher scheduled it; students have completion_window_hours from here
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -152,6 +154,9 @@ class VoiceTestQuestion(IdMixin, TimestampMixin, Base):
     # adaptive difficulty: the same slot asked more gently, for a student who is struggling -
     # {"spoken_text", "expected_points", "misconceptions", "hints"} or NULL
     easier_version: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # a Fix Milo card (question_types fix_steps spec): shown on screen, tapped, then talked
+    # through - spoken_text tells the student to look; NULL for a spoken question
+    card: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # quality loop across students: how often asked, how often it confused (repeat requests / no answer)
     asked_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     confused_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

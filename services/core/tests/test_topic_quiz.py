@@ -199,6 +199,13 @@ async def test_still_weak_after_the_recheck_flags_the_teacher(db_session, monkey
     assert ohm.weakest_level == A and ohm.per_bloom[A] == 0
     assert [(n.name, n.lagging) for n in ohm.needs_teacher] == [("Kid 0", A)]
 
+    suggestion = await routes.get_challenge_suggestion(str(s.cls.id), str(s.electricity.id), user=s.teacher,
+                                                       session=db_session)
+    assert suggestion.options and suggestion.taken is False
+    assert "APPLY" in suggestion.bloom_levels  # the class's weakest skill is in the focus
+    assert any("weakest at Apply" in e for e in suggestion.evidence)
+    assert any("1 student still stuck" in e for e in suggestion.evidence)
+
 
 async def test_nothing_lagging_is_mastered_at_once_without_homework(db_session, monkeypatch):
     s = await _seed(db_session)

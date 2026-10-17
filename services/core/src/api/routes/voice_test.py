@@ -96,6 +96,7 @@ def _question_out(question: VoiceTestQuestion) -> VoiceTestQuestionOut:
         expected_points=question.expected_points or [],
         misconceptions=question.misconceptions or [],
         hints=question.hints or [],
+        card=question.card,
         status=question.status,
         needs_rewording=question.needs_rewording,
         asked_count=question.asked_count,
@@ -174,7 +175,7 @@ async def create_test(
             raise ValidationError("That topic isn't part of this chapter.")
     if body.target.mode == AssignmentTargetMode.SPECIFIC_STUDENTS and not body.target.student_ids:
         raise ValidationError("target.studentIds must be non-empty when mode is SPECIFIC_STUDENTS.")
-    await challenge_rules.ensure_one_per_chapter(session, body.class_id, body.chapter_id)
+    await challenge_rules.ensure_one_per_chapter(session, body.class_id, body.chapter_id, "voice")
 
     plan = await get_active_plan(session, user.school_id)
     if plan is not None and plan.test_limit is not None:
@@ -189,6 +190,7 @@ async def create_test(
         duration_minutes=body.duration_minutes,
         completion_window_hours=body.completion_window_hours,
         target_mode=body.target.mode,
+        fix_cards=body.fix_cards,
         status=TestStatus.DRAFT,
         # question prep runs in the background right after this; sessions wait until it settles
         prep_status=VoiceTestPrepStatus.PENDING,
@@ -245,7 +247,7 @@ async def schedule_test(
     test = await get_test_for_teacher(session, test_id, user)
     if test.status != TestStatus.DRAFT:
         raise ConflictError("Test isn't in a schedulable state.")
-    await challenge_rules.ensure_one_per_chapter(session, test.class_id, test.chapter_id, ignore_id=test.id)
+    await challenge_rules.ensure_one_per_chapter(session, test.class_id, test.chapter_id, "voice", ignore_id=test.id)
     test.status = TestStatus.SCHEDULED
     test.scheduled_at = datetime.now(timezone.utc)
     await session.commit()

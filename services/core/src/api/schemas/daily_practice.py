@@ -47,6 +47,7 @@ class PracticeItemOut(CamelModel):
     text: str
     options: list[str] | None
     spec: dict | None = None  # the special kinds' question parts - never which choice is right
+    figure_svg: str | None = None  # a picture question's drawing (SVG markup)
     answered: bool
     result: McqResultOut | VoiceResultOut | SpecialResultOut | None
 

@@ -1,7 +1,7 @@
 """C5: the follow-up MCQ test (student) and Bloom growth (teacher) - see
 src/services/mcq_test.py and src/services/growth.py."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,7 @@ from src.api.schemas.mcq_test import (
 from src.domain.models import Chapter, McqTest, McqTestQuestion, Role, Topic, User, VoiceTest
 from src.repositories.lookups import get_test_for_teacher
 from src.services import growth, mcq_test
+from src.services.question_selector import figure_svgs
 
 router = APIRouter(prefix="/api/v1", tags=["mcq-tests"])
 
@@ -85,6 +86,7 @@ async def list_my_mcq_tests(
 @router.get("/me/mcq-tests/{mcq_test_id}")
 async def get_my_mcq_test(
     mcq_test_id: str,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> McqTestOut:
@@ -92,14 +94,27 @@ async def get_my_mcq_test(
     if mcq_test.status(mcq) == "locked":
         await session.commit()
         raise ConflictError("This MCQ test is not unlocked yet.")
-    questions = await mcq_test.ensure_questions(session, mcq, user)
+    # Building takes a minute (a generation call): never inside this request - the app would
+    # time out and retry into a pile of waiting requests. Answer "preparing" at once and
+    # build in the background, unless prebuild() (after homework) is already at it.
+    questions = await mcq_test.questions_of(session, mcq.id)
+    if not questions:
+        building = (await session.execute(select(McqTest.id).where(McqTest.id == mcq.id)
+                                          .with_for_update(skip_locked=True))).first() is None
+        await session.commit()
+        if not building:
+            background_tasks.add_task(mcq_test.prebuild, mcq.id, user.id)
+        return McqTestOut(id=str(mcq.id), test_id=str(mcq.voice_test_id),
+                          title=await _title(session, mcq.voice_test_id), questions=[], preparing=True)
     await session.commit()
     answers = await mcq_test.answers_of(session, mcq)
+    svgs = await figure_svgs(session, [q.source_question_id for q in questions])
     return McqTestOut(
         id=str(mcq.id), test_id=str(mcq.voice_test_id), title=await _title(session, mcq.voice_test_id),
         # never the answer of an unanswered question: correct_index stays server-side
         questions=[McqQuestionOut(id=str(q.id), text=q.text, options=q.options, bloom_level=q.bloom_level.value,
-                                  concept=q.concept, is_boss=q.is_boss, gap_concept=q.gap_concept)
+                                  concept=q.concept, is_boss=q.is_boss, gap_concept=q.gap_concept,
+                                  figure_svg=svgs.get(q.source_question_id))
                    for q in questions],
         speed_mode=mcq.speed_mode,
         lifelines_left=[k for k in mcq_test.LIFELINES if k not in (mcq.lifelines_used or [])],

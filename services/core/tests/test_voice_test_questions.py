@@ -248,6 +248,29 @@ async def test_prep_picks_one_question_per_level_in_bloom_order_and_rewords_it(s
     assert len(calls) == 1 and len(await _questions(db, s["test"])) == 2
 
 
+async def test_a_later_test_reuses_the_speech_wording_instead_of_writing_it_again(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER,))
+    await _question(db, s, B.REMEMBER, "Define electric current.")
+    _fake_kg(monkeypatch)
+    calls = []
+    _fake_generation(monkeypatch, calls)
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    again = VoiceTest(class_id=s["class"].id, subject_id=s["chapter"].subject_id, chapter_id=s["chapter"].id,
+                      duration_minutes=10, completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS)
+    db.add(again)
+    await db.flush()
+    db.add(VoiceTestBloomLevel(test_id=again.id, bloom_level=B.REMEMBER))
+    await db.flush()
+    await voice_test_prep.prepare_test(db, again, s["teacher"])
+
+    assert len(calls) == 1  # the second test wrote nothing
+    [row] = await _questions(db, again)
+    assert (row.spoken_text, row.expected_points, row.easier_version) == (
+        "Spoken: Define electric current.", ["p1", "p2"], EASIER)
+
+
 async def test_prep_drops_questions_instead_of_raw_text_when_generation_is_down(schema, monkeypatch, caplog):
     db = schema
     s = await _seed(db, levels=(B.REMEMBER,))
@@ -494,6 +517,108 @@ async def test_session_config_carries_the_tests_questions_in_order(schema, monke
     assert config["textbook_context"] == "V = IR"
     assert "reference_questions" not in config
     assert config["student_name"] == "S" and "student_context" not in config  # no earlier test
+
+
+FIX = {"problem": "Balance H₂ + O₂ → H₂O.", "steps": ["H₂ + O₂ → H₂O", "H₂ + O₂ → H₂O₂", "Balanced."],
+       "wrong_step": 1, "explanation": "Never change a subscript - that makes a new substance.",
+       "fixes": [{"text": "2H₂ + O₂ → 2H₂O", "correct": True, "mistake": ""},
+                 {"text": "H₂ + O₂ → H₂O₂", "correct": False, "mistake": "changed_subscript"},
+                 {"text": "H₂ + 2O₂ → H₂O", "correct": False, "mistake": "balanced_wrong_side"}]}
+
+
+def _card_row(spec=FIX):
+    return {"dataset_question_id": None, "bloom_level": B.EVALUATE, "topic_id": None, "subtopic_id": None,
+            "concepts": [], "original_text": spec["problem"], "reworded_text": spec["problem"],
+            "spoken_text": voice_test_prep.CARD_SAY, "expected_points": ["x"], "misconceptions": [],
+            "hints": voice_test_prep.CARD_HINTS, "easier_version": None, "card": spec,
+            "status": VoiceTestQuestionStatus.DRAFT}
+
+
+async def test_fix_milo_cards_sit_between_spoken_questions_and_reach_the_screen_without_their_answer(
+        schema, monkeypatch):
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND))
+    for level in (B.REMEMBER, B.UNDERSTAND):
+        await _question(db, s, level, f"{level.value} question one")
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+    s["test"].fix_cards = 1
+    asked = []
+
+    async def cards(test_id, chapter_id, class_id, wanted):
+        asked.append((test_id, wanted))
+        return [_card_row()]
+    monkeypatch.setattr(voice_test_prep, "_cards", cards)
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    assert asked == [(s["test"].id, 1)]
+    rows = await _questions(db, s["test"])
+    assert [r.card is not None for r in rows] == [False, True, False]  # never the closing question
+    card = rows[1]
+    assert card.spoken_text == voice_test_prep.CARD_SAY and card.bloom_level == B.EVALUATE
+    assert await voice_test_prep.swap_question(db, s["test"], card, s["teacher"]) is False  # a card stays
+
+    _student, ai_session = await _student_session(db, s)
+    config, count = await ai_assessor._colearner_config(db, ai_session, [B.REMEMBER, B.UNDERSTAND])
+    assert count == 3
+    assert config["questions"][1]["card"] == {"steps": FIX["steps"], "fixes": [f["text"] for f in FIX["fixes"]]}
+    assert "card" not in config["questions"][0]
+    # the app: what to show when Milo asks question 2 - never which step or fix is right
+    shown = [{"number": n, **voice_test_prep.question_types.public("fix_steps", r.card)}
+             for n, r in enumerate(rows, 1) if r.card]
+    assert shown == [{"number": 2, "problem": FIX["problem"], "steps": FIX["steps"],
+                      "fixes": [f["text"] for f in FIX["fixes"]]}]
+    assert "wrong_step" not in str(shown) and "correct" not in str(shown)
+
+
+async def test_cards_come_from_the_pool_or_are_written_at_once_with_a_spare_never_an_mcq(monkeypatch):
+    from types import SimpleNamespace
+
+    ids = [str(uuid.UUID(int=i + 1)) for i in range(4)]
+    topics = {t: SimpleNamespace(id=t) for t in ids}
+
+    class FakeSession:
+        async def get(self, model, key):
+            return topics.get(str(key)) or SimpleNamespace(id=str(key))
+
+        async def commit(self):
+            pass
+
+    @asynccontextmanager
+    async def fake_session():
+        yield FakeSession()
+
+    async def work(session, chapter_id):  # t0 most worked ... t3 not worked
+        return [{"topic_id": t, "name": t, "equations": share, "calculations": 0.0}
+                for t, share in zip(ids, (0.7, 0.5, 0.3, 0.01))]
+
+    pooled = SimpleNamespace(text="pooled", spec=FIX, used_count=0)
+
+    async def from_pool(session, topic, kind, level, exclude, exact=False):
+        assert kind == "fix_steps"
+        return pooled if topic.id == ids[0] else None
+
+    written = []
+
+    async def generate(session, school_class, slots, indexes):
+        written.append(slots[0].topic.id)
+        if slots[0].topic.id == ids[1]:
+            return {}  # failed its check - the spare fills in
+        return {0: SimpleNamespace(text="new", spec=FIX, used_count=0)}
+
+    monkeypatch.setattr(voice_test_prep, "get_session", fake_session)
+    monkeypatch.setattr(voice_test_prep.challenge_suggester, "topic_work", work)
+    monkeypatch.setattr(voice_test_prep.daily_practice, "_from_pool", from_pool)
+    monkeypatch.setattr(voice_test_prep.daily_practice, "_generate_special", generate)
+
+    cards = await voice_test_prep._cards("test-1", "ch", "cls", wanted=2)
+
+    assert sorted(written) == ids[1:3]  # the first from the pool; the last isn't worked on paper
+    assert [c["topic_id"] for c in cards] == [ids[0], ids[2]] and pooled.used_count == 1
+    right = next(f["text"] for f in cards[0]["card"]["fixes"] if f["correct"])
+    assert cards[0]["expected_points"][:2] == ['Finds the wrong step: step 2 ("H₂ + O₂ → H₂O₂")',
+                                               f'Picks the right fix: "{right}"']
 
 
 def _wire_finish(monkeypatch, db, payload):

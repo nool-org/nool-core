@@ -52,9 +52,6 @@ _OPENAI = "https://api.openai.com/v1/realtime"
 # After the session's time limit the co-learner gets this long to wrap up,
 # then we hang up regardless - an abandoned call must not keep billing.
 _GRACE_SECONDS = 20  # the app closes the test 20 s after time's up (TIME_LIMIT_BACKSTOP_MS)
-# After end_session the goodbye (summary + sign-off) gets this long to play - the
-# test clock is off by then - then we hang up if the app hasn't finished the call.
-_CLOSING_GRACE_SECONDS = 60
 # Finished/abandoned calls are kept this long (so a retried finish still
 # gets its result), then dropped.
 _KEEP_SECONDS = 3 * 3600
@@ -71,7 +68,6 @@ def speech_tokens(chars: int) -> int:
 
 
 MAX_REPLY_TOKENS = speech_tokens(2 * SENTENCE_CHARS)  # floor: "1-2 short sentences" (~25 s)
-MAX_CLOSING_TOKENS = speech_tokens(4 * SENTENCE_CHARS)  # the 2-3 sentence summary + fixed sign-off line
 MAX_REPLIES = 18  # co-learner replies per call (floor), then the wrap-up is forced
 REPLIES_PER_QUESTION = 6  # ask + one follow-up + two nudges + a silence check-in + acknowledgement
 
@@ -97,6 +93,8 @@ SILENCE_SECONDS = 12
 # "[PAUSED]" and carries on with "[RESUMED]": the clock holds for up to this long in all.
 MAX_PAUSE_SECONDS = 10 * 60
 PAUSED, RESUMED = "[PAUSED]", "[RESUMED]"
+# A Fix Milo card tapped in the app: "[CARD_ANSWERED step=2 fix=0] ..." (0-based) - the card question's answer
+CARD_ANSWERED = re.compile(r"^\[CARD_ANSWERED step=(\d+) fix=(\d+)\]")
 EASIER = "easier"
 STANDARD = "standard"
 
@@ -161,12 +159,6 @@ LIVE VOICE SESSION RULES (this is a real-time spoken call):
 - If you receive "[RESUMED]", say one short welcome back line and repeat the current question exactly.
 """
 
-CLOSING_INSTRUCTIONS = (
-    "The session is over. Speak your final turn now, in 2-3 short sentences: thank the student by their first name "
-    "if you know it, name one specific strength of their thinking or effort you noticed today, and one thing to "
-    "review (never say whether answers were right or wrong), then end with "
-    "exactly: \"That concludes all questions for our session. Great job discussing these concepts today!\""
-)
 
 
 @dataclass
@@ -190,10 +182,6 @@ class RealtimeCall:
     time_up: bool = False
     # Spoken co-learner replies so far (response.done with a message), capped at MAX_REPLIES.
     replies: int = 0
-    # Reply cap hit: hang up once the closing goodbye has finished playing.
-    hangup_after_closing: bool = False
-    closing_sent: bool = False
-    closing_done: bool = False
     # Billed usage as OpenAI reports it (response.done / transcription events).
     usage: dict[str, float] = field(default_factory=dict)
     ended_at: datetime | None = None
@@ -240,7 +228,15 @@ def _api_key() -> str:
 def build_question_instructions(config: SessionConfig) -> str:
     # Never the expected points: whatever is in here can end up said aloud.
     # The grader gets them separately (question_rubric).
-    questions = "\n".join(f"Q{n} [{q.bloom_level}]: \"{q.spoken_text}\"" for n, q in enumerate(config.questions, 1))
+    questions = "\n".join(f"Q{n} [{q.bloom_level}]{' (ON SCREEN)' if q.card else ''}: \"{q.spoken_text}\""
+                          for n, q in enumerate(config.questions, 1))
+    cards = ""
+    if any(q.card for q in config.questions):
+        cards = """
+- An ON SCREEN question shows Milo's worked homework (an equation or a calculation with one wrong step) on the
+  student's screen. Say its text, then wait quietly while they tap - never read the steps aloud and never say
+  which step is wrong. When you receive "[CARD_ANSWERED ...]", ask ONE short question: why was that step wrong?
+  Listen, give a short neutral acknowledgement, and go on. Never say whether their pick was right."""
     student = ""
     if config.student_name:
         student = (f"\nTHE STUDENT: their first name is \"{config.student_name}\". Use it in the greeting, "
@@ -252,8 +248,7 @@ def build_question_instructions(config: SessionConfig) -> str:
     if config.student_focus:
         student += (f"\nTHEIR TOPIC QUIZZES ON THIS CHAPTER: \"{config.student_focus}\" - when a question is on a "
                     "topic or thinking skill they found hard, be quicker to nudge and ask your one follow-up; on topics "
-                    "they have mastered, don't over-check. In your closing suggestion, name one thing that has "
-                    "improved or still needs work. Never mention quizzes, scores or numbers, and never treat this as "
+                    "they have mastered, don't over-check. Never mention quizzes, scores or numbers, and never treat this as "
                     "a reason to give answers.")
     return f"""You are Milo, a warm teacher giving a short spoken {config.subject} test on "{config.chapter_name}" to a {config.grade} student in India. You guide the student's thinking - you never give the answers.
 Speak simple Indian English, like a kind teacher in a South Indian school: short, clear sentences and everyday words.{student}
@@ -277,7 +272,7 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 - Keep every other turn to 1-2 short sentences (under 25 words).
 - If the student interrupts you, stop and listen - respond to what they said.
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
-- Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.
+- Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.{cards}
 - If you receive "[SILENCE]", the student has been quiet for a while: warmly say "Take your time. Want a small hint?" (one sentence) and wait.
 - If you receive "[TIME_UP]", call end_session.
 - If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
@@ -375,9 +370,6 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
                 async with asyncio.timeout(limit) as call.deadline:
                     await _record(call, ws)
                 call.deadline = None
-                if call.closing_done:  # reply cap hit: hang up once the goodbye has played
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(_record(call, ws), timeout=_GRACE_SECONDS)
             except asyncio.TimeoutError:
                 call.deadline = None
                 if call.state.is_completed:  # the goodbye's own grace ran out - just hang up
@@ -429,6 +421,7 @@ async def _record(call: RealtimeCall, ws) -> None:
                         _start_clock(call)
                 elif is_new and item["role"] == "user":
                     _pause_marker(call, item)
+                    _card_answer(call, item)
                 if is_new and call.current:
                     call.item_question[item["id"]] = call.current
                     if item["role"] == "user" and spoken:
@@ -455,7 +448,6 @@ async def _record(call: RealtimeCall, ws) -> None:
                 call.forcing_end = True
                 if capped and not final_answer_in:
                     logger.info("realtime_call_reply_cap call_id=%s replies=%d", call.call_id, call.replies)
-                    call.hangup_after_closing = True
                 # only the reply just starting - never output_audio_buffer.clear, which would
                 # cut off the previous reply still playing
                 await ws.send(json.dumps({"type": "response.cancel"}))
@@ -479,9 +471,6 @@ async def _record(call: RealtimeCall, ws) -> None:
             outputs = (event.get("response") or {}).get("output") or []
             if any(o.get("type") == "message" for o in outputs):
                 call.replies += 1
-                if call.closing_sent and call.hangup_after_closing:
-                    call.closing_done = True
-                    return  # goodbye generated - _sideband hangs up once it has played
             end = next((o for o in outputs if o.get("type") == "function_call" and o.get("name") == "end_session"), None)
             if call.state.config.questions and not end and not call.state.is_completed:
                 await _questions_done(call, ws, outputs)
@@ -500,20 +489,14 @@ async def _record(call: RealtimeCall, ws) -> None:
                 }))
             elif end and not call.state.is_completed:
                 call.state.is_completed = True
-                if call.deadline:  # test clock off - [TIME_UP] can't land on the goodbye, which gets its own grace
-                    call.deadline.reschedule(asyncio.get_running_loop().time() + _CLOSING_GRACE_SECONDS)
-                # The model tends to call end_session straight after a bare
-                # acknowledgement - so the closing summary is always its own,
-                # explicit final turn (tools off, so it can't end twice).
+                # No spoken goodbye: the app hangs up the moment end_session arrives and the
+                # student goes straight to their insights - a goodbye would be paid-for audio
+                # nobody hears. This is only the backstop if the app never finishes the call.
+                if call.deadline:
+                    call.deadline.reschedule(asyncio.get_running_loop().time() + _GRACE_SECONDS)
                 await ws.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {"type": "function_call_output", "call_id": end.get("call_id"), "output": "{\"ok\": true}"},
-                }))
-                call.closing_sent = True
-                await _send_response(call, ws, json.dumps({
-                    "type": "response.create",
-                    "response": {"instructions": CLOSING_INSTRUCTIONS, "tool_choice": "none",
-                                 "max_output_tokens": MAX_CLOSING_TOKENS},
                 }))
             elif call.forcing_end and not call.forced_end_sent and not call.state.is_completed:
                 # the model's reply to the final answer was cancelled above -
@@ -527,8 +510,6 @@ async def _record(call: RealtimeCall, ws) -> None:
                     },
                 }))
         elif kind == "output_audio_buffer.stopped":
-            if call.closing_done:
-                return  # goodbye has finished playing
             if call.state.config.questions:
                 _arm_silence(call, ws)
         elif kind == "error":
@@ -590,6 +571,29 @@ def _pause_marker(call: RealtimeCall, item: dict) -> None:
             call.deadline.reschedule(call.deadline.when() - (allowance - held))
 
 
+def _card_answer(call: RealtimeCall, item: dict) -> None:
+    """A Fix Milo card tapped in the app: the current card question's answer, written out for
+    the grader from the card itself ("Step 3 is the wrong one: ...; the fix: ..."). Counts as a turn."""
+    text = next((c.get("text") for c in item.get("content") or [] if c.get("type") == "input_text"), "") or ""
+    match = CARD_ANSWERED.match(text)
+    questions = call.state.config.questions or []
+    card = questions[call.current - 1].card if match and 1 <= call.current <= len(questions) else None
+    if card is None:
+        return
+    step, fix = int(match[1]), int(match[2])
+    if not (0 <= step < len(card.steps) and 0 <= fix < len(card.fixes)):
+        return
+    call.items[item["id"]]["text"] = (f"(tapped on the screen) Step {step + 1} is the wrong one: \"{card.steps[step]}\". "
+                                      f"The fix: \"{card.fixes[fix]}\".")
+    call.spoken_turns += 1
+    _cancel_silence(call)
+    progress = _progress(call, call.current)
+    if progress["first_item"] is None:
+        progress["first_item"] = item["id"]
+        call.item_kind[item["id"]] = "answer"
+    call.last_user_item = item["id"]
+
+
 def _start_clock(call: RealtimeCall) -> None:
     """Question 1 has begun: the time limit counts from now, never past the absolute
     cap _sideband set. Later calls change nothing (the deadline is already sooner)."""
@@ -609,7 +613,9 @@ def _arm_silence(call: RealtimeCall, ws) -> None:
     nudge Milo with [SILENCE] - once per question (mirrors the [TIME_UP] injection)."""
     _cancel_silence(call)
     n = call.current
-    if _awaiting_answer(call, n) and not _progress(call, n)["silences"]:
+    questions = call.state.config.questions or []
+    on_screen = 1 <= n <= len(questions) and questions[n - 1].card is not None  # tapping takes a while
+    if _awaiting_answer(call, n) and not _progress(call, n)["silences"] and not on_screen:
         call.silence_task = asyncio.create_task(_silence_after(call, ws, n))
 
 

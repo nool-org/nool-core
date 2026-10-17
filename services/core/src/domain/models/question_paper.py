@@ -91,6 +91,8 @@ class QuestionPaperChapter(Base):
         UUID(as_uuid=True), ForeignKey("question_papers.id")
     )
     chapter_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chapters.id"))
+    # The teacher's weightage: marks from this chapter. Null = none set (generation spreads freely).
+    marks: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class QuestionPaperTopic(Base):

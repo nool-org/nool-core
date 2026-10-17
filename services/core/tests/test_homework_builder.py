@@ -12,7 +12,7 @@ from src.domain.models import (
     Topic, User, UserStatus, VoiceTest,
 )
 from src.domain.models.question_paper import PaperDifficultyLevel as D
-from src.services import generation_client
+from src.services import gap_packs, generation_client
 from src.services.homework_builder import build_homework_questions
 
 B = BloomLevel
@@ -76,10 +76,37 @@ async def test_bank_first_then_generation_for_the_gaps(db_session, monkeypatch):
 
     assert {d.text for d in drafts[:2]} == {"bank q0", "bank q1"}
     assert all(d.source_question_id for d in drafts[:2]) and drafts[2].text == "generated q"
-    assert drafts[2].source_question_id is None and drafts[2].dataset_id == s["imp"].id
+    kept = await db_session.get(DatasetQuestion, drafts[2].source_question_id)  # written once, kept in the gap pack
+    pack = await db_session.get(Dataset, kept.dataset_id)
+    assert pack.name.startswith(gap_packs.PREFIX) and kept.topic_id == s["test"].topic_id
     assert "pyq q" not in [d.text for d in drafts]                      # not a picked dataset
     assert sent["sections"][0]["text"].startswith("In series") and len(sent["slots"]) == 1
     assert {"bank q0", "bank q1"} <= set(sent["avoid"])
+
+
+@pytest.mark.asyncio
+async def test_a_written_question_is_paid_for_once_then_reused_from_the_gap_pack(db_session, monkeypatch):
+    s = await _seed(db_session, bank_size=0)
+    calls = []
+
+    async def fake_gap_fill(payload):
+        calls.append(payload)
+        return {"questions": [{"slot_index": i, "question_type": "short_answer", "text": f"written q{len(calls)}-{i}",
+                               "options": [], "answer": "w", "solution": ""} for i in range(len(payload["slots"]))]}
+
+    monkeypatch.setattr(generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(generation_client, "gap_fill", fake_gap_fill)
+    first = await _build(db_session, s, total=2)
+    assert len(calls) == 1 and all(d.source_question_id for d in first)
+
+    # another homework on the same topic and level: straight from the gap pack, nothing written
+    async def must_not_write(payload):
+        raise AssertionError(f"wrote {len(payload['slots'])} questions again")
+    monkeypatch.setattr(generation_client, "gap_fill", must_not_write)
+    again = await build_homework_questions(
+        db_session, user=s["teacher"], test=s["test"], total=2, bloom_weights={B.APPLY: 1},
+        difficulty=HomeworkDifficulty.EASY, fallback_dataset_id=s["imp"].id, seed="other")
+    assert {d.text for d in again} <= {d.text for d in first} | {"pyq q"}
 
 
 @pytest.mark.asyncio
@@ -193,7 +220,7 @@ async def test_a_students_homework_reuses_questions_generated_for_another_studen
 
     second = await build_for(b)                                    # same topic and level: no model call
     assert [d.text for d in second] == ["generated q1"] and len(calls) == 1
-    assert second[0].source_question_id is None
+    assert second[0].source_question_id == first[0].source_question_id  # the same gap-pack question
 
     again = await build_for(a)                                     # A already had it: a fresh one
     assert [d.text for d in again] == ["generated q2"] and len(calls) == 2

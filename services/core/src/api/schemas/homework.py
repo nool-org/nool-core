@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import Field
@@ -25,6 +26,7 @@ class HomeworkOut(CamelModel):
     assigned_count: int
     completed_count: int
     chapter_name: str | None = None
+    created_at: datetime | None = None  # tells apart two rounds of homework on one chapter
     # names of the targeted students (SPECIFIC_STUDENTS), in the same order as target.student_ids
     target_student_names: list[str] | None = None
 
@@ -52,6 +54,7 @@ class StudentHomeworkQuestionOut(CamelModel):
     dataset_id: str
     text: str
     is_boss: bool = False  # auto homework's double-XP question
+    figure_svg: str | None = None  # a picture question's drawing (SVG markup)
 
 
 class HomeworkQuestionOut(StudentHomeworkQuestionOut):

@@ -670,3 +670,22 @@ async def test_marking_a_topic_taught_queues_its_revision_cards_and_checkpoints(
                                   background_tasks=tasks, user=s.teacher, session=db_session)
     assert [(t.func.__name__, t.args) for t in tasks.tasks] == [
         ("pregenerate_for_topic", (s.ohm.id,)), ("prebuild_class", (s.cls.id, s.ohm.id, True))]
+
+
+async def test_a_switched_off_bank_retires_what_the_pool_made_from_it(db_session):
+    from sqlalchemy import update
+
+    from src.domain.models import SchoolDataset
+
+    s = await _seed(db_session)
+    await _bank(db_session, s, s.mirrors, mcq=1)
+    source = (await db_session.execute(select(DatasetQuestion).where(DatasetQuestion.topic_id == s.mirrors.id))
+              ).scalars().first()
+    [from_bank] = await _pool(db_session, s.mirrors, 1, source_question_id=source.id)
+    [written] = await _pool(db_session, s.mirrors, 1, origin_override="generated")
+    pick = lambda exclude: service._from_pool(db_session, s.mirrors, "mcq", B.UNDERSTAND, exclude)  # noqa: E731
+    assert (await pick(set())).id == from_bank.id  # bank first while it's on
+
+    await db_session.execute(update(SchoolDataset).where(SchoolDataset.dataset_id == s.dataset.id).values(enabled=False))
+    assert (await pick(set())).id == written.id  # off: what came from it is skipped
+    assert await pick({written.id}) is None
