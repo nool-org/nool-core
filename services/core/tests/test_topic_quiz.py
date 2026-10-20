@@ -33,18 +33,15 @@ R, U, A, AN = "REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE"
 def test_quiz_levels():
     assert service.quiz_levels(1) == [B.REMEMBER, B.REMEMBER, B.UNDERSTAND, B.UNDERSTAND,
                                       B.APPLY, B.APPLY, B.ANALYZE, B.ANALYZE]
-    assert service.quiz_levels(2, [A]) == [B.APPLY, B.APPLY, B.REMEMBER, B.UNDERSTAND, B.ANALYZE, B.APPLY]
-    assert service.quiz_levels(2, [AN, A, U]) == [B.ANALYZE, B.ANALYZE, B.APPLY, B.APPLY, B.UNDERSTAND,
-                                                  B.UNDERSTAND]
+    assert service.quiz_levels(2, [A]) == [B.APPLY, B.APPLY, B.REMEMBER]
+    assert service.quiz_levels(2, [AN, A, U]) == [B.ANALYZE, B.ANALYZE, B.APPLY]
 
 
 def test_quiz_slots_add_two_spoken_answers():
     first = service.quiz_slots(1)
     assert [k for k, _ in first] == ["mcq"] * 8 + ["voice"] * 2
     assert [lv for k, lv in first if k == "voice"] == [B.UNDERSTAND, B.APPLY]
-    assert [lv for k, lv in service.quiz_slots(2, [AN, A]) if k == "voice"] == [B.ANALYZE, B.APPLY]
-    assert [lv for k, lv in service.quiz_slots(2, [A]) if k == "voice"] == [B.APPLY, B.UNDERSTAND]
-    assert len(service.quiz_slots(2, [A])) == 8
+    assert service.quiz_slots(2, [AN, A]) == [("mcq", B.ANALYZE), ("mcq", B.ANALYZE), ("mcq", B.APPLY)]  # short, no voice
 
 
 def test_maths_quiz_mixes_in_its_own_question_types():
@@ -52,7 +49,7 @@ def test_maths_quiz_mixes_in_its_own_question_types():
     assert first == [("mcq", B.REMEMBER), ("mcq", B.UNDERSTAND)] + [("mcq", B.APPLY)] * 4 + [
         ("who_is_right", B.ANALYZE), ("fix_steps", B.EVALUATE), ("make_your_own", B.CREATE)]  # no spoken answers in Maths
     recheck = service.quiz_slots(2, ["CREATE", "APPLY"], subject="Mathematics")
-    assert [k for k, _ in recheck] == ["mcq"] * 4 + ["make_your_own"]
+    assert [k for k, _ in recheck] == ["mcq"] * 2 + ["make_your_own"]
     assert recheck[0] == ("mcq", B.APPLY)
     assert [k for k, _ in service.quiz_slots(2, ["APPLY"], subject="Mathematics")][-1] == "who_is_right"
     assert service.quiz_slots(1, subject="Science") == service.quiz_slots(1)  # no mix: unchanged
@@ -167,8 +164,7 @@ async def test_the_loop_quiz_analysis_homework_recheck_mastered(db_session, monk
     assert (await _stage(db_session, s, s.ohm)).stage == "recheck"
 
     recheck = await _start(db_session, s, s.ohm, attempt=2)
-    assert [(i.kind, i.bloom_level) for i in recheck.items] == [("mcq", lv) for lv in (A, A, AN, AN, R, U)] + [
-        ("voice", A), ("voice", AN)]
+    assert [(i.kind, i.bloom_level) for i in recheck.items] == [("mcq", lv) for lv in (A, A, AN)]
     assert not {i.text for i in recheck.items} & {i.text for i in quiz.items}  # fresh questions
     await _answer(db_session, s, recheck, {R, U, A, AN})
     result = (await _finish(db_session, s, recheck)).analysis

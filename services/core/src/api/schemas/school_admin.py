@@ -366,6 +366,8 @@ class SchoolSubscriptionOut(CamelModel):
     school_id: str
     plan_id: str
     plan_name: str
+    price_label: str
+    discount_percent: int
     status: SubscriptionStatus
     renews_at: datetime
 

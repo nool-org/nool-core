@@ -24,7 +24,7 @@ from sqlalchemy.schema import CreateTable
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError
 from src.api.routes import mcq_test as routes
-from src.api.schemas.mcq_test import LifelineIn, McqAnswerIn, McqAttemptIn, McqRetryIn, SpeedModeIn
+from src.api.schemas.mcq_test import LifelineIn, McqAnswerIn, McqAttemptIn, SpeedModeIn
 from src.domain.models import (
     AiAssessorSession,
     AiAssessorSessionRecord,
@@ -612,29 +612,6 @@ async def test_rank_before_and_after_the_attempt_xp(schema, monkeypatch):
     assert out.rank.model_dump() == {"before": 3, "after": 1}  # 0 -> 150 points, a tie shares rank 1
     points = (await db.execute(select(StudentPoints.points).where(StudentPoints.student_id == s["student"].id))).scalar_one()
     assert points == 150
-
-
-async def test_retry_the_misses_once_for_half_xp_without_touching_mastery(schema, monkeypatch):
-    db = schema
-    s, item, rows = await _ready(db, monkeypatch)
-    with pytest.raises(ConflictError):  # not completed yet
-        await routes.retry_my_mcq_misses(item.id, McqRetryIn(answers=[]), user=s["student"], session=db)
-    body = [{"questionId": str(q.id), "optionIndex": q.correct_index if i > 1 else (q.correct_index + 1) % 4}
-            for i, q in enumerate(rows)]
-    first = await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=body), user=s["student"], session=db)
-    mcq = await db.get(McqTest, uuid.UUID(item.id))
-    result_before = dict(mcq.result)
-    retry = [{"questionId": str(rows[0].id), "optionIndex": rows[0].correct_index},
-             {"questionId": str(rows[1].id), "optionIndex": (rows[1].correct_index + 1) % 4}]
-    out = await routes.retry_my_mcq_misses(item.id, McqRetryIn(answers=retry), user=s["student"], session=db)
-    assert (out.correct, out.total, out.score_percent, out.xp_awarded) == (1, 2, 50, 5)
-    assert {a.question_id for a in out.correct_answers} == {str(rows[0].id), str(rows[1].id)}
-    assert mcq.score_percent == first.score_percent == 80 and mcq.result == result_before
-    assert mcq.retry_score_percent == 50 and mcq.retry_completed_at is not None
-    xp = (await db.execute(select(StudentGamification.xp).where(StudentGamification.student_id == s["student"].id))).scalar_one()
-    assert xp == first.xp_awarded + 5
-    with pytest.raises(ConflictError):
-        await routes.retry_my_mcq_misses(item.id, McqRetryIn(answers=retry), user=s["student"], session=db)
 
 
 async def test_generated_mcqs_carry_explanation_and_a_safe_hint_and_a_hard_boss(schema, monkeypatch):

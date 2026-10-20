@@ -78,3 +78,22 @@ async def test_one_per_chapter_without_extras(db_session):
     await _subscribe(db_session, s.school)
     with pytest.raises(ConflictError):
         await challenge_rules.ensure_one_per_chapter(db_session, s.cls.id, s.electricity.id, "fix_steps")
+
+
+@pytest.mark.asyncio
+async def test_school_discount_is_stored_and_bounded(db_session):
+    from pydantic import ValidationError
+
+    from src.api.routes.admin import update_school_subscription
+    from src.api.schemas.admin import UpdateSubscriptionIn
+
+    s = await _seed(db_session)
+    await _subscribe(db_session, s.school)
+    out = await update_school_subscription(str(s.school.id), UpdateSubscriptionIn(discount_percent=10),
+                                           actor=s.teacher, session=db_session)
+    assert out.discount_percent == 10
+    out = await update_school_subscription(str(s.school.id), UpdateSubscriptionIn(status=None),
+                                           actor=s.teacher, session=db_session)
+    assert out.discount_percent == 10  # left alone when not sent
+    with pytest.raises(ValidationError):
+        UpdateSubscriptionIn(discount_percent=101)

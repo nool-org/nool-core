@@ -17,8 +17,6 @@ from src.api.schemas.mcq_test import (
     McqAttemptIn,
     McqAttemptOut,
     McqQuestionOut,
-    McqRetryIn,
-    McqRetryOut,
     McqTestItemOut,
     McqTestListOut,
     McqTestOut,
@@ -178,20 +176,6 @@ async def submit_my_mcq_attempt(
     await session.commit()
     return McqAttemptOut.model_validate({**result, "rank": rank})
 
-
-@router.post("/me/mcq-tests/{mcq_test_id}/retry")
-async def retry_my_mcq_misses(
-    mcq_test_id: str,
-    body: McqRetryIn,
-    user: User = Depends(require_role(Role.STUDENT)),
-    session: AsyncSession = Depends(get_db_session),
-) -> McqRetryOut:
-    mcq = await _own(session, mcq_test_id, user)
-    result = await mcq_test.submit_retry(session, mcq, {a.question_id: a.option_index for a in body.answers})
-    await mcq_test.award_points(session, user.id, result["xp_awarded"])
-    await apply_xp(session, user.id, result["xp_awarded"])
-    await session.commit()
-    return McqRetryOut.model_validate(result)
 
 
 @router.get("/tests/{test_id}/growth")

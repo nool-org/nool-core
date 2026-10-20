@@ -139,18 +139,6 @@ class McqAttemptOut(CamelModel):
     missed_question_ids: list[str] = []
 
 
-class McqRetryIn(CamelModel):
-    answers: list[McqAnswer]
-
-
-class McqRetryOut(CamelModel):
-    correct: int
-    total: int
-    score_percent: int
-    xp_awarded: int
-    correct_answers: list[McqAnswer]
-
-
 class StudentGrowthOut(CamelModel):
     student_id: str
     name: str

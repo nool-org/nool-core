@@ -1254,7 +1254,7 @@ async def get_school_subscription(
     plan = await session.get(Plan, sub.plan_id)
     return SchoolSubscriptionOut(
         school_id=str(sub.school_id), plan_id=str(sub.plan_id), status=sub.status, renews_at=sub.renews_at,
-        plan_name=plan.name,
+        plan_name=plan.name, price_label=plan.price_label, discount_percent=sub.discount_percent,
         teacher_count=await count_teachers(session, user.school_id), teacher_limit=plan.teacher_limit,
         student_count=await count_students(session, user.school_id), student_limit=plan.student_limit,
         test_count=await count_tests(session, user.school_id), test_limit=plan.test_limit,

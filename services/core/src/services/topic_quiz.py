@@ -61,7 +61,7 @@ QUIZ_MIX: dict[str, list[tuple[str, BloomLevel]]] = {
                     ("make_your_own", BloomLevel.CREATE)],
 }
 PER_LEVEL = 2  # first quiz: 8 questions
-RECHECK_SIZE = 6
+RECHECK_SIZE = 3  # a short check after the homework, MCQs only
 VOICE_LEVELS = [BloomLevel.UNDERSTAND, BloomLevel.APPLY]  # the 2 spoken answers on a first quiz
 LAGGING_BELOW = daily_practice.GOOD_SCORE  # a level under 70% right is lagging
 HOMEWORK_QUESTIONS = 5
@@ -72,7 +72,7 @@ READY_GRACE = timedelta(minutes=15)  # a just-taught topic waits this long at mo
 # ------------------------------------------------------------------ pure parts
 def quiz_levels(attempt: int, lagging: list[str] | None = None) -> list[BloomLevel]:
     """The quiz's Bloom level per question. Re-check: two on each lagging
-    level (weakest first), then one each on the others, up to 6."""
+    level (weakest first), then one each on the others, up to RECHECK_SIZE."""
     if attempt == 1:
         return [level for level in LEVELS for _ in range(PER_LEVEL)]
     weak = [BloomLevel(v) for v in (lagging or [])]
@@ -88,14 +88,16 @@ def quiz_slots(attempt: int, lagging: list[str] | None = None, subject: str | No
     (QUIZ_MIX), then spoken answers - on a re-check, on the weakest levels
     (a spoken answer shows understanding best).
 
-    Without a mix: 8 MCQs (2 per level) + 2 spoken; re-check 6 + 2.
-    With one (Maths): 6 MCQs (PROBLEM_LEVELS: 4 Apply problems) + the mix + 1 spoken; on a re-check,
-    MCQs on the lagging MCQ levels + the mix types whose level lags (else the
-    first) + 1 spoken."""
+    Without a mix: 8 MCQs (2 per level) + 2 spoken. With one (Maths): 6 MCQs
+    (PROBLEM_LEVELS: 4 Apply problems) + the mix + 1 spoken.
+    Re-check: RECHECK_SIZE questions, no spoken answers - MCQs on the lagging
+    levels; in Maths 2 of them + the mix type whose level lags (else the first)."""
     mix = QUIZ_MIX.get(subject or "", [])
     weak = [BloomLevel(v) for v in (lagging or [])] if attempt == 2 else []
     if not mix:
         mcqs = [("mcq", level) for level in quiz_levels(attempt, lagging)]
+        if attempt == 2:
+            return mcqs
         voice = list(dict.fromkeys(weak + VOICE_LEVELS))[:2]
         return mcqs + [("voice", level) for level in voice]
     mixed_levels = {level for _, level in mix}
@@ -104,8 +106,9 @@ def quiz_slots(attempt: int, lagging: list[str] | None = None, subject: str | No
         extra = list(mix)
     else:
         mcq_weak = [v for v in (lagging or []) if BloomLevel(v) in LEVELS and BloomLevel(v) not in mixed_levels]
-        mcq_levels = [lv for lv in quiz_levels(2, mcq_weak) if lv not in mixed_levels][:4]
-        extra = [(k, lv) for k, lv in mix if lv in weak] or mix[:1]
+        mcq_levels = [lv for lv in quiz_levels(2, mcq_weak) if lv not in mixed_levels][:RECHECK_SIZE - 1]
+        extra = ([(k, lv) for k, lv in mix if lv in weak] or mix)[:1]
+        return [("mcq", level) for level in mcq_levels] + extra
     voice = list(dict.fromkeys([lv for lv in weak if lv in VOICE_LEVELS] + VOICE_LEVELS))[:1]
     if not subject_rules.voice_tests_allowed(subject):
         voice = []

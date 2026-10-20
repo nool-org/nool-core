@@ -139,6 +139,8 @@ class Subscription(IdMixin, Base):
         SAEnum(SubscriptionStatus, name="subscription_status"), default=SubscriptionStatus.TRIAL
     )
     renews_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Per-school discount on the plan price, 0-100 (the DB checks the range).
+    discount_percent: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class UpgradeRequestStatus(str, Enum):

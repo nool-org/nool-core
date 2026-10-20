@@ -19,7 +19,7 @@ you lag" to "did it improve".
 - Attempt (submit_attempt): scored from those first answers, one attempt
   only; growth math in services/growth.py. XP (xp_breakdown) adds combo,
   boss and speed bonuses, but score, mastery and growth stay correctness
-  only. One retry of the misses afterwards for half XP (submit_retry).
+  only.
 """
 
 import logging
@@ -77,7 +77,6 @@ BOSS_BONUS = 10
 COMBO_FROM, COMBO_BONUS = 3, 5  # +5 for the 3rd consecutive correct answer and each one after
 SPEED_LIMIT_MS, SPEED_BONUS = 15_000, 3
 LIFELINE_COST = 5
-RETRY_XP_PER_CORRECT = 5
 LIFELINES = ("fifty_fifty", "ask_milo")
 CLASS_PERCENTILE_MIN = 3  # classmates' completed checks needed for "you beat X%"
 _BLOOM_ORDER = list(BloomLevel)
@@ -624,26 +623,4 @@ async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str,
         "missed_question_ids": [str(q.id) for q in missed],
     }
 
-
-async def submit_retry(session: AsyncSession, mcq: McqTest, answers: dict[str, int]) -> dict:
-    """One retry of the questions missed in the attempt, for half XP. Never
-    touches score_percent, mastery or growth. 409 before the attempt, with
-    nothing missed, or once already retried. Caller commits."""
-    if mcq.completed_at is None:
-        raise ConflictError("Finish the MCQ test before retrying it.")
-    first = {a["questionId"]: a["optionIndex"] for a in mcq.answers or []}
-    missed = [q for q in await questions_of(session, mcq.id) if first.get(str(q.id)) != q.correct_index]
-    if not missed:
-        raise ConflictError("Nothing to retry - every answer was right.")
-    now = datetime.now(timezone.utc)
-    claimed = await session.execute(update(McqTest).where(McqTest.id == mcq.id, McqTest.retry_completed_at.is_(None))
-                                    .values(retry_completed_at=now).returning(McqTest.id))
-    if claimed.scalar_one_or_none() is None:
-        raise ConflictError("This MCQ test has already been retried.")
-    correct = sum(answers.get(str(q.id)) == q.correct_index for q in missed)
-    mcq.retry_completed_at = now
-    mcq.retry_score_percent = percent(correct, len(missed))
-    return {"correct": correct, "total": len(missed), "score_percent": mcq.retry_score_percent,
-            "xp_awarded": RETRY_XP_PER_CORRECT * correct,
-            "correct_answers": [{"question_id": str(q.id), "option_index": q.correct_index} for q in missed]}
 

@@ -565,6 +565,7 @@ async def _serialize_subscription(session: AsyncSession, sub: Subscription) -> S
         plan_id=str(sub.plan_id),
         status=sub.status,
         renews_at=sub.renews_at,
+        discount_percent=sub.discount_percent,
         seats_used=SeatsOut(teachers=teacher_count, students=student_count),
         seats_limit=SeatsOut(
             teachers=plan.teacher_limit if plan else 0, students=plan.student_limit if plan else 0
@@ -608,6 +609,7 @@ async def create_school_subscription(
         plan_id=body.plan_id,
         status=body.status,
         renews_at=body.renews_at or (datetime.now(timezone.utc) + timedelta(days=30)),
+        discount_percent=body.discount_percent,
     )
     session.add(sub)
     await audit_repository.record(
@@ -641,6 +643,8 @@ async def update_school_subscription(
         sub.status = body.status
     if body.renews_at is not None:
         sub.renews_at = body.renews_at
+    if body.discount_percent is not None:
+        sub.discount_percent = body.discount_percent
 
     await audit_repository.record(
         session, actor_id=actor.id, action="subscription.updated", target_type="school", target_id=school_id
