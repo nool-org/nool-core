@@ -69,6 +69,9 @@ class Chapter(IdMixin, Base):
     # KG numbers its chapters CH01, CH02, ...) so re-sync upserts, never
     # duplicates.
     kg_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Science's PHYSICS / CHEMISTRY / BIOLOGY (NULL elsewhere): a teacher
+    # assigned one branch sees only its chapters (TeacherClassAssignment.branch)
+    branch: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (UniqueConstraint("subject_id", "kg_ref", name="uq_chapters_subject_kg_ref"),)
 

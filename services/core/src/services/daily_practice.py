@@ -196,7 +196,7 @@ async def _import_bank(session: AsyncSession, dataset_ids: list[uuid.UUID], topi
         return 0
     query = select(DatasetQuestion).where(
         DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.topic_id == topic.id,
-        text_only_filter(pictures=kind == "mcq"),  # a spoken answer can't show a picture
+        text_only_filter(pictures=True),  # the screen draws the picture above either kind
         ~exists().where(PracticeQuestion.source_question_id == DatasetQuestion.id))
     if kind == "mcq":
         query = query.where(DatasetQuestion.question_type.in_((QuestionType.MCQ, QuestionType.TRUE_FALSE)),

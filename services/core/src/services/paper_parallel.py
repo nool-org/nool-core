@@ -89,7 +89,7 @@ async def _scope_chapter_ids(session: AsyncSession, paper: QuestionPaper) -> lis
 async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken) -> DatasetQuestion | None:
     chapter = getattr(q, "chapter_id", None)
     conds = [DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.bloom_level == q.bloom_level,
-             text_only_filter(), or_(DatasetQuestion.marks == q.marks, DatasetQuestion.marks.is_(None)),
+             text_only_filter(pictures=True), or_(DatasetQuestion.marks == q.marks, DatasetQuestion.marks.is_(None)),
              DatasetQuestion.chapter_id == chapter if chapter else DatasetQuestion.chapter_id.in_(chapter_ids)]
     if (qtype := _enum(QuestionType, getattr(q, "question_type", None))) is not None:
         conds.append(DatasetQuestion.question_type == qtype)

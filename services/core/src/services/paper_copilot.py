@@ -146,7 +146,7 @@ async def bank_candidates(session: AsyncSession, paper: QuestionPaper, user: Use
         return []
     query = select(DatasetQuestion).where(
         DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.chapter_id.in_(list(chapter_ids)),
-        text_only_filter())
+        text_only_filter(pictures=True))  # the paper and its PDF draw them
     if question_type is not None:
         query = query.where(DatasetQuestion.question_type == question_type)
     if blooms:

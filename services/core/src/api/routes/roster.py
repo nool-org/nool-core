@@ -2,15 +2,18 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from shared.errors import ForbiddenError
+from shared.errors import ConflictError, ForbiddenError, NotFoundError
 
 from src.api.deps import get_db_session, require_role
 from src.api.schemas.common import ListEnvelope
 from src.api.schemas.roster import RosterStudentOut, SchoolClassOut
+from src.api.schemas.school_admin import ResetPasswordOut
 from src.domain.models import Role, SchoolClass, StudentProfile, TeacherClassAssignment, User
+from src.repositories import audit_repository
 from src.repositories.lookups import get_class_in_school
 from src.repositories.roster_repository import student_count as _student_count
 from src.repositories.roster_repository import teaches_class as _teaches_class
+from src.services.user_provisioning import reset_password
 
 router = APIRouter(prefix="/api/v1", tags=["roster"])
 
@@ -79,3 +82,32 @@ async def list_class_students(
         for u, sp in result.all()
     ]
     return ListEnvelope(items=items, total=len(items))
+
+
+@router.post("/classes/{class_id}/students/{student_id}/reset-password")
+async def reset_class_student_password(
+    class_id: str,
+    student_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> ResetPasswordOut:
+    """A student of one of the teacher's classes forgot their password: a new
+    one-time password (shown once), same as the School Admin's reset."""
+    await get_class_in_school(session, class_id, user.school_id)
+    if not await _teaches_class(session, user.id, class_id):
+        raise ForbiddenError("That class isn't one of yours.")
+    student = (await session.execute(
+        select(User).join(StudentProfile, StudentProfile.user_id == User.id)
+        .where(User.id == student_id, StudentProfile.class_id == class_id)
+    )).scalar_one_or_none()
+    if student is None:
+        raise NotFoundError("That student isn't in this class.")
+    if student.firebase_uid is None:
+        raise ConflictError("This student has no account to reset.")
+    temp_password = reset_password(firebase_uid=student.firebase_uid, role=Role.STUDENT)
+    student.must_change_password = True
+    await audit_repository.record(
+        session, actor_id=user.id, action="student.password_reset", target_type="user", target_id=student_id
+    )
+    await session.commit()
+    return ResetPasswordOut(temp_password=temp_password)

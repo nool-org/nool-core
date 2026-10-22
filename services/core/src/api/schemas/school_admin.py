@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import model_validator, Field, field_validator
 
@@ -144,6 +145,7 @@ class BulkImportResultOut(CamelModel):
 class ClassAssignmentOut(CamelModel):
     teacher_id: str
     subject_id: str
+    branch: Literal["PHYSICS", "CHEMISTRY", "BIOLOGY"] | None = None  # Science split; None = all chapters
 
 
 class SchoolAdminClassOut(CamelModel):

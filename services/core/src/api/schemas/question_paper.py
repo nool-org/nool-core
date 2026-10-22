@@ -132,6 +132,7 @@ class QuestionPaperQuestionOut(CamelModel):
     answer: str | None = None
     source: QuestionSourceName = "ai"
     dataset_question_id: str | None = None
+    figure_svg: str | None = None  # a picture question's drawing (SVG markup); not in version snapshots
 
 
 class UpdateQuestionPaperQuestionIn(CamelModel):

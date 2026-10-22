@@ -124,6 +124,16 @@ async def list_subjects_for_class(
     return ListEnvelope(items=items, total=len(items))
 
 
+async def teacher_branches(session: AsyncSession, teacher_id, subject_id) -> set[str]:
+    """The Science branches this teacher teaches; empty = no limit (an
+    assignment without a branch, or none). ponytail: across all their
+    classes - a teacher with Physics in 10 A and Chemistry in 10 B sees both."""
+    rows = (await session.execute(select(TeacherClassAssignment.branch).where(
+        TeacherClassAssignment.teacher_id == teacher_id,
+        TeacherClassAssignment.subject_id == subject_id))).scalars().all()
+    return set() if not rows or None in rows else set(rows)
+
+
 @router.get("/subjects/{subject_id}/chapters")
 async def list_chapters(
     subject_id: str,
@@ -144,6 +154,8 @@ async def list_chapters(
     conditions = [Chapter.subject_id == subject_id]
     if grade is not None:
         conditions.append(or_(Chapter.grade == grade, Chapter.grade.is_(None)))
+    if user.role == Role.TEACHER and (branches := await teacher_branches(session, user.id, subject_id)):
+        conditions.append(or_(Chapter.branch.in_(branches), Chapter.branch.is_(None)))
     result = await session.execute(
         select(Chapter).where(*conditions).order_by(Chapter.order_index.nulls_last(), Chapter.name))
     items = [

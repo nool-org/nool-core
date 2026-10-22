@@ -69,6 +69,8 @@ class TeacherClassAssignment(IdMixin, Base):
     teacher_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     class_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("classes.id"))
     subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("subjects.id"))
+    # one branch of Science (Chapter.branch) when 3 teachers share it; NULL = every chapter
+    branch: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class StudentProfile(Base):

@@ -798,7 +798,7 @@ async def list_school_classes(
                 id=str(c.id), grade=c.grade, section=c.section,
                 student_count=await student_count(session, c.id),
                 assignments=[
-                    ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id))
+                    ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id), branch=a.branch)
                     for a in assignments.scalars().all()
                 ],
                 status=c.status,
@@ -862,7 +862,7 @@ async def update_school_class(
         id=str(school_class.id), grade=school_class.grade, section=school_class.section,
         student_count=await student_count(session, school_class.id),
         assignments=[
-            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id))
+            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id), branch=a.branch)
             for a in assignments.scalars().all()
         ],
         status=school_class.status,
@@ -895,7 +895,7 @@ async def update_school_class_status(
         id=str(school_class.id), grade=school_class.grade, section=school_class.section,
         student_count=await student_count(session, school_class.id),
         assignments=[
-            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id))
+            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id), branch=a.branch)
             for a in assignments.scalars().all()
         ],
         status=school_class.status,
@@ -1118,7 +1118,8 @@ async def update_class_assignments(
     await ensure_teachers_of_school(session, [a.teacher_id for a in body.assignments], school_class.school_id)
     for a in body.assignments:
         session.add(
-            TeacherClassAssignment(teacher_id=a.teacher_id, class_id=class_id, subject_id=a.subject_id)
+            TeacherClassAssignment(teacher_id=a.teacher_id, class_id=class_id, subject_id=a.subject_id,
+                                   branch=a.branch)
         )
     await audit_repository.record(
         session, actor_id=user.id, action="class.assignments.updated", target_type="class", target_id=class_id,
@@ -1133,7 +1134,7 @@ async def update_class_assignments(
         id=str(school_class.id), grade=school_class.grade, section=school_class.section,
         student_count=await student_count(session, school_class.id),
         assignments=[
-            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id))
+            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id), branch=a.branch)
             for a in assignments.scalars().all()
         ],
         status=school_class.status,

@@ -1512,7 +1512,7 @@ async def _class_out(session: AsyncSession, school_class: SchoolClass) -> School
         id=str(school_class.id), grade=school_class.grade, section=school_class.section,
         student_count=await student_count(session, school_class.id),
         assignments=[
-            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id))
+            ClassAssignmentOut(teacher_id=str(a.teacher_id), subject_id=str(a.subject_id), branch=a.branch)
             for a in assignments.scalars().all()
         ],
         status=school_class.status,
@@ -1818,7 +1818,7 @@ async def update_class_assignments_as_admin(
     await ensure_teachers_of_school(session, [a.teacher_id for a in body.assignments], school_class.school_id)
     for a in body.assignments:
         session.add(
-            TeacherClassAssignment(teacher_id=a.teacher_id, class_id=class_id, subject_id=a.subject_id)
+            TeacherClassAssignment(teacher_id=a.teacher_id, class_id=class_id, subject_id=a.subject_id, branch=a.branch)
         )
     await audit_repository.record(
         session, actor_id=actor.id, action="class.assignments.updated", target_type="class", target_id=class_id,

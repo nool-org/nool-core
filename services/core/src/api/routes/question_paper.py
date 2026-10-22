@@ -63,6 +63,7 @@ from src.services import kg_client
 from src.services.bloom_defaults import resolve_bloom_targets
 from src.services.paper_actions import create_version, load_questions, question_out
 from src.services.paper_repeats import normalize
+from src.services.question_selector import figure_svgs
 
 router = APIRouter(prefix="/api/v1", tags=["question-papers"])
 
@@ -813,7 +814,9 @@ def _enum_or_none(enum, value):
 
 
 async def _paper_questions_out(session: AsyncSession, paper_id: str) -> ListEnvelope[QuestionPaperQuestionOut]:
-    items = [question_out(q) for q in await load_questions(session, paper_id)]
+    questions = await load_questions(session, paper_id)
+    svgs = await figure_svgs(session, [q.dataset_question_id for q in questions])
+    items = [question_out(q).model_copy(update={"figure_svg": svgs.get(q.dataset_question_id)}) for q in questions]
     return ListEnvelope(items=items, total=len(items))
 
 
