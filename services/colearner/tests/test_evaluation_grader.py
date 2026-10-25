@@ -68,8 +68,8 @@ def test_out_of_range_model_scores_are_clamped():
         _answer(1, "Remembering", 140, True), _answer(2, "Remembering", -5, False)]}
     _, report = _grade(_FakeClient(payload))
     qa = report["qa_transcripts"]
-    assert [a["raw_score_percent"] for a in qa] == [100, 0]
-    assert [a["score_percent"] for a in qa] == [100, 0]
+    assert [a["raw_score_percent"] for a in qa] == [100, 0, 0]  # Q3 not reached
+    assert [a["score_percent"] for a in qa] == [100, 0, 0]
 
 
 def test_report_keeps_the_shape_core_consumes():
@@ -122,3 +122,16 @@ def test_easier_version_is_capped_at_70_before_the_hint_penalty():
     assert [a["raw_score_percent"] for a in qa] == [95, 95, 50]
     prompt = client.calls[0]["messages"][0]["content"]
     assert "at most 70" in prompt and "Tanglish" in prompt
+
+
+def test_questions_not_reached_in_time_score_zero():
+    config = SessionConfig(questions=[{"id": n, "order": n, "bloom_level": "Understanding", "spoken_text": f"Q{n}?"}
+                                      for n in range(1, 6)])
+    session = session_store.create_session(config)
+    payload = {"overall_feedback": "ok", "answers": [_answer(1, "Understanding", 90, True),
+                                                     _answer(2, "Understanding", 80, True)]}
+    report = asyncio.run(grader.grade_transcript(session, "[CO-LEARNER]: hi", client=_FakeClient(payload)))
+    qa = report["qa_transcripts"]
+    assert [a["score_percent"] for a in qa] == [90, 80, 0, 0, 0]
+    assert qa[2]["not_reached"] and qa[4]["question_asked"] == "Q5?"
+    assert report["session_summary"]["overall_mastery_percent"] == 34  # 170 / 5, not 85

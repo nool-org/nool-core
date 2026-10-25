@@ -24,6 +24,8 @@ class FixCard(BaseModel):
     """A Fix Milo card the app shows for this question: Milo's steps (one wrong) and the fixes to pick from."""
     steps: List[RubricText] = Field(..., min_length=3, max_length=7)
     fixes: List[RubricText] = Field(..., min_length=3, max_length=4)
+    # 0-based, server side only (never in Milo's instructions): a wrong tap gets no "why?"
+    wrong_step: Optional[int] = None
 
 
 class LiveQuestion(EasierVersion):

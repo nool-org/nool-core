@@ -132,7 +132,9 @@ def require_feature(feature: Feature):
         if user.school_id is None:
             return user
         plan = await get_active_plan(session, user.school_id)
-        if not is_feature_enabled(feature, plan=plan):
+        # the plan first: a module it doesn't bundle is off without looking at the school
+        if not is_feature_enabled(feature, plan=plan) or not is_feature_enabled(
+                feature, plan=plan, school=await session.get(School, user.school_id)):
             raise ForbiddenError(f'The "{feature.value}" feature is not enabled for your school\'s plan.')
         return user
 

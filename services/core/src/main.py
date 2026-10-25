@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from shared.auth import configure_identity_provider
 from shared.auth.providers.firebase import FirebaseIdentityProvider
@@ -9,6 +9,8 @@ from shared.logging import RequestContextMiddleware, configure_logging, get_logg
 from shared.tracing import configure_tracing
 from shared.observability import configure_observability
 
+from src.api.deps import require_feature
+from src.domain.models import Feature
 from src.api.routes import (
     school_question_bank,
     admin,
@@ -121,13 +123,15 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard.router)
     app.include_router(gamification.router)
     app.include_router(journey.router)
-    app.include_router(mcq_test.router)
+    # modules a plan or a school can switch off - whole route files (src/api/deps.py's require_feature)
+    gate = lambda feature: [Depends(require_feature(feature))]  # noqa: E731
+    app.include_router(mcq_test.router, dependencies=gate(Feature.GROWTH_CHECK))
     app.include_router(daily_practice.router)
-    app.include_router(topic_quizzes.router)
+    app.include_router(topic_quizzes.router, dependencies=gate(Feature.TOPIC_QUIZ))
     app.include_router(student_tasks.router)
-    app.include_router(quiz_tests.router)
+    app.include_router(quiz_tests.router, dependencies=gate(Feature.CLASS_TESTS))
     app.include_router(challenge_report.router)
-    app.include_router(revision_cards.router)
+    app.include_router(revision_cards.router)  # gated per route, after the role check
     app.include_router(realtime.router)
     # Super Admin / School Admin
     app.include_router(admin.router)

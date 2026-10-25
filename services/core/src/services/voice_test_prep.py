@@ -20,6 +20,7 @@ import asyncio
 import logging
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
@@ -56,6 +57,26 @@ logger = logging.getLogger(__name__)
 # within the preferred topic - trying all three widens the pool to the chapter.
 _DIFFICULTIES = (PaperDifficultyLevel.MEDIUM, PaperDifficultyLevel.EASY, PaperDifficultyLevel.HARD)
 
+TEST_QUESTIONS = 5  # every test asks exactly this many - a Fix Milo card counts as one
+MAX_CARDS = 1  # a card takes ~2 of the 8 minutes
+CARD_AT = 2  # 0-based: the card is the third question - never the warm-up, never the closing one
+WARM_UP = (BloomLevel.REMEMBER, BloomLevel.UNDERSTAND)
+
+
+def plan_levels(chosen: list[BloomLevel]) -> list[BloomLevel]:
+    """TEST_QUESTIONS spoken levels, easy to hard: the teacher's levels with a
+    warm-up first when they don't start with one, the easier ones repeated to
+    fill up, or trimmed keeping the first and the hardest."""
+    order = list(BloomLevel)
+    levels = sorted(set(chosen), key=order.index) or [BloomLevel.UNDERSTAND]
+    if levels[0] not in WARM_UP:
+        levels.insert(0, BloomLevel.UNDERSTAND)
+    distinct = list(levels)
+    while len(levels) < TEST_QUESTIONS:
+        levels.append(distinct[(len(levels) - len(distinct)) % len(distinct)])
+    levels = sorted(levels, key=order.index)
+    return levels[:TEST_QUESTIONS - 1] + levels[-1:] if len(levels) > TEST_QUESTIONS else levels
+
 
 async def prepare_in_background(test_id: uuid.UUID, teacher_id: uuid.UUID) -> None:
     """BackgroundTasks entrypoint - its own session, create_test's is closed by now."""
@@ -86,8 +107,8 @@ async def prepare_test(session: AsyncSession, test: VoiceTest, teacher: User) ->
 
 async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> bool:
     """True when the test has its questions. Fix Milo cards are written alongside, from the start."""
-    cards = (asyncio.create_task(_cards(test.id, test.chapter_id, test.class_id, test.fix_cards))
-             if test.fix_cards else None)
+    wanted = min(test.fix_cards or 0, MAX_CARDS)
+    cards = asyncio.create_task(_cards(test.id, test.chapter_id, test.class_id, wanted)) if wanted else None
     try:
         return await _prepare_questions(session, test, teacher, cards)
     finally:
@@ -108,9 +129,11 @@ async def _prepare_questions(session: AsyncSession, test: VoiceTest, teacher: Us
         return True  # already prepared (a retry) - the class must keep the same questions
 
     order = list(BloomLevel)
-    levels = sorted((await session.execute(
+    # TEST_QUESTIONS spoken ones even with a card coming: the one at CARD_AT is the spare that
+    # keeps the test at TEST_QUESTIONS if the card can't be made
+    levels = plan_levels((await session.execute(
         select(VoiceTestBloomLevel.bloom_level).where(VoiceTestBloomLevel.test_id == test.id)
-    )).scalars().all(), key=order.index)
+    )).scalars().all())
     dataset_ids = await _dataset_ids(session, teacher, test, ctx["grade"])
     unusable = await _unusable_uids(session, test, dataset_ids)
 
@@ -155,7 +178,7 @@ async def _prepare_questions(session: AsyncSession, test: VoiceTest, teacher: Us
         logger.warning("voice_test_prep_dropped_unreworded", extra={
             "test_id": str(test.id), "dataset_question_ids": [_key(q) for q, p in zip(picked, prepped)
                                                               if not _reworded(q, p)]})
-    if missing := [level for level in levels if level not in {q.bloom_level for q, _ in kept}]:
+    if missing := list((Counter(levels) - Counter(q.bloom_level for q, _ in kept)).elements()):
         written = await _write_for_levels(session, test, missing, examples=[q for q, _ in kept])
         if written:  # already written to be spoken - _prep only adds the rubric
             kept += zip(written, await _prep(test, ctx, written))
@@ -165,14 +188,13 @@ async def _prepare_questions(session: AsyncSession, test: VoiceTest, teacher: Us
 
     kept.sort(key=lambda qp: order.index(qp[0].bloom_level))
     rows = [_fields(question, p) for question, p in kept]
-    cards = await cards_task if cards_task else []
-    # a card after each spoken question but the last - never the closing one
-    mixed = []
-    for i, row in enumerate(rows):
-        mixed.append(row)
-        if cards and i < len(rows) - 1:
-            mixed.append(cards.pop(0))
-    for number, fields in enumerate(mixed + cards, start=1):
+    cards = (await cards_task if cards_task else [])[:MAX_CARDS]
+    if cards:  # the card takes the spare's place - in a short test it still sits before the closing question
+        at = min(CARD_AT, len(rows) - 1)
+        rows[at:at + (len(rows) >= TEST_QUESTIONS)] = cards
+    if len(rows) < TEST_QUESTIONS:
+        logger.warning("voice_test_prep_short_test", extra={"test_id": str(test.id), "questions": len(rows)})
+    for number, fields in enumerate(rows, start=1):
         session.add(VoiceTestQuestion(voice_test_id=test.id, order=number, **fields))
     await session.commit()
     return True
@@ -552,12 +574,20 @@ async def _reused(session: AsyncSession, question_ids: list) -> dict:
         .order_by(VoiceTestQuestion.created_at.desc()))).scalars().all()
     found = {}
     for r in rows:
-        if r.dataset_question_id not in found and r.expected_points and r.spoken_text != r.original_text:
+        if (r.dataset_question_id not in found and r.expected_points and r.spoken_text != r.original_text
+                and _speakable_now(r.spoken_text, r.hints)):
             found[r.dataset_question_id] = {
                 "reworded_text": r.reworded_text, "spoken_text": r.spoken_text, "concepts": r.concepts,
                 "expected_points": r.expected_points, "misconceptions": r.misconceptions, "hints": r.hints,
                 "easier": r.easier_version}
     return found
+
+
+def _speakable_now(spoken: str, hints: list | None) -> bool:
+    """An older wording still meets generation's rules (voice_prep._problems): one question,
+    short enough, hints that only ask - else it is reworded afresh."""
+    return ((spoken or "").count("?") <= 1 and len((spoken or "").split()) <= 30
+            and all(h.strip().endswith("?") for h in hints or []))
 
 
 def _reworded(question: DatasetQuestion, prepped: dict | None) -> bool:

@@ -471,6 +471,11 @@ async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, m
     assert list(a.per_bloom) == ["REMEMBER", "UNDERSTAND", "APPLY", "ANALYZE", "EVALUATE"]  # Bloom order
     assert any(m["question"].startswith("(fix steps)") for m in calls[0]["missed"])
 
+    # the re-check opens at once: its special slot takes a written one or an MCQ, never a new model call
+    await _homework_done(db_session, s, quiz.id)
+    recheck = await _start(db_session, s, s.ohm, attempt=2)
+    assert recheck.items and len(asked) == 1
+
 
 async def test_heal_builds_a_shown_checkpoint_whose_prebuild_never_happened(db_session, monkeypatch):
     import contextlib

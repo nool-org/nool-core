@@ -1,18 +1,19 @@
-from src.domain.models import Feature, Plan
+from src.domain.models import Feature, Plan, School
 
 
-def effective_enabled_features(*, plan: Plan | None) -> list[Feature] | None:
-    """None = every feature enabled - the default until a Super Admin
-    narrows a plan's `enabled_features`. This is the single source of
-    truth for feature access (configured on the plan/subscription, flows
-    to every school on it) - see Plan.enabled_features' docstring and
-    requirements.md §7.14.
+def effective_enabled_features(*, plan: Plan | None, school: School | None = None) -> list[Feature] | None:
+    """None = every feature enabled. The plan bundles modules (Plan.enabled_features,
+    None = all); a Super Admin can switch some off per school (School.disabled_features).
+    A school gets a module only when both allow it - see requirements.md §7.14.
     """
-    if plan is None or plan.enabled_features is None:
+    off = set(school.disabled_features or []) if school is not None else set()
+    if (plan is None or plan.enabled_features is None) and not off:
         return None
-    return [Feature(value) for value in plan.enabled_features]
+    bundled = list(Feature) if plan is None or plan.enabled_features is None else [
+        Feature(value) for value in plan.enabled_features]
+    return [f for f in bundled if f.value not in off]
 
 
-def is_feature_enabled(feature: Feature, *, plan: Plan | None) -> bool:
-    effective = effective_enabled_features(plan=plan)
+def is_feature_enabled(feature: Feature, *, plan: Plan | None, school: School | None = None) -> bool:
+    effective = effective_enabled_features(plan=plan, school=school)
     return effective is None or feature in effective

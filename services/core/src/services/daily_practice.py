@@ -364,12 +364,15 @@ def same_question(text: str) -> str:
 
 
 async def _fill(session: AsyncSession, student: User, school_class: SchoolClass, slots: list[Slot],
-                today: date, seed: str, exact_level: bool = False) -> list[tuple[Slot, PracticeQuestion]]:
+                today: date, seed: str, exact_level: bool = False,
+                write_special: bool = True) -> list[tuple[Slot, PracticeQuestion]]:
     """A question per slot: pool, then bank import, then generation. A voice
     slot with no speakable question on its topic becomes an MCQ; a slot
     nothing can fill is dropped. `exact_level` (topic quizzes, which score
     per Bloom level): pool and bank only at the slot's own level, generation
-    for the rest, and only then a question of another level."""
+    for the rest, and only then a question of another level. Without
+    `write_special` a who_is_right/... slot takes one already written or an
+    MCQ - never a 40 s model call while the student waits."""
     exclude = await _seen(session, student.id, today)
     dataset_ids = [d.id for d in await visible_datasets(session, student) if d.type == DatasetType.QA]
     picked: dict[int, PracticeQuestion] = {}
@@ -392,7 +395,8 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
     topics = list(dict.fromkeys(slot.topic for slot in slots))
     for i, slot in enumerate(slots):
         # a who_is_right/make_your_own/fix_steps slot waits for generation before it settles for an MCQ
-        for kind in [slot.kind] if slot.kind in question_types.KINDS else dict.fromkeys([slot.kind, "mcq"]):
+        for kind in ([slot.kind] if slot.kind in question_types.KINDS and write_special
+                     else dict.fromkeys([slot.kind, "mcq"])):
             exact = exact_level and kind == "mcq"  # spoken questions are few: any level, scored at its own
             q = await pool(slot.topic, kind, slot.bloom_level, exact)
             if q is None and kind in ("mcq", "voice") and await _import_bank(session, dataset_ids, slot.topic, kind):
@@ -410,7 +414,8 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
                 picked[i] = q
                 exclude.add(q.id)
                 break
-    special = [i for i in range(len(slots)) if i not in picked and slots[i].kind in question_types.KINDS]
+    special = [i for i in range(len(slots))
+               if write_special and i not in picked and slots[i].kind in question_types.KINDS]
     for i, q in (await _generate_special(session, school_class, slots, special)).items():
         picked[i] = q
         exclude.add(q.id)

@@ -37,6 +37,10 @@ class Feature(str, Enum):
     # Plus and Pro: the student's daily MCQ practice, and the recorded (spoken) answers inside it
     DAILY_PRACTICE = "daily_practice"
     SPOKEN_ANSWERS = "spoken_answers"
+    TOPIC_QUIZ = "topic_quiz"  # topic checkpoints -> homework -> re-check
+    GROWTH_CHECK = "growth_check"  # the follow-up MCQ test (mcq_test.py)
+    CLASS_TESTS = "class_tests"  # teacher-made written tests and Fix Milo challenges (quiz_tests.py)
+    REVISION_CARDS = "revision_cards"
 
 
 class UserStatus(str, Enum):
@@ -126,6 +130,10 @@ class School(IdMixin, TimestampMixin, Base):
     # PUT /school/logo; Super Admin can set/override any school's via
     # PUT /admin/schools/{id}/logo. Displayed across every app.
     logo_data_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Modules a Super Admin switched off for this school (Feature values), on top of what its
+    # plan bundles - a school gets a module only when both allow it. NULL/[] = nothing switched off,
+    # so a new module is on everywhere until switched off. Set via PUT /admin/schools/{id}/features.
+    disabled_features: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
 
 class Subscription(IdMixin, Base):

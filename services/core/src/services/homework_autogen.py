@@ -178,7 +178,7 @@ _background: set = set()
 
 
 def schedule_auto_homework(*, test_id: uuid.UUID, student_id: uuid.UUID, mastery_percent: int,
-                           bloom_levels: list[BloomLevel]) -> None:
+                           bloom_levels: list[BloomLevel], token: str | None = None) -> None:
     """Build the student's follow-up homework in the background, in its own
     session, after their results are committed - so it can neither delay the
     completion acknowledgement nor roll the results back when it fails."""
@@ -199,6 +199,8 @@ def schedule_auto_homework(*, test_id: uuid.UUID, student_id: uuid.UUID, mastery
                 if hw is not None:
                     await push.notify(session, [student_id], f"Homework ready: {hw.gap_topic}",
                                       "Your homework is waiting.", {"type": "homework", "homeworkId": str(hw.id)})
+                    from src.api.routes.student_homework import warm_insight  # lazy: it imports this module
+                    await warm_insight(hw.id, student_id, token)
         except Exception:  # logged, never raised: the test result already stands
             logging.getLogger(__name__).exception(
                 "auto_homework_failed", extra={"test_id": str(test_id), "student_id": str(student_id)})

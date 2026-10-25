@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import NotFoundError
-from src.api.deps import get_db_session, require_role
+from src.api.deps import get_db_session, require_feature, require_role
 from src.api.routes.curriculum import _ensure_subject_open_to
 from src.api.schemas.revision_cards import (
     ChapterRevisionCardsOut,
@@ -19,6 +19,7 @@ from src.api.schemas.revision_cards import (
     TopicRevisionCardsOut,
 )
 from src.domain.models import (
+    Feature,
     Chapter,
     RevisionDeck,
     Role,
@@ -76,6 +77,7 @@ async def get_topic_revision_cards(
     topic_id: str,
     background_tasks: BackgroundTasks,
     user: User = Depends(require_role(Role.STUDENT, Role.TEACHER, Role.SCHOOL_ADMIN)),
+    _feature: User = Depends(require_feature(Feature.REVISION_CARDS)),
     session: AsyncSession = Depends(get_db_session),
 ) -> TopicRevisionCardsOut:
     """The topic's cards when ready; otherwise starts the (one) generation and
@@ -94,6 +96,7 @@ async def get_topic_revision_cards(
 async def get_chapter_revision_cards(
     chapter_id: str,
     user: User = Depends(require_role(Role.STUDENT, Role.TEACHER, Role.SCHOOL_ADMIN)),
+    _feature: User = Depends(require_feature(Feature.REVISION_CARDS)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChapterRevisionCardsOut:
     """The chapter's topics with their deck status - generates nothing."""
@@ -113,6 +116,7 @@ async def regenerate_topic_revision_cards(
     topic_id: str,
     background_tasks: BackgroundTasks,
     user: User = Depends(require_role(Role.TEACHER, Role.SCHOOL_ADMIN, Role.SUPER_ADMIN)),
+    _feature: User = Depends(require_feature(Feature.REVISION_CARDS)),
     session: AsyncSession = Depends(get_db_session),
 ) -> TopicRevisionCardsOut:
     """The only way to replace a deck: a teacher of the subject or an admin.

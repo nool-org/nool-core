@@ -241,7 +241,7 @@ async def start(session: AsyncSession, student: User, test_id: str, attempt: int
         raise NotFoundError("Test not found.")
     if attempt == 2 and await _attempt(session, student, test, 2) is None:
         if not await second_look_open(session, await _attempt(session, student, test, 1)):
-            raise ConflictError("Finish your homework first - then the second look opens.")
+            raise ConflictError("Finish your homework first - then the re-check opens.")
     created = (await session.execute(pg_insert(DailyPracticeSession).values(
         id=uuid.uuid4(), student_id=student.id, practice_date=daily_practice.today_ist(),
         chapter_id=test.chapter_id, quiz_test_id=test.id, attempt=attempt, status="open", xp_awarded=0,

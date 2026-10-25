@@ -87,6 +87,13 @@ MAX_CALL_SECONDS = 8 * 60  # config's session_max_time_seconds is unbounded
 # plus this long from connect (plus pauses), however long the handshake drags.
 READY_ALLOWANCE_SECONDS = 3 * 60
 MAX_HINTS = 2  # per question
+# No new question with less than this left on the clock: Milo closes the current one
+# instead, so the test never stops halfway through a question.
+WRAP_UP_SECONDS = 60
+# At time-up a student still talking gets this long to finish their answer first.
+FINISH_ANSWER_SECONDS = 15
+TIME_UP_INSTRUCTIONS = ("Time is up. In one short, warm sentence say that's our time and thank the student "
+                        "for their effort - don't ask anything - then call end_session.")
 # Student silent this long after Milo finished speaking a question -> one gentle check-in.
 SILENCE_SECONDS = 12
 # The app pauses the test on an interruption (phone call, app in the background) with
@@ -143,7 +150,9 @@ _REALTIME_ADDENDUM = """
 
 LIVE VOICE SESSION RULES (this is a real-time spoken call):
 - Speak first: open with a short, warm greeting that names the chapter and ends with "Are you ready to begin?".
-- Keep every turn to 1-2 short spoken sentences (under 25 words in total), then stop and let the student talk.
+- Keep every turn to 1-2 short spoken sentences (under 20 words in total), then stop and let the student talk.
+- Greet once. Whatever the student says to "Are you ready?", give at most one reassuring sentence and ask the first question.
+- Never announce what you are doing ("let me think", "let me find a nudge") - just say it.
 - Never explain, recap or lecture, and never repeat what the student said back to them - one quick acknowledgement at most.
 - "Are you ready to begin?" is asked ONCE, at the start. Never ask whether they are ready for the next question and never ask for any other confirmation between questions - after a short neutral acknowledgement, go straight on.
 - Never say question numbers aloud (no "question two", "next is question 3"); "last one" is fine.
@@ -153,7 +162,7 @@ LIVE VOICE SESSION RULES (this is a real-time spoken call):
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
 - If the student explicitly asks for a hint or a tip, give ONE short guiding nudge on the current question (never the answer, never whether they were right), and stay on that question.
 - Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.
-- If you receive "[TIME_UP]", call end_session.
+- If you receive "[TIME_UP]", say one short warm closing sentence, then call end_session.
 - If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
 - If you receive "[PAUSED]", say nothing.
 - If you receive "[RESUMED]", say one short welcome back line and repeat the current question exactly.
@@ -180,6 +189,12 @@ class RealtimeCall:
     forced_end_sent: bool = False
     # [TIME_UP] was sent - ending now is allowed even with questions left
     time_up: bool = False
+    # <WRAP_UP_SECONDS left when Milo reached for the next question: he closes instead
+    wrapping_up: bool = False
+    # Instructions for Milo's next reply in place of the one the app asked for (a wrong card
+    # tap: no "why?"): set -> that reply is cancelled at response.created -> ready -> sent at response.done
+    redirect: str | None = None
+    redirect_ready: str | None = None
     # Spoken co-learner replies so far (response.done with a message), capped at MAX_REPLIES.
     replies: int = 0
     # Billed usage as OpenAI reports it (response.done / transcription events).
@@ -236,7 +251,8 @@ def build_question_instructions(config: SessionConfig) -> str:
 - An ON SCREEN question shows Milo's worked homework (an equation or a calculation with one wrong step) on the
   student's screen. Say its text, then wait quietly while they tap - never read the steps aloud and never say
   which step is wrong. When you receive "[CARD_ANSWERED ...]", ask ONE short question: why was that step wrong?
-  Listen, give a short neutral acknowledgement, and go on. Never say whether their pick was right."""
+  Listen, give a short neutral acknowledgement, and go on. Never say whether their pick was right.
+  If you are told to go on without asking why, do just that."""
     student = ""
     if config.student_name:
         student = (f"\nTHE STUDENT: their first name is \"{config.student_name}\". Use it in the greeting, "
@@ -257,7 +273,8 @@ THE QUESTIONS - ask exactly these {len(config.questions)}, in this order. Never 
 {questions}
 
 HOW THE SESSION GOES (this is a real-time spoken call):
-- Speak first: a short, warm greeting that names the chapter, then ask "Are you ready?" and wait for the student. This is the ONLY confirmation in the whole test.
+- Speak first: ONE short, warm greeting that names the chapter, then ask "Are you ready?" and wait for the student. This is the ONLY confirmation in the whole test. Never greet a second time.
+- Whatever the student says to "Are you ready?" - yes, no, "I'm scared", "I don't know anything" - go to question 1 now: at most ONE short reassuring sentence (like "That's okay, we'll go slowly together."), then call ask_question with 1. Never ask them to repeat an answer before you have asked a question.
 - Before each question, call ask_question with its number, without speaking. Then say the text it returns. You may add ONE short friendly sentence of context before it, but keep the question's meaning.
 - Pick the difficulty per question: if the student struggled on the previous question (needed nudges, said they don't know, gave a very short or nervous answer, or was silent a long time), call ask_question with easier=true; if they answered confidently, ask the standard one (easier=false). Ask the first question standard unless the student sounded nervous during the greeting.
 - Never say question numbers aloud (no "question two", "next is question 3"); "last one" is fine.
@@ -269,12 +286,13 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 - Otherwise give one short neutral acknowledgement (like "Okay, got it.") and go straight to the next question. Never ask whether they are ready for the next question and never ask for any other confirmation between questions.
 - If the student is stuck, says "I don't know" or asks for a hint: call give_hint with the question number, without speaking, then say the guiding nudge it returns - a guiding question, never the answer. The first nudge points to the concept, the second is a smaller sub-question. At most 2 nudges per question; if it says no nudges are left, say something like "That's okay, we'll work on this in your homework" and go to the next question.
 - If the student asks for the answer or asks you to explain: kindly say "I can't give answers during the test, but give it your best guess," and stay on the question. Never explain or teach the answer during the test - that comes later in their homework.
-- Keep every other turn to 1-2 short sentences (under 25 words).
+- Keep every other turn to ONE short sentence, under 20 words. No speeches: never reassure, explain, recap or lecture for more than one sentence.
+- Never announce what you are doing ("let me think", "let me find a helpful nudge", "here's a hint", "let me set the stage") - call the tool silently and just say what it returns.
 - If the student interrupts you, stop and listen - respond to what they said.
 - If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
 - Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.{cards}
 - If you receive "[SILENCE]", the student has been quiet for a while: warmly say "Take your time. Want a small hint?" (one sentence) and wait.
-- If you receive "[TIME_UP]", call end_session.
+- If you receive "[TIME_UP]", say one short warm closing sentence, then call end_session.
 - If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
 - If you receive "[PAUSED]", say nothing.
 - If you receive "[RESUMED]", say one short welcome back line and repeat the current question exactly.
@@ -379,11 +397,18 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
                 logger.info("realtime_call_time_limit call_id=%s", call.call_id)
                 call.time_up = True
                 _cancel_silence(call)
+                if call.student_speaking:  # never cut an answer off mid-sentence
+                    try:
+                        await asyncio.wait_for(_record(call, ws, until=lambda: not call.student_speaking),
+                                               timeout=FINISH_ANSWER_SECONDS)
+                    except asyncio.TimeoutError:
+                        pass
                 await ws.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "[TIME_UP]"}]},
                 }))
-                await _send_response(call, ws, json.dumps({"type": "response.create"}))
+                await _send_response(call, ws, json.dumps({
+                    "type": "response.create", "response": {"instructions": TIME_UP_INSTRUCTIONS}}))
                 try:
                     await asyncio.wait_for(_record(call, ws), timeout=_GRACE_SECONDS)
                 except asyncio.TimeoutError:
@@ -404,123 +429,143 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
         )
 
 
-async def _record(call: RealtimeCall, ws) -> None:
+async def _record(call: RealtimeCall, ws, until=None) -> None:
+    """Handles the call's events; returns when the call ends, or once `until()` holds."""
     async for raw in ws:
-        event = json.loads(raw)
-        kind = event.get("type", "")
-        if kind in ("conversation.item.added", "conversation.item.created"):
-            item = event.get("item") or {}
-            if item.get("type") == "message" and item.get("role") in ("user", "assistant"):
-                is_new = item["id"] not in call.items
-                call.items.setdefault(item["id"], {"role": item["role"], "text": ""})
-                # only speech counts - a "Get a tip" request or [TIME_UP] is text
-                spoken = any(c.get("type") == "input_audio" for c in item.get("content") or [])
-                if is_new and item["role"] == "user" and spoken:
-                    call.spoken_turns += 1
-                    if not call.state.config.questions:  # improvised questions: "yes, ready" starts the clock
-                        _start_clock(call)
-                elif is_new and item["role"] == "user":
-                    _pause_marker(call, item)
-                    _card_answer(call, item)
-                if is_new and call.current:
-                    call.item_question[item["id"]] = call.current
-                    if item["role"] == "user" and spoken:
-                        _tag_user_turn(call, item["id"])
-        elif kind in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
-            call.student_speaking = kind.endswith("started")
-            _cancel_silence(call)
-        elif kind == "output_audio_buffer.started":
-            _cancel_silence(call)  # Milo is speaking
-        elif kind == "response.created":
-            call.response_active = True
-            call.response_since = asyncio.get_running_loop().time()
-            _cancel_silence(call)
-            if call.paused_at is not None and not call.time_up:
-                # the app asks for no reply while paused - but nothing may talk to an empty room
-                await ws.send(json.dumps({"type": "response.cancel"}))
-                continue
-            # with prepared questions the final answer is detected at response.done (_questions_done)
-            final_answer_in = (not call.state.config.questions
-                               and call.spoken_turns >= call.state.config.num_questions + 1)
-            # reply cap: the student answers Milo's last reply, then the wrap-up is forced the same way
-            capped = call.replies >= reply_cap(call.state.config.num_questions)
-            if (final_answer_in or capped) and not call.forcing_end and not call.state.is_completed:
-                call.forcing_end = True
-                if capped and not final_answer_in:
-                    logger.info("realtime_call_reply_cap call_id=%s replies=%d", call.call_id, call.replies)
-                # only the reply just starting - never output_audio_buffer.clear, which would
-                # cut off the previous reply still playing
-                await ws.send(json.dumps({"type": "response.cancel"}))
-        elif kind == "conversation.item.input_audio_transcription.completed":
-            entry = call.items.setdefault(event["item_id"], {"role": "user", "text": ""})
-            entry["text"] = (event.get("transcript") or "").strip()
-            if not entry["text"] and call.item_kind.get(event["item_id"]) == "answer":
-                _not_an_answer(call, event["item_id"])
-            elif call.item_kind.get(event["item_id"]) in ("answer", "follow_up") and _repeat_request(entry["text"]):
-                _not_an_answer(call, event["item_id"], "repeat_request")
-            add_transcription_usage(call.usage, event.get("usage"))
-        elif kind == "response.output_audio_transcript.done":
-            entry = call.items.setdefault(event["item_id"], {"role": "assistant", "text": ""})
-            entry["text"] = (event.get("transcript") or "").strip()
-        elif kind == "response.done":
-            call.response_active = False
-            if call.pending_response is not None:  # the reply asked for while this one was going
+        await _handle_event(call, ws, json.loads(raw))
+        if until is not None and until():
+            return
+
+
+async def _handle_event(call: RealtimeCall, ws, event: dict) -> None:
+    kind = event.get("type", "")
+    if kind in ("conversation.item.added", "conversation.item.created"):
+        item = event.get("item") or {}
+        if item.get("type") == "message" and item.get("role") in ("user", "assistant"):
+            is_new = item["id"] not in call.items
+            call.items.setdefault(item["id"], {"role": item["role"], "text": ""})
+            # only speech counts - a "Get a tip" request or [TIME_UP] is text
+            spoken = any(c.get("type") == "input_audio" for c in item.get("content") or [])
+            if is_new and item["role"] == "user" and spoken:
+                call.spoken_turns += 1
+                if not call.state.config.questions:  # improvised questions: "yes, ready" starts the clock
+                    _start_clock(call)
+            elif is_new and item["role"] == "user":
+                _pause_marker(call, item)
+                _card_answer(call, item)
+            if is_new and call.current:
+                call.item_question[item["id"]] = call.current
+                if item["role"] == "user" and spoken:
+                    _tag_user_turn(call, item["id"])
+    elif kind in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
+        call.student_speaking = kind.endswith("started")
+        _cancel_silence(call)
+    elif kind == "output_audio_buffer.started":
+        _cancel_silence(call)  # Milo is speaking
+    elif kind == "response.created":
+        call.response_active = True
+        call.response_since = asyncio.get_running_loop().time()
+        _cancel_silence(call)
+        if call.paused_at is not None and not call.time_up:
+            # the app asks for no reply while paused - but nothing may talk to an empty room
+            await ws.send(json.dumps({"type": "response.cancel"}))
+            return
+        if call.redirect is not None:
+            call.redirect_ready, call.redirect = call.redirect, None
+            await ws.send(json.dumps({"type": "response.cancel"}))
+            return
+        # with prepared questions the final answer is detected at response.done (_questions_done)
+        final_answer_in = (not call.state.config.questions
+                           and call.spoken_turns >= call.state.config.num_questions + 1)
+        # reply cap: the student answers Milo's last reply, then the wrap-up is forced the same way
+        capped = call.replies >= reply_cap(call.state.config.num_questions)
+        if (final_answer_in or capped) and not call.forcing_end and not call.state.is_completed:
+            call.forcing_end = True
+            if capped and not final_answer_in:
+                logger.info("realtime_call_reply_cap call_id=%s replies=%d", call.call_id, call.replies)
+            # only the reply just starting - never output_audio_buffer.clear, which would
+            # cut off the previous reply still playing
+            await ws.send(json.dumps({"type": "response.cancel"}))
+    elif kind == "conversation.item.input_audio_transcription.completed":
+        entry = call.items.setdefault(event["item_id"], {"role": "user", "text": ""})
+        entry["text"] = (event.get("transcript") or "").strip()
+        if not entry["text"] and call.item_kind.get(event["item_id"]) == "answer":
+            _not_an_answer(call, event["item_id"])
+        elif call.item_kind.get(event["item_id"]) in ("answer", "follow_up") and _repeat_request(entry["text"]):
+            _not_an_answer(call, event["item_id"], "repeat_request")
+        add_transcription_usage(call.usage, event.get("usage"))
+    elif kind == "response.output_audio_transcript.done":
+        entry = call.items.setdefault(event["item_id"], {"role": "assistant", "text": ""})
+        entry["text"] = (event.get("transcript") or "").strip()
+    elif kind == "response.done":
+        call.response_active = False
+        if call.redirect_ready is not None:  # the cancelled reply is done - Milo says this instead
+            instructions, call.redirect_ready = call.redirect_ready, None
+            await _send_response(call, ws, json.dumps({"type": "response.create", "response": {
+                "instructions": build_question_instructions(call.state.config) + "\n\nRIGHT NOW: " + instructions,
+                "max_output_tokens": reply_tokens(call.state.config)}}))
+        elif call.pending_response is not None:  # the reply asked for while this one was going
+            waiting, call.pending_response = call.pending_response, None
+            await _send_response(call, ws, waiting)
+        add_realtime_usage(call.usage, (event.get("response") or {}).get("usage"))
+        outputs = (event.get("response") or {}).get("output") or []
+        if any(o.get("type") == "message" for o in outputs):
+            call.replies += 1
+        end = next((o for o in outputs if o.get("type") == "function_call" and o.get("name") == "end_session"), None)
+        if call.state.config.questions and not end and not call.state.is_completed:
+            await _questions_done(call, ws, outputs)
+        if end and not call.state.is_completed and not _may_end(call):
+            # the student asked to stop early - the test can't be ended midway
+            logger.info("realtime_end_refused call_id=%s current=%s", call.call_id, call.current)
+            await ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "function_call_output", "call_id": end.get("call_id"),
+                         "output": json.dumps({"error": "The test can't end before every question is answered."})},
+            }))
+            await _send_response(call, ws, json.dumps({
+                "type": "response.create",
+                "response": {"instructions": END_REFUSED_INSTRUCTIONS, "tool_choice": "none",
+                             "max_output_tokens": reply_tokens(call.state.config)},
+            }))
+        elif end and not call.state.is_completed:
+            call.state.is_completed = True
+            # No spoken goodbye: the app hangs up the moment end_session arrives and the
+            # student goes straight to their insights - a goodbye would be paid-for audio
+            # nobody hears. This is only the backstop if the app never finishes the call.
+            if call.deadline:
+                call.deadline.reschedule(asyncio.get_running_loop().time() + _GRACE_SECONDS)
+            await ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "function_call_output", "call_id": end.get("call_id"), "output": "{\"ok\": true}"},
+            }))
+        elif call.forcing_end and not call.forced_end_sent and not call.state.is_completed:
+            # the model's reply to the final answer was cancelled above -
+            # now make it end the session (which then triggers the goodbye)
+            call.forced_end_sent = True
+            await _send_response(call, ws, json.dumps({
+                "type": "response.create",
+                "response": {
+                    "instructions": "The student has answered the final question. Call end_session now, without speaking.",
+                    "tool_choice": {"type": "function", "name": "end_session"},
+                },
+            }))
+    elif kind == "output_audio_buffer.stopped":
+        if call.state.config.questions:
+            _arm_silence(call, ws)
+    elif kind == "error":
+        logger.warning("realtime_event_error call_id=%s error=%s", call.call_id, event.get("error"))
+        if (event.get("error") or {}).get("code") != "conversation_already_has_active_response":
+            call.response_active = False  # whatever was asked for isn't coming - don't hold the next one
+            if call.pending_response is not None:
                 waiting, call.pending_response = call.pending_response, None
                 await _send_response(call, ws, waiting)
-            add_realtime_usage(call.usage, (event.get("response") or {}).get("usage"))
-            outputs = (event.get("response") or {}).get("output") or []
-            if any(o.get("type") == "message" for o in outputs):
-                call.replies += 1
-            end = next((o for o in outputs if o.get("type") == "function_call" and o.get("name") == "end_session"), None)
-            if call.state.config.questions and not end and not call.state.is_completed:
-                await _questions_done(call, ws, outputs)
-            if end and not call.state.is_completed and not _may_end(call):
-                # the student asked to stop early - the test can't be ended midway
-                logger.info("realtime_end_refused call_id=%s current=%s", call.call_id, call.current)
-                await ws.send(json.dumps({
-                    "type": "conversation.item.create",
-                    "item": {"type": "function_call_output", "call_id": end.get("call_id"),
-                             "output": json.dumps({"error": "The test can't end before every question is answered."})},
-                }))
-                await _send_response(call, ws, json.dumps({
-                    "type": "response.create",
-                    "response": {"instructions": END_REFUSED_INSTRUCTIONS, "tool_choice": "none",
-                                 "max_output_tokens": reply_tokens(call.state.config)},
-                }))
-            elif end and not call.state.is_completed:
-                call.state.is_completed = True
-                # No spoken goodbye: the app hangs up the moment end_session arrives and the
-                # student goes straight to their insights - a goodbye would be paid-for audio
-                # nobody hears. This is only the backstop if the app never finishes the call.
-                if call.deadline:
-                    call.deadline.reschedule(asyncio.get_running_loop().time() + _GRACE_SECONDS)
-                await ws.send(json.dumps({
-                    "type": "conversation.item.create",
-                    "item": {"type": "function_call_output", "call_id": end.get("call_id"), "output": "{\"ok\": true}"},
-                }))
-            elif call.forcing_end and not call.forced_end_sent and not call.state.is_completed:
-                # the model's reply to the final answer was cancelled above -
-                # now make it end the session (which then triggers the goodbye)
-                call.forced_end_sent = True
-                await _send_response(call, ws, json.dumps({
-                    "type": "response.create",
-                    "response": {
-                        "instructions": "The student has answered the final question. Call end_session now, without speaking.",
-                        "tool_choice": {"type": "function", "name": "end_session"},
-                    },
-                }))
-        elif kind == "output_audio_buffer.stopped":
-            if call.state.config.questions:
-                _arm_silence(call, ws)
-        elif kind == "error":
-            logger.warning("realtime_event_error call_id=%s error=%s", call.call_id, event.get("error"))
-            if (event.get("error") or {}).get("code") != "conversation_already_has_active_response":
-                call.response_active = False  # whatever was asked for isn't coming - don't hold the next one
-                if call.pending_response is not None:
-                    waiting, call.pending_response = call.pending_response, None
-                    await _send_response(call, ws, waiting)
 
 
+WRONG_TAP_INSTRUCTIONS = (
+    "The student has tapped their pick on the screen. Don't ask why. Say one short neutral acknowledgement "
+    "(like \"Okay, noted.\") - never say whether they were right - then call ask_question for the next question "
+    "and say what it returns."
+)
 END_REFUSED_INSTRUCTIONS = (
     "The student wants to stop, but the test can't be ended midway. In one or two short, kind sentences say that "
     "you'll finish it together and it won't take long, then repeat the current question."
@@ -531,7 +576,7 @@ def _may_end(call: RealtimeCall) -> bool:
     """end_session is honoured only when the test is really over: the final
     answer is in (or the reply cap hit), or time is up - never because the
     student asked to quit early."""
-    if call.forcing_end or call.time_up:
+    if call.forcing_end or call.time_up or call.wrapping_up:
         return True
     questions = call.state.config.questions
     if questions:
@@ -585,6 +630,8 @@ def _card_answer(call: RealtimeCall, item: dict) -> None:
         return
     call.items[item["id"]]["text"] = (f"(tapped on the screen) Step {step + 1} is the wrong one: \"{card.steps[step]}\". "
                                       f"The fix: \"{card.fixes[fix]}\".")
+    if card.wrong_step is not None and step != card.wrong_step:
+        call.redirect = WRONG_TAP_INSTRUCTIONS  # "why was that step wrong?" makes no sense for a right step
     call.spoken_turns += 1
     _cancel_silence(call)
     progress = _progress(call, call.current)
@@ -600,6 +647,12 @@ def _start_clock(call: RealtimeCall) -> None:
     if call.deadline:
         now = asyncio.get_running_loop().time()
         call.deadline.reschedule(min(call.deadline.when(), now + call_time_limit(call.state.config)))
+
+
+def _seconds_left(call: RealtimeCall) -> float:
+    if call.deadline is None or call.deadline.when() is None:
+        return float("inf")
+    return call.deadline.when() - asyncio.get_running_loop().time()
 
 
 def _cancel_silence(call: RealtimeCall) -> None:
@@ -721,6 +774,10 @@ def _tool_output(call: RealtimeCall, name: str, n: int | None, easier: bool = Fa
     q = questions[n - 1]
     progress = _progress(call, n)
     if name == "ask_question":
+        if call.current and n > call.current and _seconds_left(call) < WRAP_UP_SECONDS:
+            call.wrapping_up = True
+            return {"error": "Time is nearly up - no more questions. In one short warm sentence say that's our "
+                             "time and thank the student, then call end_session."}
         _start_clock(call)
         call.current = n
         if progress["first_item"] is None:  # never switch the rubric under an answer already given

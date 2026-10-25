@@ -148,7 +148,9 @@ async def _colearner_config(
             "id": str(q.id), "order": q.order, "bloom_level": q.bloom_level.value, "spoken_text": q.spoken_text,
             "expected_points": q.expected_points or [], "misconceptions": q.misconceptions or [],
             "hints": q.hints or [], "easier": q.easier_version,
-            **({"card": {"steps": q.card["steps"], "fixes": [f["text"] for f in q.card["fixes"]]}} if q.card else {}),
+            # wrong_step only steers colearner's "why?" - it is never put in Milo's instructions
+            **({"card": {"steps": q.card["steps"], "fixes": [f["text"] for f in q.card["fixes"]],
+                         "wrong_step": q.card.get("wrong_step")}} if q.card else {}),
         } for q in questions]
     student = await db.get(User, ai_session.student_id)
     if student and (first_name := (student.display_name or "").split()[:1]):
@@ -236,7 +238,7 @@ async def _count_confusion(db: AsyncSession, test_id, result: dict) -> None:
 
 async def _record_completion(
     ai_session: AiAssessorSession, bloom_levels: list[BloomLevel], result: dict,
-    answered: int, num_questions: int, hints_used: int = 0,
+    answered: int, num_questions: int, hints_used: int = 0, token: str | None = None,
 ) -> None:
     """Stores colearner's finish payload and records the test result with
     per-Bloom and per-topic scores, XP (first completion only) and auto
@@ -291,7 +293,7 @@ async def _record_completion(
     if homework_mastery is not None:
         # after the results are saved; runs on its own and never blocks `completed`
         schedule_auto_homework(test_id=ai_session.test_id, student_id=ai_session.student_id,
-                               mastery_percent=homework_mastery, bloom_levels=bloom_levels)
+                               mastery_percent=homework_mastery, bloom_levels=bloom_levels, token=token)
 
 
 async def _owned_session(db: AsyncSession, session_id: str, app_user: User) -> tuple[AiAssessorSession, list[BloomLevel]]:
@@ -388,6 +390,7 @@ async def finish_session(
             await _store_record(record_db, ai_session, result)
             await record_db.commit()
         return FinishSessionOut(outcome="exited", summary=summary)
-    await _record_completion(ai_session, bloom_levels, result, answered, num_questions, hints_used=hints_used)
+    await _record_completion(ai_session, bloom_levels, result, answered, num_questions, hints_used=hints_used,
+                             token=_bearer(authorization))
     finished = result.get("model_completed") or answered >= num_questions
     return FinishSessionOut(outcome="completed" if finished else "timed_out", summary=summary)

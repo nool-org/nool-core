@@ -41,7 +41,7 @@ from src.api.schemas.admin import (
 from src.api.schemas.bloom import BloomDistributionOut, UpdateBloomDistributionIn
 from src.api.schemas.school_logo import SchoolLogoOut, UpdateSchoolLogoIn
 from src.api.schemas.common import ListEnvelope
-from src.api.schemas.features import FeaturesOut, UpdateFeaturesIn
+from src.api.schemas.features import FeaturesOut, SchoolFeaturesOut, UpdateFeaturesIn, UpdateSchoolFeaturesIn
 from src.api.schemas.import_job import ImportJobOut
 from src.api.schemas.support_ticket import (
     CreateTicketCommentIn,
@@ -109,6 +109,7 @@ from src.api.schemas.school_oversight import (
     SchoolVoiceTestOut,
 )
 from src.domain.models import (
+    Feature,
     AssistantMessage,
     AuditLog,
     Chapter,
@@ -165,6 +166,7 @@ from src.repositories.roster_repository import (
     student_count,
 )
 from src.repositories.subscription_repository import get_active_plan
+from src.services.feature_entitlements import effective_enabled_features
 from src.repositories.usage_repository import count_students, count_teachers
 from src.services import data_explorer, reporting
 from src.services.subject_grades import (
@@ -393,6 +395,42 @@ async def update_school_default_bloom_distribution(
     await session.commit()
     await session.refresh(school)
     return BloomDistributionOut(distribution=school.default_bloom_distribution)
+
+
+async def _school_features(session: AsyncSession, school: School) -> SchoolFeaturesOut:
+    plan = await get_active_plan(session, school.id)
+    return SchoolFeaturesOut(
+        plan_features=plan.enabled_features if plan else None,
+        disabled_features=[Feature(f) for f in school.disabled_features or []],
+        enabled_features=effective_enabled_features(plan=plan, school=school))
+
+
+@router.get("/schools/{school_id}/features", summary="A school's modules: its plan's, and those switched off")
+async def get_school_features(
+    school_id: str,
+    _: User = Depends(require_role(Role.SUPER_ADMIN)),
+    session: AsyncSession = Depends(get_db_session),
+) -> SchoolFeaturesOut:
+    return await _school_features(session, await _get_school(session, school_id))
+
+
+@router.put("/schools/{school_id}/features", summary="Switch modules off (or back on) for one school")
+async def update_school_features(
+    school_id: str,
+    body: UpdateSchoolFeaturesIn,
+    actor: User = Depends(require_role(Role.SUPER_ADMIN)),
+    session: AsyncSession = Depends(get_db_session),
+) -> SchoolFeaturesOut:
+    school = await _get_school(session, school_id)
+    before = school.disabled_features or []
+    school.disabled_features = sorted({f.value for f in body.disabled_features}) or None
+    await audit_repository.record(
+        session, actor_id=actor.id, action="school.features_updated", target_type="school", target_id=school_id,
+        detail=f"switched off: {', '.join(before) or 'none'} -> {', '.join(school.disabled_features or []) or 'none'}",
+    )
+    await session.commit()
+    await session.refresh(school)
+    return await _school_features(session, school)
 
 
 @router.get("/schools/{school_id}/logo")

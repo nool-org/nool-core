@@ -134,8 +134,11 @@ def penalized_score(score: Any, hints: Any) -> int:
 
 
 def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str, num_questions: int,
-                 rubric: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Turns the model's per-answer grades into the report core consumes, aggregates computed here."""
+                 rubric: Optional[List[Dict[str, Any]]] = None,
+                 planned: Optional[List[tuple]] = None) -> Dict[str, Any]:
+    """Turns the model's per-answer grades into the report core consumes, aggregates computed here.
+    `planned` [(bloom level, question text)] in order: questions after the last one answered weren't
+    reached in time and score 0 - a slow student is behind, and the mastery says so."""
     easier = {r.get("question_number") for r in rubric or [] if r.get("version") == "easier"}
     qa = []
     for a in graded.get("answers") or []:
@@ -147,6 +150,14 @@ def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str,
             "score_percent": penalized_score(capped, a.get("hints_used")),
             "confidence": max(0.0, min(1.0, float(a.get("confidence") or 0))),
         })
+    last = max((a["question_number"] for a in qa if isinstance(a.get("question_number"), int)), default=0)
+    for n, (level, text) in enumerate(planned or [], start=1):
+        if n > last:
+            qa.append({"question_number": n, "blooms_attribute": level, "question_asked": text, "student_response": "",
+                       "probing_or_hints_given": None, "points_covered": [], "misconception": None,
+                       "score_percent": 0, "raw_score_percent": 0, "is_substantively_correct": False,
+                       "reason": "Not reached - the time ran out before this question.", "confidence": 1.0,
+                       "hints_used": 0, "not_reached": True})
     by_level: Dict[str, List[int]] = {}
     for a in qa:
         by_level.setdefault(a["blooms_attribute"], []).append(a["score_percent"])
@@ -176,6 +187,14 @@ def _cost_metrics(usage: Any) -> Dict[str, Any]:
     metrics["turn_cost_usd"] = round(metrics["turn_cost_usd"] - saving, 6)
     metrics["cached_input_tokens"] = cached
     return metrics
+
+
+def _planned(config) -> List[tuple]:
+    """The test's questions in order as (bloom level, text) - prepared ones, else the levels it improvises on."""
+    if config.questions:
+        return [(q.bloom_level, q.spoken_text) for q in config.questions]
+    levels = list(config.blooms_attributes or [])
+    return [(levels[i % len(levels)] if levels else "Understanding", "") for i in range(config.num_questions)]
 
 
 def _record_cost(session: SessionState, usage: Any) -> None:
@@ -215,7 +234,7 @@ async def grade_transcript(
         msg = resp.choices[0].message
         if getattr(msg, "refusal", None):
             raise RuntimeError(f"grader refused: {msg.refusal}")
-        return build_report(json.loads(msg.content), *report_args, rubric=rubric)
+        return build_report(json.loads(msg.content), *report_args, rubric=rubric, planned=_planned(config))
     except Exception as ex:
         logger.exception("Bloom grading failed for session %s", session.session_id)
         report = build_report({}, *report_args)

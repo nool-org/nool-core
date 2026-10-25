@@ -169,7 +169,8 @@ services:
   # who/what it was for, and it keeps each call's cost - shared/llm_gateway.py,
   # litellm/config.yaml. UI: http://localhost:4000/ui (sign in with LITELLM_MASTER_KEY).
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable
+    # pinned to LiteLLM 1.105.1 by digest: 1.107.0 was compromised (Oct 2026) - bump deliberately, never a floating tag
+    image: ghcr.io/berriai/litellm@sha256:b7b9e2c306343721802253d0dd9436b9634a2eb4e14da7c7cf06c5c7b7530802
     restart: unless-stopped
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

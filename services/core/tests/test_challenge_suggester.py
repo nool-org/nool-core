@@ -42,7 +42,7 @@ def test_a_mixed_chapter_suggests_speak_with_milo_with_fix_milo_cards_on_its_equ
                     taken=set(), work=[_work("1.1", equations=0.43, calculations=0.28),
                                        _work("1.2", equations=0.36), _work("1.3", equations=0.04)])
     best, other = out["options"]
-    assert (best["format"], best["fix_cards"], other["format"]) == ("voice", 2, "fix_steps")
+    assert (best["format"], best["fix_cards"], other["format"]) == ("voice", 1, "fix_steps")
     assert best["label"] == "Speak with Milo + Fix Milo cards"
     assert [t["topic_id"] for t in other["topics"]] == ["1.2", "1.1"]  # the class's weakest first
     assert "an equation" in best["why"]

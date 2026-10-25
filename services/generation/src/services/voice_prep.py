@@ -38,6 +38,8 @@ from src.services.llm import StructuredLLM
 logger = logging.getLogger(__name__)
 
 MAX_SENTENCE_WORDS = 18  # the rule says "about 15"; a little slack so a good rewording isn't thrown away
+MAX_QUESTION_WORDS = 30  # the whole spoken question; the rule says about 20 - slack for a numbers set-up
+LEAK_WORDS = 5  # a hint sharing this many words in a row with an expected point gives the answer away
 MAX_TEXT = 4000
 
 # Western / idiomatic words a Class 8-10 student in a South Indian classroom
@@ -155,6 +157,8 @@ The student hears it ONCE and answers by speaking ONCE:""" + SPOKEN_RULES + """
 - Self-contained: never say "this lens", "the given circuit", "the above" without first saying what it is.
 - Simple Indian English, as a teacher speaks in a South Indian classroom.
 - Short sentences, about 15 words or fewer each. Everyday words.
+- ONE question asking ONE thing, about 20 words in all. Never two questions joined ("... ? And how ...?"),
+  never "and also explain". If the original asks two things, ask the more important one.
 - No idioms, no slang, no American or British phrasing.
 - Keep textbook terms exactly as in NCERT/state-board books (for example potential difference, resistivity).
 - Keep a number only if the question still needs it; never change a number or add a new one.
@@ -174,6 +178,7 @@ Also write:
 - hints: exactly 2, a nudge ladder. Hint 1 points the student to the key concept or idea to think
   about, without naming the answer. Hint 2 is a smaller, easier sub-question that leads toward it.
   A hint never states the answer or any part of it; for a multi-part question, not even one part's answer.
+  Each hint is a short question ending in "?" (like "What happens to rays that hit a curved-in mirror?").
 - easier: the SAME question one notch more supported, for a student who is stuck. Same concept and
   topic; simpler words and a more concrete ask; it may be one Bloom level lower. Every rule above
   applies to it too. It has its own reworded_text, spoken_text, expected_points (2 or 3),
@@ -194,8 +199,10 @@ Then ok=true only if ALL hold:
 6. expected_points agree with the dataset answer and match what the REWORDED question asks.
 7. No hint states the answer or any part of it (for a multi-part question, any one part's answer counts).
    Hint 1 points to the key idea; hint 2 is a smaller sub-question that leads toward the answer.
+   A hint that tells the student what happens (a statement of the fact the question asks for) fails.
+9. It asks ONE thing - not two questions in one.
 `ok` is about the reworded question only. Separately, easier_ok=true only if the `easier` version
-8. asks about the same concept and topic, is simpler (it may be one Bloom level lower), meets 3-7 above,
+8. asks about the same concept and topic, is simpler (it may be one Bloom level lower), meets 3-7 and 9 above,
    and its expected_points agree with the dataset answer for what it asks.
 If not ok, say precisely what is wrong in `problem`."""
 
@@ -235,6 +242,10 @@ def _problems(original: str, draft: _Version, max_points: int = 4) -> str | None
     long = [s for s in re.split(r"(?<=[.?!])\s+|\n+", text) if len(s.split()) > MAX_SENTENCE_WORDS]
     if long:
         return f"sentence longer than {MAX_SENTENCE_WORDS} words, split it: {long[0]!r}"
+    if draft.spoken_text.count("?") > 1:
+        return "ask ONE question only - it has more than one '?'; keep the more important one"
+    if len(draft.spoken_text.split()) > MAX_QUESTION_WORDS:
+        return f"too long to hold in mind when heard once: about 20 words, at most {MAX_QUESTION_WORDS}, ask one thing"
     numbers = set(_NUMBER.findall(text))
     added = numbers - set(_NUMBER.findall(original))
     if added:
@@ -265,7 +276,21 @@ def _rubric_problem(draft: _Version, max_points: int = 4) -> str | None:
         return "misconceptions must have 2 or 3 items"
     if len(_clean(draft.hints)) != 2:
         return "hints must have exactly 2 items"
+    if statement := next((h for h in _clean(draft.hints) if not h.endswith("?")), None):
+        return f"each hint is a guiding question ending in '?', never a statement: {statement!r}"
+    if leak := next((h for h in _clean(draft.hints) if _gives_away(h, draft.expected_points)), None):
+        return f"this hint gives away part of the answer - ask a guiding question instead: {leak!r}"
     return None
+
+
+def _runs(text: str) -> set[tuple]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return {tuple(words[i:i + LEAK_WORDS]) for i in range(len(words) - LEAK_WORDS + 1)}
+
+
+def _gives_away(hint: str, points: list[str]) -> bool:
+    """The hint repeats LEAK_WORDS words in a row of an expected point - it says the answer."""
+    return any(_runs(hint) & _runs(p) for p in points)
 
 
 def _clean(items: list[str]) -> list[str]:

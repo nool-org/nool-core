@@ -65,7 +65,7 @@ CALCULATION = r"[0-9]+(\.[0-9]+)? ?[×x*/=+−-] ?[0-9]"
 # Electricity 12-54%, Light 13%, biology/magnetism <5%) - a tagged topic list if a subject fools it
 WORKED_SHARE = 0.12
 MIN_BANK = 10  # fewer bank questions than this says nothing about a topic
-MAX_CARDS = 2
+MAX_CARDS = 1  # voice_test_prep.MAX_CARDS - a card takes ~2 of the 8 minutes
 MOSTLY = 0.8  # more than this share of topics worked (Electricity) -> Fix Milo leads
 
 

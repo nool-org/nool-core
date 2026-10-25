@@ -154,7 +154,7 @@ def fallback_analysis(topic: str, attempt: int, lagging: list[str]) -> dict:
         "summary": f"You're getting there with {topic}; the {level} questions tripped you up.",
         "lagging_meaning": f"Questions that ask you to {level} ideas from {topic} need more practice.",
         "need_to_know": [],
-        "next_step": ("Do your homework on these gaps, then take a second look." if attempt == 1
+        "next_step": ("Do your homework on these gaps, then take the re-check." if attempt == 1
                       else "Go over the revision cards - your teacher will help with the rest."),
     }
 
@@ -298,8 +298,9 @@ async def start(session: AsyncSession, student: User, topic_id: str, attempt: in
     slots = [Slot(topic, kind, level) for kind, level in quiz_slots(attempt, lagging, subject.name if subject else None)]
     # ponytail: holds the row through the LLM calls on a cold pool, as daily practice does
     with ai_context.feature("topic_quiz_mcq"):
+        # the re-check is short and must open at once: no special question written for it
         chosen = await daily_practice._fill(session, student, school_class, slots, daily_practice.today_ist(),
-                                            str(quiz.id), exact_level=True)
+                                            str(quiz.id), exact_level=True, write_special=attempt == 1)
     if not chosen:
         await session.delete(quiz)
         await session.flush()
@@ -399,7 +400,7 @@ async def finish(session: AsyncSession, quiz: DailyPracticeSession) -> dict:
 
 
 # ------------------------------------------------------------------ homework
-async def build_homework(quiz_id: uuid.UUID) -> None:
+async def build_homework(quiz_id: uuid.UUID, token: str | None = None) -> None:
     """The personal homework a first quiz with lagging levels leads to: 5
     questions on the topic, spread over the lagging levels, assigned at once
     and pushed. Own session; logged, never raised. With no dataset to ground
@@ -457,7 +458,9 @@ async def build_homework(quiz_id: uuid.UUID) -> None:
     except Exception:  # logged, never raised: the quiz result already stands
         logger.exception("topic_quiz_homework_failed", extra={"quiz_id": str(quiz_id)})
         return
-    # while the student does the homework, their re-check gets built - it opens instantly after
+    # its insight, then (while the student does the homework) the re-check - both open instantly
+    from src.api.routes.student_homework import warm_insight  # lazy: the route module imports this one
+    await warm_insight(hw.id, student.id, token)
     await prebuild(student.id, topic.id, attempt=2)
 
 

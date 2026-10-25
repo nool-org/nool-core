@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.routes.assigned_test import taken_test_ids
 from src.domain.models import (
+    Feature,
+    School,
     Chapter,
     DailyPracticeSession,
     Homework,
@@ -34,7 +36,9 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestTargetStudent,
 )
+from src.repositories.subscription_repository import get_active_plan
 from src.services import daily_practice, mcq_test, quiz_tests, topic_quiz
+from src.services.feature_entitlements import effective_enabled_features
 
 # (share of the window used, bonus): done in the first quarter -> 30 XP, ...
 EARLY_BONUS = [(0.25, 30), (0.5, 20), (1.0, 10)]
@@ -105,7 +109,7 @@ def _topic_task(loop, hw, progress, now) -> dict:
 
 
 # ------------------------------------------------------------------ voice tests
-async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> list[dict]:
+async def _test_tasks(session: AsyncSession, student: User, now: datetime, growth: bool = True) -> list[dict]:
     tests = (await session.execute(
         select(VoiceTest).join(VoiceTestTargetStudent, VoiceTestTargetStudent.test_id == VoiceTest.id)
         .where(VoiceTestTargetStudent.student_id == student.id, VoiceTest.status != TestStatus.DRAFT)
@@ -121,7 +125,8 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
               & (StudentHomeworkProgress.student_id == student.id))
         .where(HomeworkTargetStudent.student_id == student.id, Homework.test_id.in_([t.id for t in tests]))
         .order_by(Homework.created_at))).all()}
-    checks = {m.voice_test_id: m for m in await mcq_test.sync_for_student(session, student.id)}
+    # the growth check is the chain's last step - left out when the school has it switched off
+    checks = {m.voice_test_id: m for m in await mcq_test.sync_for_student(session, student.id)} if growth else {}
     out = []
     for test in tests:
         chapter = await session.get(Chapter, test.chapter_id)
@@ -142,7 +147,7 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime) -> li
                                "Opens after your homework" if status == "waiting" else None)
             if status == "waiting" and hw_step["status"] == "done":
                 check_step["note"] = "Opening soon"
-        steps = [voice, hw_step, check_step]
+        steps = [voice, hw_step, check_step] if growth else [voice, hw_step]
         out.append({"id": f"test:{test.id}", "kind": "test",
                     "title": chapter.name if chapter else "Challenge",
                     "subtitle": "Speak with Milo · talk it through",
@@ -210,9 +215,13 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
 
 async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
     """Open tasks first (the soonest deadline first, then the newest), then
-    the last DONE_SHOWN finished ones."""
+    the last DONE_SHOWN finished ones - only of the modules the school has on."""
     now = datetime.now(timezone.utc)
-    loops = await topic_quiz.loop_of(session, student)
+    enabled = effective_enabled_features(
+        plan=await get_active_plan(session, student.school_id) if student.school_id else None,
+        school=await session.get(School, student.school_id) if student.school_id else None)
+    on = lambda feature: enabled is None or feature in enabled  # noqa: E731
+    loops = await topic_quiz.loop_of(session, student) if on(Feature.TOPIC_QUIZ) else []
     hw_ids = [lp.quiz.homework_id for lp in loops if lp.quiz and lp.quiz.homework_id]
     rows = {hw.id: (hw, progress) for hw, progress in (await session.execute(
         select(Homework, StudentHomeworkProgress)
@@ -227,8 +236,10 @@ async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
         .where(Chapter.id.in_({lp.topic.chapter_id for lp in loops})))).all()}
     for task, lp in zip(tasks, loops):
         task["subject"], task["chapter_name"] = chapters.get(lp.topic.chapter_id, (None, None))
-    tasks += await _test_tasks(session, student, now)
-    tasks += await _quiz_test_tasks(session, student, now)
+    if on(Feature.VOICE_TEST):
+        tasks += await _test_tasks(session, student, now, growth=on(Feature.GROWTH_CHECK))
+    if on(Feature.CLASS_TESTS):
+        tasks += await _quiz_test_tasks(session, student, now)
 
     def stamp(value) -> float:
         if value is None:

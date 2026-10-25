@@ -4,8 +4,9 @@ POST /me/daily-practice/{sessionId}/items/{itemId}/mcq - a quiz is a
 practice session."""
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_db_session, require_role
@@ -107,12 +108,14 @@ async def finish_my_topic_quiz(
     background_tasks: BackgroundTasks,
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
+    authorization: Annotated[str | None, Header()] = None,
 ) -> QuizFinishOut:
     quiz = await topic_quiz.own_quiz(session, quiz_id, user)
     result = await topic_quiz.finish(session, quiz)
     await session.commit()
     if quiz.outcome == "homework" and quiz.homework_id is None:
-        background_tasks.add_task(topic_quiz.build_homework, quiz.id)
+        token = (authorization or "").split(" ", 1)[-1].strip() or None
+        background_tasks.add_task(topic_quiz.build_homework, quiz.id, token)
     return QuizFinishOut(analysis=_analysis_out(quiz), xp_awarded=result["xp_awarded"],
                          streak_days=result["streak_days"])
 

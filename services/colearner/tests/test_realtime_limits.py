@@ -53,6 +53,8 @@ def _short_clock(monkeypatch, seconds):
     monkeypatch.setattr(rs, "MAX_CALL_SECONDS", seconds)
     monkeypatch.setattr(rs, "READY_ALLOWANCE_SECONDS", 0)
     monkeypatch.setattr(rs, "_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(rs, "WRAP_UP_SECONDS", 0)  # a test clock is all "last minute"
+    monkeypatch.setattr(rs, "FINISH_ANSWER_SECONDS", 0.5)
 
 
 def _done(*outputs):
@@ -221,3 +223,23 @@ def test_may_end_only_when_really_over():
 def test_reply_cap_leaves_room_for_follow_ups_and_nudges():
     assert rs.reply_cap(2) == rs.MAX_REPLIES  # short tests keep the floor
     assert rs.reply_cap(10) >= 5 * 10  # ask + follow-up + two nudges + acknowledgement each
+
+
+def test_no_new_question_in_the_last_minute(monkeypatch):
+    # with under WRAP_UP_SECONDS left Milo closes the current question instead of starting one
+    call = rs.RealtimeCall(call_id="c", owner_ref="u", state=session_store.create_session(
+        SessionConfig(session_max_time_seconds=300, questions=[
+            {"id": f"q{n}", "order": n, "bloom_level": "Understanding", "spoken_text": f"Q{n}?"} for n in (1, 2, 3)])))
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        async with asyncio.timeout(300) as call.deadline:
+            assert rs._tool_output(call, "ask_question", 1)["say"] == "Q1?"
+            assert rs._tool_output(call, "ask_question", 2)["say"] == "Q2?"  # plenty of time left
+            call.deadline.reschedule(loop.time() + rs.WRAP_UP_SECONDS - 5)
+            assert "say" in rs._tool_output(call, "ask_question", 2)  # the current one can still be repeated
+            assert "no more questions" in rs._tool_output(call, "ask_question", 3)["error"]
+            assert call.wrapping_up and rs._may_end(call)
+
+    asyncio.run(run())
+

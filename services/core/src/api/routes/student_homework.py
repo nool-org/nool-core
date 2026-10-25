@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -140,6 +141,37 @@ def _placeholder_insight(gap_topic: str) -> dict:
     }
 
 
+# homework id -> the background run writing its insight (warm_insight), so an
+# open that lands mid-run waits for that one instead of starting a second
+_insight_runs: dict = {}
+
+
+async def warm_insight(homework_id, student_id, token: str | None) -> None:
+    """Writes a just-built homework's insight in the background (own session),
+    so opening it doesn't wait on the model. Needs the student's token
+    (colearner's auth); without one, the first open writes it as before.
+    Logged, never raised."""
+    from src.repositories import get_session
+
+    if not token or homework_id in _insight_runs:
+        return
+
+    async def run() -> None:
+        async with get_session() as session:
+            hw = await session.get(Homework, homework_id)
+            if hw is not None:
+                await _ensure_insight_generated(session, hw, student_id, token)
+
+    task = asyncio.get_running_loop().create_task(run())
+    _insight_runs[homework_id] = task
+    try:
+        await task
+    except Exception:
+        logger.exception("homework_insight_warm_failed", extra={"homework_id": str(homework_id)})
+    finally:
+        _insight_runs.pop(homework_id, None)
+
+
 async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student_id, token: str | None = None) -> dict:
     """Generates this Homework's real, LLM-grounded insight exactly once
     and persists it - see Homework.insight_generated_at's doc comment on
@@ -150,6 +182,10 @@ async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student
     generic placeholder this endpoint always returned, and simply isn't
     cached, so the next GET tries again.
     """
+    running = _insight_runs.get(hw.id)
+    if hw.insight_generated_at is None and running is not None and running is not asyncio.current_task():
+        await asyncio.wait({running})  # the background run is writing it right now
+        await session.refresh(hw)
     if hw.insight_generated_at is not None:
         return {
             "what_needs_understanding": hw.insight_what_needs_understanding,

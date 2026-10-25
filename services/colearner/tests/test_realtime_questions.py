@@ -543,3 +543,44 @@ def test_a_card_tap_out_of_range_or_off_a_card_is_ignored():
         call.items[item["id"]] = {"role": "user", "text": ""}
         rs._card_answer(call, item)
         assert call.items[item["id"]]["text"] == "" and call.spoken_turns == 0
+
+
+def test_time_up_lets_the_student_finish_then_closes_in_one_line(monkeypatch):
+    _short_clock(monkeypatch, 0.1)
+    ws = _SlowWS([{"type": "input_audio_buffer.speech_started"},  # mid-answer when time runs out
+                  _SLEEP, _SLEEP, {"type": "input_audio_buffer.speech_stopped"}])
+    call, _ = _run_sideband(monkeypatch, ws, _config())
+    time_up = next(i for i, m in enumerate(ws.sent)
+                   if m.get("item", {}).get("content", [{}])[0].get("text") == "[TIME_UP]")
+    assert call.time_up and not call.student_speaking  # [TIME_UP] only once the answer ended
+    # the closing line: sent, or queued behind the reply still going (the greeting here)
+    close = ws.sent[time_up + 1] if len(ws.sent) > time_up + 1 else json.loads(call.pending_response)
+    assert close["type"] == "response.create" and "one short" in close["response"]["instructions"]
+
+
+def test_a_wrong_card_tap_gets_no_why_milo_goes_on():
+    config = SessionConfig(questions=[_q(1), _q(2, card={**CARD, "wrong_step": 1}), _q(3)])
+    call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.SessionState(session_id="s", config=config))
+    call.current = 2
+
+    class WS:
+        sent = []
+
+        async def send(self, raw):
+            self.sent.append(json.loads(raw))
+
+    async def run():
+        ws = WS()
+        for event in (*_card_tap("t2", 0, 0), {"type": "response.created"},  # the app's "ask why" reply
+                      {"type": "response.done", "response": {"output": []}}):
+            await rs._handle_event(call, ws, event)
+        return ws.sent
+
+    sent = asyncio.run(run())
+    assert sent[0] == {"type": "response.cancel"}
+    assert sent[1]["type"] == "response.create" and "Don't ask why" in sent[1]["response"]["instructions"]
+    assert "wrong_step" not in rs.build_session(config)["instructions"]
+    # the right step still gets its "why?"
+    call.items["t3"] = {"role": "user", "text": ""}
+    rs._card_answer(call, _card_tap("t3", 1, 0)[0]["item"])
+    assert call.redirect is None

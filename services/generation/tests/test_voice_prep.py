@@ -28,7 +28,7 @@ REQUEST = PrepRequest(grade=10, subject="Science", chapter="Electricity", board=
 
 def version(text, points=("e1", "e2")):
     return _Version(reworded_text=text, spoken_text=text, expected_points=list(points),
-                    misconceptions=["m1", "m2"], hints=["key idea", "smaller question"])
+                    misconceptions=["m1", "m2"], hints=["key idea?", "smaller question?"])
 
 
 EASIER = version("A heater takes 5 A from a 220 V plug point. Which law links these to its resistance?")
@@ -36,7 +36,7 @@ EASIER = version("A heater takes 5 A from a 220 V plug point. Which law links th
 
 def rewording(text, **kw):
     return _Rewording(reworded_text=text, spoken_text=kw.get("spoken", text), expected_points=["p1", "p2"],
-                      misconceptions=["m1", "m2"], hints=["gentle", "stronger"], easier=kw.get("easier", EASIER))
+                      misconceptions=["m1", "m2"], hints=["gentle?", "stronger?"], easier=kw.get("easier", EASIER))
 
 
 GOOD_APPLY = rewording("A heater is connected to a 220 V plug point. The current is 5 A. What is its resistance?")
@@ -68,7 +68,7 @@ async def test_happy_path_one_question_per_level_in_order_with_rubric():
     assert [(q.order, q.bloom_level, q.dataset_question_id) for q in qs] == [(1, "APPLY", "q-apply"), (2, "REMEMBER", "q-rem")]
     assert qs[0].reworded_text == GOOD_APPLY.reworded_text and qs[0].original_text == Q_APPLY["text"]
     assert (qs[0].topic_id, qs[0].subtopic_id, qs[0].concepts) == ("t1", "s1", ["Ohm's law"])
-    assert qs[0].hints == ["gentle", "stronger"] and len(qs[0].expected_points) == 2
+    assert qs[0].hints == ["gentle?", "stronger?"] and len(qs[0].expected_points) == 2
     assert [c[:2] for c in llm.calls] == [("_Rewording", "gen"), ("_Rewording", "gen"), ("_Verdicts", "ver")]
     assert '"dataset_answer": "R = V/I = 44 Ω"' in llm.calls[2][2]
 
@@ -82,7 +82,7 @@ async def test_verify_failure_regenerates_once_then_falls_back_to_original_wordi
     first = result.questions[0]
     assert first.reworded_text == first.original_text == Q_APPLY["text"]
     assert first.spoken_text == Q_APPLY["text"]       # no symbols to say in words here
-    assert first.hints == ["gentle", "stronger"]      # rubric from the last draft still filled
+    assert first.hints == ["gentle?", "stronger?"]      # rubric from the last draft still filled
     assert result.questions[1].reworded_text == GOOD_REMEMBER.reworded_text
     assert '"feedback": "answer changed"' in llm.calls[3][2] and "Define resistivity" not in llm.calls[3][2]
     assert len(llm.calls) == 5
@@ -152,7 +152,7 @@ def test_words_after_numbers_are_not_units():
 
 
 def test_marks_at_the_end_need_not_be_kept():
-    assert _problems("Which process is better and why? (2)", rewording("Which method is better? Why?")) is None
+    assert _problems("Which process is better and why? (2)", rewording("Which method is better and why?")) is None
 
 
 def test_a_line_break_ends_a_sentence():
@@ -199,7 +199,7 @@ async def test_every_question_carries_its_easier_version_with_its_own_rubric():
     result = await prep_questions(llm, REQUEST, generation_model="gen", verify_model="ver")
     easier = result.questions[0].easier
     assert easier.spoken_text == EASIER.spoken_text and easier.expected_points == ["e1", "e2"]
-    assert easier.hints == ["key idea", "smaller question"] and easier.misconceptions == ["m1", "m2"]
+    assert easier.hints == ["key idea?", "smaller question?"] and easier.misconceptions == ["m1", "m2"]
     assert result.questions[1].easier.spoken_text == "What does resistivity depend on?"
     assert '"easier": {' in llm.calls[2][2]  # the verifier sees it
 
@@ -244,3 +244,17 @@ async def test_an_instruction_reaches_the_generator():
     llm = FakeLLM([GOOD_APPLY], [_Verdicts(verdicts=ok(0))])
     await prep_questions(llm, request, generation_model="gen", verify_model="ver")
     assert '"instruction": "Make it clearer to hear."' in llm.calls[0][2]
+
+
+def test_one_short_question_and_hints_that_only_ask():
+    orig = "Explain how a concave mirror and a convex mirror reflect parallel rays."
+    two = rewording("How does a concave mirror reflect parallel rays? And how does a convex mirror?")
+    assert "ONE question" in _problems(orig, two)
+    long = rewording(" ".join(["Think"] * 16) + ". " + " ".join(["about"] * 16) + " mirrors?")
+    assert "about 20 words" in _problems(orig, long)
+    points = ["For a concave mirror the parallel rays meet at the focus after reflection", "p2"]
+    leak = rewording("Where do parallel rays go after a concave mirror?").model_copy(update={"expected_points": points, "hints": [
+        "What do you know about curved mirrors?", "Do the parallel rays meet at the focus after reflection?"]})
+    assert "gives away" in _problems(orig, leak)
+    told = rewording("Where do parallel rays go after a convex mirror?").model_copy(update={"hints": ["Rays spread out from a convex mirror.", "Where do they go?"]})
+    assert "never a statement" in _problems(orig, told)

@@ -13,3 +13,16 @@ class FeaturesOut(CamelModel):
 
 class UpdateFeaturesIn(CamelModel):
     enabled_features: list[Feature] | None
+
+
+class SchoolFeaturesOut(CamelModel):
+    """A school's modules: what its plan bundles (None = all), what a Super Admin
+    switched off for it, and what it gets (both allow it; None = all)."""
+
+    plan_features: list[Feature] | None
+    disabled_features: list[Feature]
+    enabled_features: list[Feature] | None
+
+
+class UpdateSchoolFeaturesIn(CamelModel):
+    disabled_features: list[Feature]

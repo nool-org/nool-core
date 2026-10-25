@@ -166,7 +166,7 @@ def _fake_generation(monkeypatch, calls=None):
         return {"questions": [{
             "dataset_question_id": c["id"], "bloom_level": c["bloom_level"], "original_text": c["text"],
             "reworded_text": f"Simple: {c['text']}", "spoken_text": f"Spoken: {c['text']}",
-            "expected_points": ["p1", "p2"], "misconceptions": ["m1", "m2"], "hints": ["h1", "h2"],
+            "expected_points": ["p1", "p2"], "misconceptions": ["m1", "m2"], "hints": ["h1?", "h2?"],
             "concepts": ["current"],
             # a written (gap-fill) question may come back without one
             "easier": None if c["id"].startswith("written-") else EASIER,
@@ -236,7 +236,7 @@ async def test_prep_picks_one_question_per_level_in_bloom_order_and_rewords_it(s
     assert rows[0].reworded_text == "Simple: Define electric current."
     assert rows[0].spoken_text == "Spoken: Define electric current."
     assert rows[0].original_text == "Define electric current."
-    assert (rows[0].expected_points, rows[0].misconceptions, rows[0].hints) == (["p1", "p2"], ["m1", "m2"], ["h1", "h2"])
+    assert (rows[0].expected_points, rows[0].misconceptions, rows[0].hints) == (["p1", "p2"], ["m1", "m2"], ["h1?", "h2?"])
     assert rows[0].easier_version == EASIER
     assert rows[1].topic_id == s["other_topic"].id
     assert all(r.status == VoiceTestQuestionStatus.DRAFT for r in rows)
@@ -366,9 +366,11 @@ async def test_prep_spreads_the_levels_across_the_chapters_topics(schema, monkey
 
     await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
 
-    # no class data: textbook order, round-robin ("Ohm's law" before "Resistors in series")
-    assert [r.topic_id for r in await _questions(db, s["test"])] == [
-        s["topic"].id, s["other_topic"].id, s["topic"].id]
+    # 5 asked (Remember, Understand twice each, then Apply); no class data: textbook order,
+    # round-robin ("Ohm's law" before "Resistors in series")
+    rows = await _questions(db, s["test"])
+    assert [r.bloom_level for r in rows] == [B.REMEMBER, B.REMEMBER, B.UNDERSTAND, B.UNDERSTAND, B.APPLY]
+    assert [r.topic_id for r in rows] == [s["topic"].id, s["other_topic"].id] * 2 + [s["topic"].id]
 
 
 async def test_prep_starts_with_the_topic_the_class_is_weakest_at(schema, monkeypatch):
@@ -381,7 +383,7 @@ async def test_prep_starts_with_the_topic_the_class_is_weakest_at(schema, monkey
 
     await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
 
-    assert [r.topic_id for r in await _questions(db, s["test"])] == [s["other_topic"].id, s["topic"].id]
+    assert [r.topic_id for r in await _questions(db, s["test"])][:2] == [s["other_topic"].id, s["topic"].id]
 
 
 async def test_prep_falls_back_to_any_topic_when_the_next_one_has_no_question(schema, monkeypatch):
@@ -562,7 +564,8 @@ async def test_fix_milo_cards_sit_between_spoken_questions_and_reach_the_screen_
     _student, ai_session = await _student_session(db, s)
     config, count = await ai_assessor._colearner_config(db, ai_session, [B.REMEMBER, B.UNDERSTAND])
     assert count == 3
-    assert config["questions"][1]["card"] == {"steps": FIX["steps"], "fixes": [f["text"] for f in FIX["fixes"]]}
+    assert config["questions"][1]["card"] == {"steps": FIX["steps"], "fixes": [f["text"] for f in FIX["fixes"]],
+                                              "wrong_step": FIX["wrong_step"]}  # colearner only, never Milo
     assert "card" not in config["questions"][0]
     # the app: what to show when Milo asks question 2 - never which step or fix is right
     shown = [{"number": n, **voice_test_prep.question_types.public("fix_steps", r.card)}
@@ -908,3 +911,38 @@ async def test_student_result_detail_lists_answers_and_highlights(schema, monkey
     assert third["version"] == "standard"
     assert dumped["highlights"] == {"best": {"questionNumber": 1, "quote": first["quote"]},
                                     "weakest": {"questionNumber": 2, "quote": "not sure"}}
+
+
+def test_every_test_plans_five_questions_easy_to_hard_with_a_warm_up():
+    plan = voice_test_prep.plan_levels
+    assert plan([B.UNDERSTAND, B.APPLY, B.ANALYZE]) == [B.UNDERSTAND, B.UNDERSTAND, B.APPLY, B.APPLY, B.ANALYZE]
+    assert plan([B.APPLY, B.ANALYZE]) == [B.UNDERSTAND, B.UNDERSTAND, B.APPLY, B.APPLY, B.ANALYZE]  # warm-up first
+    assert plan(list(B)) == [B.REMEMBER, B.UNDERSTAND, B.APPLY, B.ANALYZE, B.CREATE]  # the hardest stays
+
+
+async def test_a_card_takes_the_third_place_and_the_test_stays_at_five(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, levels=(B.UNDERSTAND, B.APPLY, B.ANALYZE))
+    for level in (B.UNDERSTAND, B.APPLY, B.ANALYZE):
+        for topic in (s["topic"], s["other_topic"]):
+            await _question(db, s, level, f"{level.value} question on {topic.name}", topic=topic)
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+    s["test"].fix_cards = 2  # an older client's ask - one card at most
+
+    async def cards(test_id, chapter_id, class_id, wanted):
+        assert wanted == 1
+        return [_card_row()]
+    monkeypatch.setattr(voice_test_prep, "_cards", cards)
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+
+    rows = await _questions(db, s["test"])
+    assert [r.card is not None for r in rows] == [False, False, True, False, False]
+    assert [r.bloom_level for r in rows] == [B.UNDERSTAND, B.UNDERSTAND, B.EVALUATE, B.APPLY, B.ANALYZE]
+
+    async def no_card(test_id, chapter_id, class_id, wanted):
+        return []
+    monkeypatch.setattr(voice_test_prep, "_cards", no_card)
+    await db.execute(VoiceTestQuestion.__table__.delete().where(VoiceTestQuestion.voice_test_id == s["test"].id))
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+    assert len(await _questions(db, s["test"])) == 5  # no card made: the spare is asked instead
