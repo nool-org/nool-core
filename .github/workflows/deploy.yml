@@ -1,0 +1,33 @@
+name: Deploy
+
+# Ships the pushed commit to the VPS: its code goes over SSH to
+# /opt/nool/deploy.sh (nool-core/scripts/deploy-server.sh), which rebuilds and
+# restarts what this repo runs. The deploy key (secret VPS_DEPLOY_KEY) can
+# only run that script.
+on:
+  # after CI (ci.yml) passes on main
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy-${{ github.repository }}
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Ship to the VPS
+        env:
+          VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          install -m 600 /dev/null ~/.ssh/deploy
+          printf '%s\n' "$VPS_DEPLOY_KEY" > ~/.ssh/deploy
+          echo "200.234.40.151 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN8Z2RsO/zJmfPGyiNz4EifGoK8hBQiT4NTieXUYqfFY" > ~/.ssh/known_hosts
+          git archive HEAD | ssh -i ~/.ssh/deploy root@200.234.40.151 ${{ github.event.repository.name }}

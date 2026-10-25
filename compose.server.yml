@@ -1,0 +1,101 @@
+# The Hostinger VPS (Dokploy) overlay - on top of compose.yml + compose.prod.yml:
+#
+#   docker compose -f compose.yml -f compose.prod.yml -f compose.server.yml up -d --build
+#
+# Dokploy's Traefik already owns ports 80/443 there, so Caddy is switched off
+# and Traefik routes by Docker labels instead (Let's Encrypt via Dokploy's
+# "letsencrypt" resolver). Adds what the server runs in-stack: FalkorDB + the
+# nool-kg API (textbook graph), Azurite for question images, and the admin
+# consoles. Each host also answers on <name>.200.234.40.151.sslip.io, which
+# needs no DNS record.
+
+x-traefik: &traefik
+  networks: [nool_network, dokploy-network]
+
+services:
+  caddy:
+    profiles: ["off"]
+
+  nginx:
+    <<: *traefik
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.services.nool-api.loadbalancer.server.port=80
+      - traefik.http.routers.nool-api.rule=Host(`api.mynool.io`)
+      - traefik.http.routers.nool-api.entrypoints=websecure
+      - traefik.http.routers.nool-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.nool-api-ip.rule=Host(`api.200.234.40.151.sslip.io`)
+      - traefik.http.routers.nool-api-ip.entrypoints=websecure
+      - traefik.http.routers.nool-api-ip.tls.certresolver=letsencrypt
+
+  falkordb:
+    image: falkordb/falkordb:latest
+    restart: unless-stopped
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    networks: [nool_network]
+
+  nool-kg:
+    build:
+      context: ../nool-kg
+    profiles: !reset []
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: 6379
+    depends_on: [falkordb]
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+    restart: unless-stopped
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--location", "/data", "--loose", "--disableProductStyleUrl"]
+    volumes:
+      - azurite_data:/data
+    <<: *traefik
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.services.nool-assets.loadbalancer.server.port=10000
+      - traefik.http.routers.nool-assets.rule=Host(`assets.mynool.io`)
+      - traefik.http.routers.nool-assets.entrypoints=websecure
+      - traefik.http.routers.nool-assets.tls.certresolver=letsencrypt
+      - traefik.http.routers.nool-assets-ip.rule=Host(`assets.200.234.40.151.sslip.io`)
+      - traefik.http.routers.nool-assets-ip.entrypoints=websecure
+      - traefik.http.routers.nool-assets-ip.tls.certresolver=letsencrypt
+
+  # images built in their own repos (scripts/deploy-server.sh)
+  school-admin:
+    profiles: !reset []
+    <<: *traefik
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.services.nool-school.loadbalancer.server.port=3000
+      - traefik.http.routers.nool-school.rule=Host(`school.mynool.io`)
+      - traefik.http.routers.nool-school.entrypoints=websecure
+      - traefik.http.routers.nool-school.tls.certresolver=letsencrypt
+      - traefik.http.routers.nool-school-ip.rule=Host(`school.200.234.40.151.sslip.io`)
+      - traefik.http.routers.nool-school-ip.entrypoints=websecure
+      - traefik.http.routers.nool-school-ip.tls.certresolver=letsencrypt
+
+  super-admin:
+    profiles: !reset []
+    <<: *traefik
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.services.nool-admin.loadbalancer.server.port=3000
+      - traefik.http.routers.nool-admin.rule=Host(`admin.mynool.io`)
+      - traefik.http.routers.nool-admin.entrypoints=websecure
+      - traefik.http.routers.nool-admin.tls.certresolver=letsencrypt
+      - traefik.http.routers.nool-admin-ip.rule=Host(`admin.200.234.40.151.sslip.io`)
+      - traefik.http.routers.nool-admin-ip.entrypoints=websecure
+      - traefik.http.routers.nool-admin-ip.tls.certresolver=letsencrypt
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  falkordb_data:
+  azurite_data:
