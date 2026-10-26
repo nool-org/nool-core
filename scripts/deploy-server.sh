@@ -35,7 +35,10 @@ core() { cd /opt/nool/nool-core && docker compose up -d --build --remove-orphans
 case "$repo" in
   nool-core) core ;;
   nool-kg) core nool-kg ;;
-  nool-apps) cd "$dir" && docker compose -f compose.demo.yml -f compose.server.yml up -d --build ;;
+  # landing bind-mounts files from $dir, which was just swapped for a new
+  # folder - recreate it so it stops serving the old (soon deleted) one
+  nool-apps) cd "$dir" && docker compose -f compose.demo.yml -f compose.server.yml up -d --build &&
+    docker compose -f compose.demo.yml -f compose.server.yml up -d --force-recreate --no-deps landing ;;
   nool-school-admin) cd "$dir" && docker compose build && core school-admin ;;
   nool-pm-dashboard) cd "$dir" && docker compose build && core super-admin ;;
 esac
