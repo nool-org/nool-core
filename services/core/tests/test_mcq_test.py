@@ -420,6 +420,7 @@ async def test_teacher_sees_class_growth_and_others_do_not(schema, monkeypatch):
     out = await routes.get_test_growth(str(s["test"].id), user=s["teacher"], session=db)
     [student] = out.students
     assert (student.name, student.before, student.after, student.delta) == ("Asha", 46, corrected(90), corrected(90) - 46)
+    assert student.flagged is False  # 87 after the re-check: mastered
     per_bloom = {b.level: b for b in out.per_bloom}
     assert (per_bloom["UNDERSTAND"].before, per_bloom["UNDERSTAND"].after, per_bloom["UNDERSTAND"].delta) == (50, 33, -17)
     assert {c.concept for c in out.concepts} == {"current", "resistance", "power"}
@@ -709,3 +710,13 @@ async def test_bank_questions_get_a_written_why_and_hint_and_keep_fallbacks_when
     await svc._explain_bank(drafts)  # no raise; fallbacks apply when rows are built
     assert drafts[0].explanation == ""
     assert svc.explanation_of(drafts[0].options, 1, drafts[0].explanation) == "The answer is Carbon dioxide."
+
+
+async def test_a_student_still_under_60_after_the_recheck_is_flagged(schema, monkeypatch):
+    db = schema
+    s = await _seed(db, taken_hours_ago=49)
+    await _full_bank(db, s)
+    _no_generation(monkeypatch)
+    await _attempt(db, s, wrong_levels=tuple(B)[:4])  # 4 of 10 wrong: 60% -> 47 after guess correction
+    [student] = (await routes.get_test_growth(str(s["test"].id), user=s["teacher"], session=db)).students
+    assert student.after < 60 and student.flagged is True

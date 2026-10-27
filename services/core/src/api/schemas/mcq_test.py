@@ -145,6 +145,8 @@ class StudentGrowthOut(CamelModel):
     before: int | None
     after: int | None
     delta: int | None
+    # still under FLAG_BELOW after homework + re-check: the teacher should step in
+    flagged: bool = False
 
 
 class LevelGrowthOut(CamelModel):

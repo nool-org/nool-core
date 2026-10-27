@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import McqTest, User, VoiceTest
 
+FLAG_BELOW = 60  # re-check score under this = not mastered yet (challenge_report's STRUGGLING_BELOW)
+
 
 def corrected(percent: int) -> int:
     return max(0, round((percent - 25) / 75 * 100))
@@ -57,7 +59,8 @@ async def class_growth(session: AsyncSession, test: VoiceTest) -> dict:
         result = mcq.result or {}
         students.append({"student_id": str(mcq.student_id), "name": name, "before": result.get("before"),
                          "after": result.get("after"),
-                         "delta": result["after"] - result["before"] if result.get("before") is not None else None})
+                         "delta": result["after"] - result["before"] if result.get("before") is not None else None,
+                         "flagged": result.get("after") is not None and result["after"] < FLAG_BELOW})
         entries.extend(result.get("growth") or [])
     bloom = _averaged([e for e in entries if e["kind"] == "bloom"])
     concepts = _averaged([e for e in entries if e["kind"] == "concept"])
