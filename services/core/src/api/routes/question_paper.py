@@ -673,7 +673,28 @@ async def generate_paper(
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
     paper = await _get_paper_to_edit(session, paper_id, user)
+    return await _generate(session, paper, user, keep=[])
 
+
+@router.post("/question-papers/{paper_id}/fill-missing", summary="Let Milo write the questions the paper is short of")
+async def fill_missing(
+    paper_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> QuestionPaperOut:
+    """Keeps every question the paper has and has Milo write the rest of the
+    blueprint's slots (no bank this time - the bank already ran short)."""
+    paper = await _get_paper_to_edit(session, paper_id, user)
+    if paper.status not in (QuestionPaperStatus.VALIDATION_FAILED, QuestionPaperStatus.REVIEW):
+        raise ConflictError("Only a paper that needs a fix or is in review can be filled.")
+    return await _generate(session, paper, user, keep=await load_questions(session, paper.id))
+
+
+async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
+                    keep: list[QuestionPaperQuestion]) -> QuestionPaperOut:
+    """Fills the blueprint's slots: all of them (bank first, then Milo), or
+    with `keep`, only the slots after the kept questions (Milo only)."""
     bloom_dist = await session.execute(
         select(QuestionPaperBloomDistribution).where(QuestionPaperBloomDistribution.paper_id == paper.id)
     )
@@ -704,11 +725,13 @@ async def generate_paper(
 
     questions: list[dict] = []
     references: list[dict] = []
+    if keep and len(keep) >= len(slots):
+        raise ConflictError("This paper already has every question its blueprint asks for.")
     if chapter_refs:
         subject_name, board, grade = await _paper_kg_identity(session, paper)
         references = await _dataset_reference_questions(session, paper, user)
-        from_bank = await _bank_slots(session, paper, user, slots)
-        open_slots = [slot for i, slot in enumerate(slots) if i not in from_bank]
+        from_bank = {} if keep else await _bank_slots(session, paper, user, slots)
+        open_slots = [slot for i, slot in enumerate(slots) if i not in from_bank and i >= len(keep)]
         generated = iter(await kg_client.generate_paper_questions(
             subject=subject_name,
             board=board,
@@ -722,16 +745,17 @@ async def generate_paper(
             reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
             slots=[{k: v for k, v in s.items() if k != "chapter_id"} for s in open_slots],
         ) if open_slots else [])
-        questions = [q for q in (from_bank.get(i) or next(generated, None) for i in range(len(slots))) if q]
+        questions = [q for q in (from_bank.get(i) or next(generated, None) for i in range(len(keep), len(slots))) if q]
 
-    existing = await session.execute(
-        select(QuestionPaperQuestion).where(QuestionPaperQuestion.paper_id == paper.id)
-    )
-    for row in existing.scalars().all():
-        await session.delete(row)
-    await session.flush()
+    if not keep:
+        existing = await session.execute(
+            select(QuestionPaperQuestion).where(QuestionPaperQuestion.paper_id == paper.id)
+        )
+        for row in existing.scalars().all():
+            await session.delete(row)
+        await session.flush()
 
-    marks_sequence = _assign_marks(paper, sections, len(questions))
+    marks_sequence = _assign_marks(paper, sections, len(keep) + len(questions))[len(keep):]
     section_sequence = [s.label for s in sections for _ in range(s.question_count)]
     chapters_by_number = {c.order_index: c for c in (await session.execute(
         select(Chapter).where(Chapter.subject_id == paper.subject_id, Chapter.order_index.is_not(None))
@@ -740,7 +764,7 @@ async def generate_paper(
         select(Topic).where(Topic.chapter_id.in_([c.id for c in chapters_by_number.values()]))
     )).scalars().all() if chapters_by_number else []
     bank_by_text = {normalize(r["text"]): r["id"] for r in references}
-    for order, (q, marks) in enumerate(zip(questions, marks_sequence), start=1):
+    for order, (q, marks) in enumerate(zip(questions, marks_sequence), start=len(keep) + 1):
         chapter = (next((c for c in chapters_by_number.values() if c.id == q["chapter_id"]), None)
                    if q.get("chapter_id") else chapters_by_number.get(q.get("chapter_number")))
         topic = (next((t for t in topics if t.id == q["topic_id"]), None) if q.get("topic_id") else
@@ -766,19 +790,23 @@ async def generate_paper(
     )
     validation = existing_validation.scalar_one_or_none()
 
-    covered_chapters = {q["chapter_number"] for q in questions}
+    number_of = {c.id: n for n, c in chapters_by_number.items()}
+    covered_chapters = {q["chapter_number"] for q in questions} | {number_of.get(k.chapter_id) for k in keep}
     coverage_percent = (
         round(100 * len(covered_chapters & requested_chapter_numbers) / len(requested_chapter_numbers))
         if requested_chapter_numbers
         else (100 if questions else 0)
     )
-    texts = [q["text"].strip().lower() for q in questions]
+    texts = [q["text"].strip().lower() for q in questions] + [k.text.strip().lower() for k in keep]
     duplicate_count = len(texts) - len(set(texts))
-    quality_percent = max(0, 100 - duplicate_count * 20) if questions else 0
-    quality_percent = min(quality_percent, coverage_percent) if questions else 0
+    total = len(keep) + len(questions)
+    quality_percent = max(0, 100 - duplicate_count * 20) if total else 0
+    quality_percent = min(quality_percent, coverage_percent) if total else 0
 
     issues: list[str] = []
-    if not questions:
+    if total < len(slots) and total:
+        issues.append(f"{len(slots) - total} of the blueprint's {len(slots)} questions couldn't be filled.")
+    if not total:
         issues.append(
             "No questions could be generated for this configuration."
             if chapter_refs
@@ -793,14 +821,15 @@ async def generate_paper(
         validation = QuestionPaperValidation(paper_id=paper.id)
         session.add(validation)
     validation.coverage_percent = coverage_percent
-    validation.marks_accounted_for = sum(marks_sequence[: len(questions)])
+    validation.marks_accounted_for = sum(_assign_marks(paper, sections, total)[:total])
     validation.duplicate_count = duplicate_count
     validation.quality_percent = quality_percent
     validation.issues = issues
 
-    paper.status = QuestionPaperStatus.REVIEW if questions else QuestionPaperStatus.VALIDATION_FAILED
+    paper.status = QuestionPaperStatus.REVIEW if total else QuestionPaperStatus.VALIDATION_FAILED
     if questions:
-        await create_version(session, paper, created_by=user.id, summary="Generated paper", origin="generate")
+        await create_version(session, paper, created_by=user.id,
+                             summary="Milo wrote the missing questions" if keep else "Generated paper", origin="generate")
     await session.commit()
     await session.refresh(paper)
     return await _serialize(session, paper)
