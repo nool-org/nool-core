@@ -12,7 +12,8 @@ from .roster import AssignmentTarget
 
 class HomeworkOut(CamelModel):
     id: str
-    test_id: str
+    test_id: str | None  # None for homework set straight from a chapter
+    chapter_id: str | None = None
     class_id: str
     gap_topic: str
     gap_mastery_percent: int
@@ -32,7 +33,10 @@ class HomeworkOut(CamelModel):
 
 
 class CreateHomeworkIn(CamelModel):
-    test_id: str
+    # either the voice test it follows up, or a class + chapter the teacher sets it on directly
+    test_id: str | None = None
+    class_id: str | None = None
+    chapter_id: str | None = None
     dataset_ids: list[str]
     # bounded: each question may cost an LLM call, and a non-positive count used to hang slot planning
     total_questions: int = Field(ge=1, le=30)

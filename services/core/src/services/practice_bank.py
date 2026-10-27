@@ -33,6 +33,9 @@ async def archive_homework_questions(
         topic = await session.get(Topic, homework.topic_id)
         chapter = await session.get(Chapter, topic.chapter_id)
         test = SimpleNamespace(subject_id=chapter.subject_id, chapter_id=chapter.id, topic_id=topic.id)
+    elif test is None and homework.chapter_id:  # set straight from a chapter
+        chapter = await session.get(Chapter, homework.chapter_id)
+        test = SimpleNamespace(subject_id=chapter.subject_id, chapter_id=chapter.id, topic_id=None)
 
     existing = await session.execute(
         select(PracticeBankEntry.source_question_id).where(

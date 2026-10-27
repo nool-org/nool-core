@@ -169,7 +169,7 @@ async def list_school_homework(
         .join(SchoolClass, SchoolClass.id == Homework.class_id)
         .outerjoin(VoiceTest, VoiceTest.id == Homework.test_id)
         .outerjoin(Topic, Topic.id == Homework.topic_id)
-        .outerjoin(Chapter, Chapter.id == Topic.chapter_id)
+        .outerjoin(Chapter, Chapter.id == func.coalesce(Homework.chapter_id, Topic.chapter_id))
         .where(SchoolClass.school_id == user.school_id)
     )
     if class_id is not None:
@@ -192,7 +192,7 @@ async def list_school_homework(
             status=hw.status,
             assigned_count=hw.assigned_count,
             completed_count=hw.completed_count,
-            source="Speak with Milo" if hw.test_id else "Topic checkpoint",
+            source="Speak with Milo" if hw.test_id else "Set by teacher" if hw.chapter_id else "Topic checkpoint",
             created_at=hw.created_at,
         )
         for hw, school_class, subject_id in rows

@@ -197,7 +197,7 @@ async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student
 
     test = await session.get(VoiceTest, hw.test_id) if hw.test_id else None
     topic = await session.get(Topic, hw.topic_id) if hw.topic_id else None
-    chapter_id = test.chapter_id if test else topic.chapter_id if topic else None
+    chapter_id = test.chapter_id if test else topic.chapter_id if topic else hw.chapter_id
     chapter = await session.get(Chapter, chapter_id) if chapter_id else None
     subject = await session.get(Subject, chapter.subject_id) if chapter else None
     school_class = await session.get(SchoolClass, hw.class_id)
@@ -278,7 +278,8 @@ async def get_homework_context(
         topic_id = hw.topic_id
         chapter_id = (await session.execute(select(Topic.chapter_id).where(Topic.id == topic_id))).scalar()
     else:
-        chapter_id = (await session.execute(select(VoiceTest.chapter_id).where(VoiceTest.id == hw.test_id))).scalar()
+        chapter_id = hw.chapter_id or (await session.execute(
+            select(VoiceTest.chapter_id).where(VoiceTest.id == hw.test_id))).scalar()
         topic_id = (await session.execute(select(Topic.id).where(
             Topic.chapter_id == chapter_id, Topic.name == hw.gap_topic).limit(1))).scalar() if chapter_id else None
     book = await _textbook_reference(session, topic_id)

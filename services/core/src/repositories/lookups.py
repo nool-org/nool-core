@@ -4,6 +4,7 @@ the caller's school." Factored out here rather than duplicated across
 route modules.
 """
 
+from types import SimpleNamespace
 from uuid import UUID
 
 from sqlalchemy import select
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 
 from src.domain.models import (
-    Homework, Role, SchoolClass, StudentProfile, TestStatus, User, UserStatus, VoiceTest,
+    Chapter, Homework, Role, SchoolClass, StudentProfile, TestStatus, User, UserStatus, VoiceTest,
 )
 
 
@@ -101,9 +102,19 @@ async def get_homework_for_teacher(session: AsyncSession, homework_id: str, user
     """A homework in the caller's school AND in a class + subject they teach -
     a teacher can't generate, edit or assign another teacher's class's homework."""
     hw = await get_homework_in_school(session, homework_id, user.school_id)
-    test = await session.get(VoiceTest, hw.test_id)
-    await _ensure_teaches(session, user, hw.class_id, test.subject_id if test else None)
+    await _ensure_teaches(session, user, hw.class_id, (await homework_source(session, hw)).subject_id)
     return hw
+
+
+async def homework_source(session: AsyncSession, hw: Homework):
+    """What the homework's questions are built around: its voice test, or for
+    homework set straight from a chapter a stand-in with the same fields the
+    homework builder reads (class, subject, chapter; no topic)."""
+    if hw.test_id is not None:
+        return await session.get(VoiceTest, hw.test_id)
+    chapter = await session.get(Chapter, hw.chapter_id) if hw.chapter_id else None
+    return SimpleNamespace(id=hw.id, class_id=hw.class_id, subject_id=chapter.subject_id if chapter else None,
+                           chapter_id=hw.chapter_id, topic_id=None)
 
 
 async def get_test_for_teacher(session: AsyncSession, test_id: str, user: User, *, ready: bool = False) -> VoiceTest:

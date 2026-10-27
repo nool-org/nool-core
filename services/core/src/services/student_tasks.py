@@ -158,6 +158,26 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime, growt
     return out
 
 
+# ------------------------------------------------------------------ homework set on a chapter
+async def _chapter_homework_tasks(session: AsyncSession, student: User, now: datetime) -> list[dict]:
+    """Homework the teacher set straight from a chapter - a one-step task."""
+    rows = (await session.execute(
+        select(Homework, StudentHomeworkProgress, Chapter.name, Subject.name)
+        .join(StudentHomeworkProgress, (StudentHomeworkProgress.homework_id == Homework.id)
+              & (StudentHomeworkProgress.student_id == student.id))
+        .join(Chapter, Chapter.id == Homework.chapter_id)
+        .join(Subject, Subject.id == Chapter.subject_id)
+        .where(Homework.chapter_id.is_not(None), Homework.test_id.is_(None)))).all()
+    out = []
+    for hw, progress, chapter_name, subject_name in rows:
+        steps = [_homework_step(hw, progress, waiting=False, now=now)]
+        out.append({"id": f"homework:{hw.id}", "kind": "homework", "title": chapter_name,
+                    "subtitle": "Homework from your teacher", "subject": subject_name,
+                    "chapter_id": str(hw.chapter_id), "chapter_name": chapter_name,
+                    "state": _chain_state(steps), "result": None, "steps": steps, "sort_at": hw.created_at})
+    return out
+
+
 # ------------------------------------------------------------------ teacher tests
 async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) -> list[dict]:
     tests = await quiz_tests.tests_for(session, student)
@@ -240,6 +260,8 @@ async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
         tasks += await _test_tasks(session, student, now, growth=on(Feature.GROWTH_CHECK))
     if on(Feature.CLASS_TESTS):
         tasks += await _quiz_test_tasks(session, student, now)
+    if on(Feature.HOMEWORK):
+        tasks += await _chapter_homework_tasks(session, student, now)
 
     def stamp(value) -> float:
         if value is None:

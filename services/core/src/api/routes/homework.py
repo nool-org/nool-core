@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 
@@ -41,7 +41,9 @@ from src.domain.models import (
     VoiceTest,
 )
 from src.repositories.dataset_access import ensure_datasets_visible
-from src.repositories.lookups import ensure_students_in_class, get_homework_for_teacher
+from src.repositories.lookups import (
+    ensure_students_in_class, get_class_in_school, get_homework_for_teacher, homework_source,
+)
 from src.repositories.roster_repository import teaches_class_subject
 from src.services.question_selector import figure_svgs
 from src.services import push
@@ -82,11 +84,12 @@ async def _serialize(session: AsyncSession, hw: Homework) -> HomeworkOut:
         student_names = [name for _, name in targets]
     chapter_name = (await session.execute(
         select(Chapter.name).join(VoiceTest, VoiceTest.chapter_id == Chapter.id).where(VoiceTest.id == hw.test_id)
-    )).scalar_one_or_none()
+    )).scalar_one_or_none() if hw.test_id else (await session.get(Chapter, hw.chapter_id)).name if hw.chapter_id else None
 
     return HomeworkOut(
         id=str(hw.id),
-        test_id=str(hw.test_id),
+        test_id=str(hw.test_id) if hw.test_id else None,
+        chapter_id=str(hw.chapter_id) if hw.chapter_id else None,
         class_id=str(hw.class_id),
         gap_topic=hw.gap_topic,
         gap_mastery_percent=hw.gap_mastery_percent,
@@ -112,13 +115,15 @@ async def list_homework(
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[HomeworkOut]:
     # only homework of classes + subjects this teacher teaches
+    # the subject: the voice test's, or for homework set from a chapter, the chapter's
     result = await session.execute(
         select(Homework)
         .join(SchoolClass, SchoolClass.id == Homework.class_id)
-        .join(VoiceTest, VoiceTest.id == Homework.test_id)
+        .outerjoin(VoiceTest, VoiceTest.id == Homework.test_id)
+        .outerjoin(Chapter, Chapter.id == Homework.chapter_id)
         .join(TeacherClassAssignment, and_(
             TeacherClassAssignment.class_id == Homework.class_id,
-            TeacherClassAssignment.subject_id == VoiceTest.subject_id,
+            TeacherClassAssignment.subject_id == func.coalesce(VoiceTest.subject_id, Chapter.subject_id),
             TeacherClassAssignment.teacher_id == user.id))
         .where(SchoolClass.school_id == user.school_id)
         .distinct()
@@ -145,6 +150,8 @@ async def create_homework(
     _feature: User = Depends(require_feature(Feature.HOMEWORK)),
     session: AsyncSession = Depends(get_db_session),
 ) -> HomeworkOut:
+    if body.test_id is None:
+        return await _create_from_chapter(body, user, session)
     test_result = await session.execute(
         select(VoiceTest, SchoolClass.grade)
         .join(SchoolClass, SchoolClass.id == VoiceTest.class_id)
@@ -187,6 +194,43 @@ async def create_homework(
     return await _serialize(session, hw)
 
 
+async def _create_from_chapter(body: CreateHomeworkIn, user: User, session: AsyncSession) -> HomeworkOut:
+    """Homework the teacher sets on a chapter directly - same generate, review
+    and assign steps after; the questions are grounded in the chapter."""
+    if not body.class_id or not body.chapter_id:
+        raise ValidationError("Give a test, or a class and a chapter.")
+    school_class = await get_class_in_school(session, body.class_id, user.school_id)
+    chapter = await session.get(Chapter, _uuid(body.chapter_id))
+    if chapter is None:
+        raise NotFoundError("Chapter not found.")
+    if not await teaches_class_subject(session, user.id, school_class.id, chapter.subject_id):
+        raise ForbiddenError("You don't teach this subject in this class.")
+    await ensure_datasets_visible(session, user, body.dataset_ids, subject_id=chapter.subject_id,
+                                  grade=school_class.grade)
+    hw = Homework(
+        test_id=None, chapter_id=chapter.id, class_id=school_class.id, gap_topic=chapter.name,
+        gap_mastery_percent=0, total_questions=body.total_questions, difficulty=body.difficulty,
+        target_mode=AssignmentTargetMode.WHOLE_CLASS, status=HomeworkStatus.GENERATING,
+    )
+    session.add(hw)
+    await session.flush()
+    for dataset_id in body.dataset_ids:
+        session.add(HomeworkDataset(homework_id=hw.id, dataset_id=dataset_id))
+    school = await session.get(School, user.school_id)
+    for target in resolve_bloom_targets(school, body.bloom_distribution):
+        session.add(HomeworkBloomDistribution(homework_id=hw.id, bloom_level=target.level, value=target.value))
+    await session.commit()
+    await session.refresh(hw)
+    return await _serialize(session, hw)
+
+
+def _uuid(value: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError:
+        raise NotFoundError("Chapter not found.") from None
+
+
 @router.post("/homework/{homework_id}/generate")
 async def generate_homework(
     homework_id: str,
@@ -211,7 +255,7 @@ async def generate_homework(
         )
     ).scalars().all()
     bloom_distribution = {d.bloom_level: d.value for d in distribution_rows}
-    test = await session.get(VoiceTest, hw.test_id)
+    test = await homework_source(session, hw)
     picked = [row[0] for row in (await session.execute(
         select(HomeworkDataset.dataset_id).where(HomeworkDataset.homework_id == hw.id)
     )).all()]
@@ -364,7 +408,7 @@ async def replace_homework_question(
     bank first, else generated - with its own answer, never repeating a
     question already in this homework (the replaced one included)."""
     hw, question = await _question_in_review(session, homework_id, question_id, user)
-    test = await session.get(VoiceTest, hw.test_id)
+    test = await homework_source(session, hw)
     current = (await session.execute(
         select(HomeworkQuestion, DatasetQuestion)
         .outerjoin(DatasetQuestion, DatasetQuestion.id == HomeworkQuestion.source_question_id)

@@ -15,7 +15,7 @@ class TaskStepOut(CamelModel):
 
 class TaskOut(CamelModel):
     id: str
-    kind: Literal["topic", "test", "quiz_test"]
+    kind: Literal["topic", "test", "quiz_test", "homework"]  # homework: set by the teacher on a chapter
     title: str
     subtitle: str
     subject: str | None = None  # the subject's name - the app filters and colours by it
