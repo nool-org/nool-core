@@ -154,3 +154,32 @@ async def test_an_expired_test_leaves_the_list_and_cannot_be_started(db_session)
         await ai_assessor.open_session(
             OpenSessionIn(test_id=str(expired.id), context_label="x", bloom_levels=[], duration_seconds=600),
             app_user=student, db=db_session)
+
+
+async def test_a_test_scheduled_for_later_stays_hidden_and_cannot_be_started(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    import pytest
+
+    from shared.errors import ConflictError
+    from src.api.routes import ai_assessor
+    from src.api.schemas.ai_assessor import OpenSessionIn
+    from src.services import student_tasks
+
+    school = School(name=f"School-{uuid.uuid4()}", board="CBSE", city="Bengaluru", contact_email="a@b.com")
+    subject = Subject(name=f"Subject-{uuid.uuid4()}")
+    db_session.add_all([school, subject])
+    await db_session.flush()
+    student = await _seed_student(db_session, school.id)
+    later = await _seed_targeted_test(db_session, school_id=school.id, subject=subject)
+    later.scheduled_at = datetime.now(timezone.utc) + timedelta(hours=20)
+    db_session.add(VoiceTestTargetStudent(test_id=later.id, student_id=student.id))
+    await db_session.flush()
+
+    assert (await assigned_test.list_my_tests(user=student, session=db_session)).items == []
+    tasks = await student_tasks._test_tasks(db_session, student, datetime.now(timezone.utc))
+    assert tasks == []
+    with pytest.raises(ConflictError, match="hasn't opened"):
+        await ai_assessor.open_session(
+            OpenSessionIn(test_id=str(later.id), context_label="x", bloom_levels=[], duration_seconds=600),
+            app_user=student, db=db_session)

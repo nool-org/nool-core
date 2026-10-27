@@ -81,9 +81,15 @@ class VoiceTest(IdMixin, TimestampMixin, Base):
 
     @classmethod
     def still_open(cls):
-        """SQL filter: not past its deadline (never-scheduled rows have none)."""
-        return (cls.scheduled_at.is_(None)) | (
-            cls.scheduled_at + func.make_interval(0, 0, 0, 0, cls.completion_window_hours) > func.now())
+        """SQL filter: opened (a test scheduled for later stays hidden until
+        then) and not past its deadline (never-scheduled rows have neither).
+        clock_timestamp, not now(): now() is the transaction start, so a test
+        opened earlier in the same transaction would still read as "later"."""
+        return (cls.scheduled_at.is_(None)) | ((cls.scheduled_at <= func.clock_timestamp()) & (
+            cls.scheduled_at + func.make_interval(0, 0, 0, 0, cls.completion_window_hours) > func.now()))
+
+    def opens_later(self, now: datetime) -> bool:
+        return self.scheduled_at is not None and self.scheduled_at > now
 
 
 class VoiceTestBloomLevel(Base):

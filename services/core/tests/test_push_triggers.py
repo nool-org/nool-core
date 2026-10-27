@@ -76,6 +76,25 @@ async def test_a_push_failure_never_breaks_scheduling(db_session, broken):
     assert result.status == "SCHEDULED"
 
 
+async def test_a_test_scheduled_for_later_opens_then_and_pushes_nothing_now(db_session, sent, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from src.api.schemas.voice_test import ScheduleTestIn
+
+    real = voice_test.schedule_test
+    opens = datetime.now(timezone.utc) + timedelta(days=1)
+
+    async def later(test_id, user, _feature, session):
+        return await real(test_id, body=ScheduleTestIn(opens_at=opens), user=user, _feature=_feature, session=session)
+
+    monkeypatch.setattr(voice_test, "schedule_test", later)
+    result, _ = await _scheduled_test(db_session)
+    assert result.status == "SCHEDULED"
+    assert abs((result.opens_at - opens).total_seconds()) < 1
+    assert abs((result.due_at - (opens + timedelta(hours=48))).total_seconds()) < 1
+    assert sent == []
+
+
 async def _assign(db):
     school = await _hw_school(db)
     teacher = await _hw_teacher(db, school.id)

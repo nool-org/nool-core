@@ -1,8 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
@@ -12,6 +12,9 @@ from src.api.schemas.common import ListEnvelope
 from src.api.schemas.roster import AssignmentTarget
 from src.api.schemas.voice_test import (
     CreateTestIn,
+    RemindIn,
+    RemindOut,
+    ScheduleTestIn,
     SessionReviewListOut,
     SessionReviewOut,
     UpdateVoiceTestQuestionIn,
@@ -30,6 +33,7 @@ from src.domain.models import (
     Role,
     SchoolClass,
     StudentProfile,
+    StudentTestResult,
     TeacherClassAssignment,
     TestStatus,
     Topic,
@@ -77,6 +81,7 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> VoiceTestOut:
         completed_count=test.completed_count,
         created_at=test.created_at,
         due_at=test.due_at,
+        opens_at=test.scheduled_at,
     )
 
 
@@ -240,17 +245,31 @@ async def create_test(
 @router.post("/tests/{test_id}/schedule", summary="Make the Test live")
 async def schedule_test(
     test_id: str,
+    body: ScheduleTestIn | None = None,
     user: User = Depends(require_role(Role.TEACHER)),
     _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
     session: AsyncSession = Depends(get_db_session),
 ) -> VoiceTestOut:
     test = await get_test_for_teacher(session, test_id, user)
+    now = datetime.now(timezone.utc)
+    opens_at = body.opens_at if body and body.opens_at else None
+    if opens_at is not None:
+        if opens_at.tzinfo is None:
+            raise ValidationError("Give the opening time with its timezone.")
+        if opens_at > now + timedelta(days=30):
+            raise ValidationError("A test can open at most 30 days ahead.")
+    later = opens_at is not None and opens_at > now
     if test.status != TestStatus.DRAFT:
         raise ConflictError("Test isn't in a schedulable state.")
     await challenge_rules.ensure_one_per_chapter(session, test.class_id, test.chapter_id, "voice", ignore_id=test.id)
     test.status = TestStatus.SCHEDULED
-    test.scheduled_at = datetime.now(timezone.utc)
+    test.scheduled_at = opens_at if later else now  # the completion window starts when it opens
     await session.commit()
+    if later:
+        # ponytail: nothing pushes when a later test opens (no scheduler here,
+        # same as written tests); the teacher's Remind on the live screen covers it
+        await session.refresh(test)
+        return await _serialize(session, test)
     chapter = await session.get(Chapter, test.chapter_id)
     student_ids = (await session.execute(
         select(VoiceTestTargetStudent.student_id).where(VoiceTestTargetStudent.test_id == test.id))).scalars().all()
@@ -346,3 +365,73 @@ async def list_test_reviews(
         transcript=record.transcript or [],
         answers=record.answers or [],
     ) for record, student_id, name in rows])
+
+
+MAX_WINDOW_HOURS = 14 * 24
+
+
+def _ensure_live(test: VoiceTest) -> None:
+    if test.status == TestStatus.DRAFT or test.scheduled_at is None:
+        raise ConflictError("Schedule the test first.")
+    if test.due_at is not None and test.due_at <= datetime.now(timezone.utc):
+        raise ConflictError("This test has closed.")
+
+
+@router.post("/tests/{test_id}/remind", summary="Nudge students who haven't finished")
+async def remind_students(
+    test_id: str,
+    body: RemindIn,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> RemindOut:
+    test = await get_test_for_teacher(session, test_id, user)
+    _ensure_live(test)
+    targeted = set((await session.execute(
+        select(VoiceTestTargetStudent.student_id).where(VoiceTestTargetStudent.test_id == test.id))).scalars())
+    # finished = a result, or an attempt waiting for the teacher's review
+    done = set((await session.execute(union(
+        select(StudentTestResult.student_id).where(StudentTestResult.test_id == test.id),
+        select(AiAssessorSession.student_id)
+        .join(AiAssessorSessionRecord, AiAssessorSessionRecord.session_id == AiAssessorSession.id)
+        .where(AiAssessorSession.test_id == test.id, AiAssessorSessionRecord.needs_review.is_(True)),
+    ))).scalars())
+    pending = targeted - done
+    if body.student_ids is not None:
+        # only students this test was sent to - never someone from another class
+        pending &= {uuid.UUID(s) for s in body.student_ids if _is_uuid(s)}
+    if not pending:
+        raise ValidationError("Everyone you picked has already finished.")
+    chapter = await session.get(Chapter, test.chapter_id)
+    left = test.due_at - datetime.now(timezone.utc) if test.due_at else None
+    hours = max(1, int(left.total_seconds() // 3600)) if left else None
+    await push.notify(session, pending, f"Reminder: {chapter.name if chapter else 'Speak with Milo'}",
+                      f"Your teacher is waiting for your answers{f' - {hours} h left' if hours else ''}.",
+                      {"type": "voice_test", "testId": str(test.id)})
+    return RemindOut(reminded=len(pending))
+
+
+@router.post("/tests/{test_id}/extend", summary="Give students 24 more hours")
+async def extend_test(
+    test_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> VoiceTestOut:
+    test = await get_test_for_teacher(session, test_id, user)
+    if test.status == TestStatus.DRAFT or test.scheduled_at is None:
+        raise ConflictError("Schedule the test first.")
+    if test.completion_window_hours + 24 > MAX_WINDOW_HOURS:
+        raise ValidationError("A test can stay open for at most 14 days.")
+    test.completion_window_hours += 24  # also reopens one that just closed
+    await session.commit()
+    await session.refresh(test)
+    return await _serialize(session, test)
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True

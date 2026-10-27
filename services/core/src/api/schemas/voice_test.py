@@ -24,6 +24,21 @@ class VoiceTestOut(CamelModel):
     completed_count: int
     created_at: datetime
     due_at: datetime | None = None  # end of the completion window (set once scheduled)
+    opens_at: datetime | None = None  # when students can start it (set once scheduled; may be later)
+
+
+class RemindIn(CamelModel):
+    # None = everyone the test was sent to who hasn't finished
+    student_ids: list[str] | None = None
+
+
+class RemindOut(CamelModel):
+    reminded: int  # students told (each gets a push on every device they signed in on)
+
+
+class ScheduleTestIn(CamelModel):
+    # None = open now; a later time keeps it hidden from students until then
+    opens_at: datetime | None = None
 
 
 class CreateTestIn(CamelModel):

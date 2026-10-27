@@ -117,7 +117,7 @@ async def _test_tasks(session: AsyncSession, student: User, now: datetime, growt
     if not tests:
         return []
     taken = set((await session.execute(taken_test_ids(student.id))).scalars().all())
-    tests = [t for t in tests if t.id in taken or (t.due_at is None or t.due_at > now)]  # missed = gone
+    tests = [t for t in tests if t.id in taken or (not t.opens_later(now) and (t.due_at is None or t.due_at > now))]  # missed = gone, later = not yet
     homework = {hw.test_id: (hw, progress) for hw, progress in (await session.execute(
         select(Homework, StudentHomeworkProgress)
         .join(HomeworkTargetStudent, HomeworkTargetStudent.homework_id == Homework.id)
