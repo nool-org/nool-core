@@ -37,6 +37,8 @@ class ReportStudentOut(CamelModel):
     hints_used: int
     homework: Literal["none", "pending", "done"]
     recheck_score: int | None
+    # topic id -> this student's percent on it (the students-by-topic heatmap)
+    topic_scores: dict[str, int] = {}
 
 
 class ChallengeReportOut(CamelModel):

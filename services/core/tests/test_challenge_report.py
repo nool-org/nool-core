@@ -38,3 +38,8 @@ async def test_speak_with_milo_report_names_the_weak_topic_students_and_misconce
     done = next(s for s in report["students"] if s["status"] == "done")
     assert (done["weakest_topic"], done["weakest_skill"], done["hints_used"]) == ("Electric Power", "Spot patterns", 2)
     assert any(a.startswith("Re-teach Electric Power") for a in report["actions"])
+    # the students-by-topic heatmap: each topic's percent for the student, keyed by topic id
+    by_name = {t["topic_id"]: t["name"] for t in report["topics"]}
+    assert {by_name[t]: p for t, p in done["topic_scores"].items()} == {
+        t["name"]: t["percent"] for t in report["topics"]}  # one student, so theirs = the class's
+    assert next(s for s in report["students"] if s["status"] == "not_started")["topic_scores"] == {}

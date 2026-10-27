@@ -204,6 +204,7 @@ async def voice_report(session: AsyncSession, test: VoiceTest) -> dict:
             "weakest_topic": daily_practice.tidy(topics[weakest_topic].name) if weakest_topic in topics else None,
             "weakest_skill": SKILL_NAMES.get(weakest_skill or ""),
             "hints_used": hints[sid], "homework": hw_status.get(sid, "none"), "recheck_score": rechecks.get(sid),
+            "topic_scores": {str(t): p for t, p in student_topics[sid].items()},
         })
     return _finish(_base(test, "speak", school_class, chapter, students, topic_scores, topics, names,
                          skill_scores, [
@@ -275,6 +276,7 @@ async def quiz_report(session: AsyncSession, test: QuizTest) -> dict:
             "weakest_topic": daily_practice.tidy(topics[weakest_topic].name) if weakest_topic in topics else None,
             "weakest_skill": SKILL_NAMES.get(weakest_skill or ""), "hints_used": 0,
             "homework": hw_status.get(sid, "none"), "recheck_score": rechecks.get(sid),
+            "topic_scores": {str(t): p for t, p in student_topics[sid].items()},
         })
     return _finish(_base(test, "fix", school_class, chapter, students, topic_scores, topics, names, skill_scores, [
         {"text": q["text"], "level": SKILL_NAMES.get(q["level"], ""),
