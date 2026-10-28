@@ -258,3 +258,16 @@ def test_one_short_question_and_hints_that_only_ask():
     assert "gives away" in _problems(orig, leak)
     told = rewording("Where do parallel rays go after a convex mirror?").model_copy(update={"hints": ["Rays spread out from a convex mirror.", "Where do they go?"]})
     assert "never a statement" in _problems(orig, told)
+
+
+def test_prompts_give_one_word_limit_and_number_checks_in_order():
+    """AI-016: one length rule matching MAX_QUESTION_WORDS, verifier checks 1-8 then E, equations banned."""
+    import re
+
+    from src.services import voice_prep as vp
+
+    gen = vp.GENERATE_SYSTEM.format(board="CBSE", grade=10, subject="Science")
+    assert "35 words" not in gen and f"never more than {vp.MAX_QUESTION_WORDS}" in gen and "equation" in gen
+    verify = vp.VERIFY_SYSTEM.format(board="CBSE", grade=10, subject="Science")
+    assert re.findall(r"^(\d+|E)\. ", verify, re.M) == [*map(str, range(1, 9)), "E"]
+    assert "check E" in vp._Verdict.model_fields["easier_ok"].description
