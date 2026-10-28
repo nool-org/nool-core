@@ -183,3 +183,27 @@ async def test_a_test_scheduled_for_later_stays_hidden_and_cannot_be_started(db_
         await ai_assessor.open_session(
             OpenSessionIn(test_id=str(later.id), context_label="x", bloom_levels=[], duration_seconds=600),
             app_user=student, db=db_session)
+
+
+async def test_assigned_test_says_how_many_questions(db_session):
+    """V-003: the ready check shows '3 questions' before the student taps I'm ready."""
+    from src.domain.models import BloomLevel, VoiceTestQuestion
+
+    school = School(name=f"School-{uuid.uuid4()}", board="CBSE", city="Bengaluru", contact_email="a@b.com")
+    subject = Subject(name=f"Subject-{uuid.uuid4()}")
+    db_session.add_all([school, subject])
+    await db_session.flush()
+    student = await _seed_student(db_session, school.id)
+    test = await _seed_targeted_test(db_session, school_id=school.id, subject=subject)
+    db_session.add(VoiceTestTargetStudent(test_id=test.id, student_id=student.id))
+    await db_session.flush()
+    unprepared = await assigned_test.get_my_test(test_id=str(test.id), user=student, session=db_session)
+    assert unprepared.question_count is None  # questions not written yet
+
+    for order in (1, 2, 3):
+        db_session.add(VoiceTestQuestion(voice_test_id=test.id, order=order, bloom_level=BloomLevel.REMEMBER,
+                                         concepts=[], original_text="Q", reworded_text="Q?", spoken_text="Q",
+                                         expected_points=[]))
+    await db_session.flush()
+    fetched = await assigned_test.get_my_test(test_id=str(test.id), user=student, session=db_session)
+    assert fetched.question_count == 3

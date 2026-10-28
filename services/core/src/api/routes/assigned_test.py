@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, union
+from sqlalchemy import func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import NotFoundError
@@ -18,6 +18,7 @@ from src.domain.models import (
     User,
     VoiceTest,
     VoiceTestBloomLevel,
+    VoiceTestQuestion,
     VoiceTestTargetStudent,
 )
 
@@ -55,6 +56,9 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> AssignedTestOut:
         bloom_levels=[row[0] for row in bloom_result.all()],
         duration_minutes=test.duration_minutes,
         due_at=test.due_at,
+        question_count=await session.scalar(
+            select(func.count()).where(VoiceTestQuestion.voice_test_id == test.id)
+        ) or None,
     )
 
 
