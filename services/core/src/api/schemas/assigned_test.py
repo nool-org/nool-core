@@ -25,3 +25,5 @@ class AssignedTestOut(CamelModel):
     due_at: datetime | None = None  # deadline; the test leaves the list once it passes
     # how many questions Milo asks - None until they're prepared
     question_count: int | None = None
+    # set only while the test is scheduled for later: when it opens
+    opens_at: datetime | None = None

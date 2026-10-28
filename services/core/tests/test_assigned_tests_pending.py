@@ -207,3 +207,27 @@ async def test_assigned_test_says_how_many_questions(db_session):
     await db_session.flush()
     fetched = await assigned_test.get_my_test(test_id=str(test.id), user=student, session=db_session)
     assert fetched.question_count == 3
+
+
+async def test_assigned_test_says_when_a_scheduled_test_opens(db_session):
+    """V-007: a test scheduled for later says when it opens, on the ready check."""
+    from datetime import datetime, timedelta, timezone
+
+    school = School(name=f"School-{uuid.uuid4()}", board="CBSE", city="Bengaluru", contact_email="a@b.com")
+    subject = Subject(name=f"Subject-{uuid.uuid4()}")
+    db_session.add_all([school, subject])
+    await db_session.flush()
+    student = await _seed_student(db_session, school.id)
+    test = await _seed_targeted_test(db_session, school_id=school.id, subject=subject)
+    opens = datetime.now(timezone.utc) + timedelta(days=1)
+    test.scheduled_at = opens
+    db_session.add(VoiceTestTargetStudent(test_id=test.id, student_id=student.id))
+    await db_session.flush()
+
+    later = await assigned_test.get_my_test(test_id=str(test.id), user=student, session=db_session)
+    assert later.opens_at == opens
+
+    test.scheduled_at = datetime.now(timezone.utc) - timedelta(hours=1)  # now open
+    await db_session.flush()
+    now_open = await assigned_test.get_my_test(test_id=str(test.id), user=student, session=db_session)
+    assert now_open.opens_at is None

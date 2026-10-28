@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,6 +61,7 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> AssignedTestOut:
         question_count=await session.scalar(
             select(func.count()).where(VoiceTestQuestion.voice_test_id == test.id)
         ) or None,
+        opens_at=test.scheduled_at if test.opens_later(datetime.now(timezone.utc)) else None,
     )
 
 
