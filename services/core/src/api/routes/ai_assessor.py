@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy import exists, select, update
@@ -88,22 +88,41 @@ async def open_session(
             # the app waits and tries again on its own for this code (voice-session.tsx)
             raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.",
                                 code="QUESTIONS_PREPARING")
-    ai_session = AiAssessorSession(
-        student_id=app_user.id,
-        test_id=body.test_id,
-        context_label=body.context_label,
-        duration_seconds=body.duration_seconds,
-    )
-    db.add(ai_session)
-    await db.flush()
-    for level in body.bloom_levels:
-        db.add(AiAssessorSessionBloomLevel(session_id=ai_session.id, bloom_level=level))
-    await db.commit()
+    # the app reloaded (or dropped) mid-test: carry on in the same session - colearner picks
+    # up its answers and clock on the next /realtime - never a second one from zero
+    ai_session = await _unfinished_session(db, app_user.id, body.test_id)
+    resumed = ai_session is not None
+    if ai_session is None:
+        ai_session = AiAssessorSession(
+            student_id=app_user.id,
+            test_id=body.test_id,
+            context_label=body.context_label,
+            duration_seconds=body.duration_seconds,
+        )
+        db.add(ai_session)
+        await db.flush()
+        for level in body.bloom_levels:
+            db.add(AiAssessorSessionBloomLevel(session_id=ai_session.id, bloom_level=level))
+        await db.commit()
 
     questions = await _test_questions(db, body.test_id)
     # Fix Milo cards: what the screen shows when Milo asks that question - never the answer
     cards = [{"number": n, **question_types.public("fix_steps", q.card)} for n, q in enumerate(questions, 1) if q.card]
-    return OpenSessionOut(session_id=str(ai_session.id), question_count=len(questions), cards=cards)
+    return OpenSessionOut(session_id=str(ai_session.id), question_count=len(questions), cards=cards, resumed=resumed)
+
+
+async def _unfinished_session(db: AsyncSession, student_id, test_id) -> AiAssessorSession | None:
+    """This student's latest session on this test that never finished (no record) and
+    could still be live - the one a reload must carry on."""
+    if test_id is None:
+        return None
+    since = datetime.now(timezone.utc) - timedelta(seconds=ABANDONED_AFTER_SECONDS)
+    return await db.scalar(
+        select(AiAssessorSession).where(
+            AiAssessorSession.student_id == student_id, AiAssessorSession.test_id == test_id,
+            AiAssessorSession.created_at >= since,
+            ~exists().where(AiAssessorSessionRecord.session_id == AiAssessorSession.id),
+        ).order_by(AiAssessorSession.created_at.desc()).limit(1))
 
 
 async def _test_questions(db: AsyncSession, test_id) -> list[VoiceTestQuestion]:
@@ -334,7 +353,8 @@ async def realtime_offer(
         sdp=body.sdp, config=config, owner_ref=str(ai_session.id), token=_bearer(authorization)
     )
     _watch_for_abandon(ai_session.id, answer["call_id"], _bearer(authorization))
-    return RealtimeAnswerOut(sdp=answer["sdp"], call_id=answer["call_id"])
+    return RealtimeAnswerOut(sdp=answer["sdp"], call_id=answer["call_id"], resumed=bool(answer.get("resumed")),
+                             seconds_left=answer.get("seconds_left"))
 
 
 def _watch_for_abandon(session_id: uuid.UUID, call_id: str, token: str) -> None:

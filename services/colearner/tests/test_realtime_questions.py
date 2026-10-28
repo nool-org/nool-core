@@ -584,3 +584,46 @@ def test_a_wrong_card_tap_gets_no_why_milo_goes_on():
     call.items["t3"] = {"role": "user", "text": ""}
     rs._card_answer(call, _card_tap("t3", 1, 0)[0]["item"])
     assert call.redirect is None
+
+
+def test_a_reconnect_resumes_the_same_test_with_its_answers_and_clock(monkeypatch):
+    """V-001: the app reloaded on question 2 - the new call carries on from there: Q1's
+    answer kept for grading, the clock less what was used, and no second greeting."""
+    first = FakeWS([*_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+                    _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+                    *_user("u1", "Current is flow of charge"),
+                    _tool("ask_question", 2, "c2"), *_assistant("a2", "Question 2 text?")])
+    monkeypatch.setattr(rs, "ws_connect", lambda *a, **k: first)
+    hangups = []
+
+    async def fake_hangup(call_id, key):
+        hangups.append(call_id)
+
+    monkeypatch.setattr(rs, "_hangup", fake_hangup)
+    rs._calls.clear()
+
+    async def scenario():
+        old = rs.RealtimeCall(call_id="call_1", owner_ref="s1", state=rs.session_store.create_session(_config()))
+        rs._calls["call_1"] = old
+        old.task = asyncio.create_task(rs._sideband(old, "k"))
+        await asyncio.sleep(0.05)  # the first call answers Q1 and asks Q2, then the page reloads
+        new = await rs._resume(old, "call_2")
+        second = FakeWS([])
+        monkeypatch.setattr(rs, "ws_connect", lambda *a, **k: second)
+        new.task = asyncio.create_task(rs._sideband(new, "k"))
+        await asyncio.sleep(0.05)
+        left = rs._seconds_left(new)
+        new.task.cancel()
+        await new.ended.wait()
+        return old, new, second, left
+
+    old, new, second, left = asyncio.run(scenario())
+    assert hangups[0] == "call_1" and "call_1" not in rs._calls  # the old call is gone for good
+    assert new.resumed and new.state is old.state and new.current == 2
+    limit = rs.call_time_limit(new.state.config)
+    assert 0 < new.clock_used < 1 and limit - 1 < left <= limit - new.clock_used  # the clock carried on
+    opening = second.sent[0]["response"]["instructions"]
+    assert "Don't greet again" in opening and "call ask_question with 2" in opening
+    answers = rs.question_answers(new)
+    assert answers[0]["first_answer"] == "Current is flow of charge"  # Q1 kept for grading
+    assert answers[1]["first_answer"] is None

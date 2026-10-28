@@ -224,6 +224,12 @@ class RealtimeCall:
     paused_seconds: float = 0.0
     pauses: int = 0
     deadline: asyncio.Timeout | None = None
+    # Test clock across reconnects (see _resume): seconds used by earlier calls of this
+    # session, and loop time this call's clock started (None: not yet).
+    clock_used: float = 0.0
+    clock_from: float | None = None
+    ended_loop: float | None = None
+    resumed: bool = False
 
 
 _calls: dict[str, RealtimeCall] = {}
@@ -339,8 +345,10 @@ def call_time_limit(config: SessionConfig) -> int:
     return min(config.session_max_time_seconds, MAX_CALL_SECONDS)
 
 
-async def create_call(*, sdp_offer: str, config: SessionConfig, owner_ref: str) -> tuple[str, str]:
-    """Returns (sdp_answer, call_id) and starts the sideband recorder."""
+async def create_call(*, sdp_offer: str, config: SessionConfig, owner_ref: str) -> tuple[str, RealtimeCall]:
+    """Returns (sdp_answer, call) and starts the sideband recorder.
+    call.resumed: an unfinished earlier call of the same session (owner_ref) - the app
+    reloaded or dropped - is carried on: its answers, progress and clock (_resume)."""
     key = _api_key()
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(
@@ -359,10 +367,50 @@ async def create_call(*, sdp_offer: str, config: SessionConfig, owner_ref: str) 
         raise RealtimeError("Live voice call started without a call id.")
 
     _prune()
-    call = RealtimeCall(call_id=call_id, owner_ref=owner_ref, state=session_store.create_session(config))
+    previous = next((c for c in reversed(_calls.values()) if c.owner_ref == owner_ref and c.report is None
+                     and config.questions and not c.state.is_completed), None)
+    if previous is not None:
+        call = await _resume(previous, call_id)
+    else:
+        call = RealtimeCall(call_id=call_id, owner_ref=owner_ref, state=session_store.create_session(config))
     _calls[call_id] = call
     call.task = asyncio.create_task(_sideband(call, key))
-    return response.text, call_id
+    return response.text, call
+
+
+async def _resume(previous: RealtimeCall, call_id: str) -> RealtimeCall:
+    """Hangs up the dead earlier call and moves what it recorded into the new one: one
+    session, one transcript, one grade. The clock carries on from what was used (the time
+    away doesn't count; the pause allowance starts afresh). The old call id is dropped,
+    so a late finish on it can't grade half a test."""
+    if previous.task and not previous.task.done():
+        previous.task.cancel()
+    await previous.ended.wait()
+    _calls.pop(previous.call_id, None)
+    used = previous.clock_used
+    if previous.clock_from is not None and previous.ended_loop is not None:
+        paused = previous.paused_seconds + (previous.ended_loop - previous.paused_at
+                                            if previous.paused_at is not None else 0.0)
+        used += max(previous.ended_loop - previous.clock_from - paused, 0.0)
+    logger.info("realtime_call_resumed call_id=%s previous=%s current=%s clock_used=%.0f",
+                call_id, previous.call_id, previous.current, used)
+    return RealtimeCall(
+        call_id=call_id, owner_ref=previous.owner_ref, state=previous.state, items=previous.items,
+        spoken_turns=previous.spoken_turns, replies=previous.replies, usage=previous.usage,
+        current=previous.current, item_question=previous.item_question, item_kind=previous.item_kind,
+        last_user_item=previous.last_user_item, progress=previous.progress, pauses=previous.pauses,
+        clock_used=used, resumed=True)
+
+
+def _resume_instructions(call: RealtimeCall) -> str:
+    """Milo's first words on a resumed call: no second greeting - straight back to the
+    question the student is on (the current one if unanswered, else the next)."""
+    n = call.current + (_progress(call, call.current)["first_item"] is not None)
+    if n > len(call.state.config.questions):
+        return "Every question is answered. Call end_session now, without speaking."
+    return ("The connection dropped and the student is back; the test carries on where it stopped and their "
+            "earlier answers are kept. Don't greet again and don't ask if they are ready: say one short "
+            f"welcome-back line, then call ask_question with {n} and say what it returns.")
 
 
 def _prune() -> None:
@@ -381,11 +429,17 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
         ) as ws:
             # The model speaks first (greeting) - nothing arrives from the
             # student until they hear it.
-            await _send_response(call, ws, json.dumps({"type": "response.create"}))
+            first = {"type": "response.create"}
+            if call.resumed:
+                first["response"] = {"instructions": build_question_instructions(call.state.config)
+                                     + "\n\nRIGHT NOW: " + _resume_instructions(call)}
+            await _send_response(call, ws, json.dumps(first))
             try:
                 # absolute cap until question 1 starts the real clock (_start_clock)
                 limit = call_time_limit(call.state.config) + READY_ALLOWANCE_SECONDS
                 async with asyncio.timeout(limit) as call.deadline:
+                    if call.current:  # resumed mid-test: the clock is already running
+                        _start_clock(call)
                     await _record(call, ws)
                 call.deadline = None
             except asyncio.TimeoutError:
@@ -417,6 +471,7 @@ async def _sideband(call: RealtimeCall, key: str) -> None:
         logger.exception("realtime_sideband_failed call_id=%s", call.call_id)
     finally:
         _cancel_silence(call)
+        call.ended_loop = asyncio.get_running_loop().time()
         call.ended_at = datetime.now()
         call.ended.set()
         await _hangup(call.call_id, key)
@@ -642,11 +697,15 @@ def _card_answer(call: RealtimeCall, item: dict) -> None:
 
 
 def _start_clock(call: RealtimeCall) -> None:
-    """Question 1 has begun: the time limit counts from now, never past the absolute
-    cap _sideband set. Later calls change nothing (the deadline is already sooner)."""
+    """Question 1 has begun (or a resumed call reconnected): the time limit, less what
+    earlier calls used, counts from now, never past the absolute cap _sideband set.
+    Later calls change nothing (the deadline is already sooner)."""
     if call.deadline:
         now = asyncio.get_running_loop().time()
-        call.deadline.reschedule(min(call.deadline.when(), now + call_time_limit(call.state.config)))
+        if call.clock_from is None:
+            call.clock_from = now
+        limit = call_time_limit(call.state.config) - call.clock_used  # less what earlier calls used (_resume)
+        call.deadline.reschedule(min(call.deadline.when(), now + limit))
 
 
 def _seconds_left(call: RealtimeCall) -> float:

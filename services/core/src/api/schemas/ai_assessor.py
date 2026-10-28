@@ -19,6 +19,8 @@ class OpenSessionOut(CamelModel):
     question_count: int = 0  # the test's prepared questions (0: none, the co-learner improvises)
     # Fix Milo cards: {number, problem, steps, fixes} - shown when Milo asks question `number`
     cards: list[dict] = []
+    # an unfinished session of this test reopened (the app reloaded mid-test) - see RealtimeAnswerOut.resumed
+    resumed: bool = False
 
 
 class SessionSummary(CamelModel):
@@ -37,6 +39,9 @@ class RealtimeOfferIn(CamelModel):
 class RealtimeAnswerOut(CamelModel):
     sdp: str
     call_id: str
+    # the live call carried on the session's earlier answers and clock (False: it starts over)
+    resumed: bool = False
+    seconds_left: int | None = None  # resumed only: test time left on the clock
 
 
 class FinishSessionIn(CamelModel):

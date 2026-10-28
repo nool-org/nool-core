@@ -28,6 +28,10 @@ class CreateCallIn(BaseModel):
 class CreateCallOut(BaseModel):
     sdp: str
     call_id: str
+    # carries on this session's earlier, unfinished call (app reloaded / connection dropped)
+    resumed: bool = False
+    # resumed only: test seconds left on the clock (the app's timer carries on from here)
+    seconds_left: int | None = None
 
 
 class FinishCallIn(BaseModel):
@@ -40,15 +44,17 @@ async def create_call(body: CreateCallIn, _user: AuthenticatedUser = Depends(get
     """WebRTC 'unified interface': the client's SDP offer in, OpenAI's SDP
     answer out. See realtime_service's module docstring."""
     try:
-        answer, call_id = await realtime_service.create_call(
+        answer, call = await realtime_service.create_call(
             sdp_offer=body.sdp, config=body.config, owner_ref=body.owner_ref
         )
     except realtime_service.RealtimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    call_id = call.call_id
     # joins realtime_call_cost (logged by call_id at hang-up) to the student - scripts/cost_report.py
     logger.info("realtime_call_started call_id=%s owner_ref=%s student=%s school=%s feature=%s", call_id,
                 body.owner_ref, caller.get("student", ""), caller.get("school", ""), caller.get("feature", ""))
-    return CreateCallOut(sdp=answer, call_id=call_id)
+    left = max(round(realtime_service.call_time_limit(body.config) - call.clock_used), 0) if call.resumed else None
+    return CreateCallOut(sdp=answer, call_id=call_id, resumed=call.resumed, seconds_left=left)
 
 
 @router.post("/colearner/realtime/calls/{call_id}/finish", summary="End a live voice call and score it")

@@ -207,6 +207,27 @@ async def test_open_session_waits_for_prep_and_returns_the_question_count(schema
     assert out.question_count == 2
 
 
+async def test_reopening_an_unfinished_test_carries_on_the_same_session(schema, monkeypatch):
+    """V-001: a reload mid-test opens the session again - it must be the same one (colearner
+    then resumes its answers and clock), not a second one from zero that mixes into the result."""
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER,))
+    student = await _targeted_student(db, s)
+    s["test"].prep_status = VoiceTestPrepStatus.FAILED
+    await db.flush()
+
+    first = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
+    again = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
+    assert not first.resumed
+    assert again.session_id == first.session_id and again.resumed
+
+    # finished (a record exists): a later open is a new session
+    db.add(AiAssessorSessionRecord(session_id=first.session_id, report={}))
+    await db.flush()
+    after = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
+    assert after.session_id != first.session_id and not after.resumed
+
+
 # --------------------------------------------------------- pending lists
 async def test_an_attempt_waiting_for_review_is_not_pending(schema):
     db = schema
