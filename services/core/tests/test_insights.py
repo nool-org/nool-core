@@ -193,6 +193,8 @@ async def test_numbers_cards_and_words(db, monkeypatch):
     assert out.cards[0].question_text == "Question 2?"
     assert out.cards[0].you_said == "multiply them"
     assert out.cards[0].missed_points == ["Use V = IR", "Units are ohms"]
+    # each card's own score, so the app can pick the weakest as "One thing to fix" (V-005)
+    assert [c.score_percent for c in out.cards] == [40, 35]
     assert out.cards[0].key_idea == "Voltage is current times resistance."
     assert out.cards[1].key_idea == "P = VI"  # colearner skipped it -> template
     assert out.cards[1].missed_points == []  # its only missed point is the key idea - shown once (AI-004)

@@ -23,6 +23,8 @@ class InsightCard(CamelModel):
     you_said: str
     key_idea: str
     missed_points: list[str]
+    # the grader's score for this answer - the app's "One thing to fix" is the lowest
+    score_percent: int | None = None
 
 
 class InsightNextStep(CamelModel):

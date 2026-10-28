@@ -80,6 +80,7 @@ def build_cards(qa: list[dict], questions: dict[int, VoiceTestQuestion], answers
         expected = list(question.expected_points or []) if question else []
         cards.append({
             "question_number": number if isinstance(number, int) else 0,
+            "score_percent": round(score),
             "question_text": (question.reworded_text if question else None) or str(entry.get("question_asked") or ""),
             "you_said": " ".join(str(heard.get(number) or entry.get("student_response") or "").split()),
             "expected_points": expected,
@@ -243,6 +244,7 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         "topics": topics,
         "cards": [{
             "question_number": c["question_number"], "question_text": c["question_text"], "you_said": c["you_said"],
+            "score_percent": c["score_percent"],
             # the key idea is often a missed point word for word (always in the template): show it once
             "missed_points": [p for p in c["missed_points"] if _norm(p) != _norm(key_idea)],
             "key_idea": key_idea,
