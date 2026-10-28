@@ -77,6 +77,7 @@ def build_cards(qa: list[dict], questions: dict[int, VoiceTestQuestion]) -> list
         expected = list(question.expected_points or []) if question else []
         cards.append({
             "question_number": number if isinstance(number, int) else 0,
+            "score_percent": round(score),
             "question_text": (question.reworded_text if question else None) or str(entry.get("question_asked") or ""),
             "you_said": str(entry.get("student_response") or ""),
             "expected_points": expected,
@@ -240,7 +241,7 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         "topics": topics,
         "cards": [{
             "question_number": c["question_number"], "question_text": c["question_text"],
-            "you_said": c["you_said"], "missed_points": c["missed_points"],
+            "you_said": c["you_said"], "missed_points": c["missed_points"], "score_percent": c["score_percent"],
             "key_idea": words["key_ideas"].get(c["question_number"]) or fallback["key_ideas"][c["question_number"]],
         } for c in cards],
         "next_steps": (list(words["next_steps"]) + fallback["next_steps"])[:3],
