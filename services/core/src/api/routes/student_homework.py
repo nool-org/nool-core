@@ -229,7 +229,8 @@ async def _ensure_insight_generated(session: AsyncSession, hw: Homework, student
     if gap is None and test is not None:
         focus = (await homework_autogen.weak_spots(session, test_id=test.id, student_id=student_id)).get("focus")
         gap = await session.get(Topic, focus.topic_id) if focus and focus.topic_id else None
-    gap_name = f"{hw.gap_topic} - {daily_practice.tidy(gap.name)}" if gap and topic is None else hw.gap_topic
+    gap_name = (f"{hw.gap_topic} - {daily_practice.tidy(gap.name)}" if gap and topic is None
+                and gap.name != hw.gap_topic else hw.gap_topic)  # gap_topic is the weak topic itself now
 
     try:
         insight = await generate_homework_insight(
