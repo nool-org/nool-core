@@ -42,7 +42,6 @@ from src.services.feature_entitlements import effective_enabled_features
 
 # (share of the window used, bonus): done in the first quarter -> 30 XP, ...
 EARLY_BONUS = [(0.25, 30), (0.5, 20), (1.0, 10)]
-DONE_SHOWN = 10  # finished tasks listed under the open ones
 
 
 def early_bonus_xp(set_at: datetime, window_hours: int | None, done_at: datetime) -> int:
@@ -235,7 +234,8 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
 
 async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
     """Open tasks first (the soonest deadline first, then the newest), then
-    the last DONE_SHOWN finished ones - only of the modules the school has on."""
+    every finished one, newest first - only of the modules the school has on. All of
+    them: Today's ring counts done / total from this list (the app pages it)."""
     now = datetime.now(timezone.utc)
     enabled = effective_enabled_features(
         plan=await get_active_plan(session, student.school_id) if student.school_id else None,
@@ -275,7 +275,7 @@ async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
         return min(stamp(d) for d in dues) if dues else float("inf")
 
     open_ = sorted((t for t in tasks if t["state"] == "open"), key=lambda t: (deadline(t), -stamp(t["sort_at"])))
-    done = sorted((t for t in tasks if t["state"] == "done"), key=lambda t: -stamp(t["sort_at"]))[:DONE_SHOWN]
+    done = sorted((t for t in tasks if t["state"] == "done"), key=lambda t: -stamp(t["sort_at"]))
     for t in open_ + done:
         t.pop("sort_at")
     return open_ + done

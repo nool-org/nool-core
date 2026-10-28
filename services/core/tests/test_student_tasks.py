@@ -5,6 +5,7 @@ its XP paid once on completion.
 Real rows against the dev Postgres via db_session (seeded like the topic
 quiz and MCQ check tests); no model calls."""
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks
@@ -21,6 +22,7 @@ from src.domain.models import (
     StudentHomeworkStatus,
     StudentPoints,
     TestStatus as VoiceTestStatus,
+    User,
     VoiceTestTargetStudent,
 )
 from src.services import student_tasks as service
@@ -132,3 +134,23 @@ async def test_voice_test_task_runs_test_homework_mcq_check(db_session):
                                                       user=s["student"], session=db_session)
     assert again.early_bonus_xp == 0  # paid once
     assert (await db_session.get(StudentPoints, s["student"].id)).points == points.points
+
+
+async def test_every_finished_task_is_listed_so_the_ring_counts_up(db_session, monkeypatch):
+    """V-009/S-002: only the 10 newest done tasks came back, so a test finished after them vanished
+    and Today's done / total ring stayed at 10."""
+    async def none(*args, **kwargs):
+        return []
+
+    async def finished(*args, **kwargs):
+        return [{"id": f"homework:{i}", "state": "done", "steps": [], "sort_at": datetime(2026, 10, i + 1, tzinfo=timezone.utc)}
+                for i in range(12)]
+
+    monkeypatch.setattr(topic_quiz, "loop_of", none)
+    monkeypatch.setattr(service, "_test_tasks", none)
+    monkeypatch.setattr(service, "_quiz_test_tasks", none)
+    monkeypatch.setattr(service, "_chapter_homework_tasks", finished)
+
+    tasks = await service.tasks_for(db_session, User(id=uuid.uuid4(), school_id=None))
+
+    assert len(tasks) == 12 and tasks[0]["id"] == "homework:11"
