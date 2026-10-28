@@ -145,7 +145,8 @@ async def test_generate_takes_about_a_quarter_from_the_visible_bank_and_kg_write
     async def fake_generate_paper_questions(**kwargs):
         captured.update(kwargs)
         return [{"text": f"AI question {i} about algebra?", "answer": "x", "bloom_level": s["bloom_level"],
-                 "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": ""}
+                 "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": "",
+                 "options": ["a", "b", "c", "x"]}
                 for i, s in enumerate(kwargs["slots"])]
 
     monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions",
@@ -210,7 +211,8 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
         asked.append(len(kwargs["slots"]))
         n = short.pop("n", len(kwargs["slots"]))
         return [{"text": f"AI question {len(asked)}.{i}?", "answer": "x", "bloom_level": s["bloom_level"],
-                 "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": ""}
+                 "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": "",
+                 "options": ["a", "b", "c", "x"]}
                 for i, s in enumerate(kwargs["slots"][:n])]
 
     monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions",
@@ -236,3 +238,28 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
 
     with pytest.raises(ConflictError):  # nothing left to fill
         await question_paper.fill_missing(seeded["paper_id"], user=teacher, session=db_session)
+
+
+@pytest.mark.asyncio
+async def test_kg_questions_land_by_slot_index_and_an_mcq_without_options_is_not_saved(db_session, monkeypatch):
+    """C-009/AI-009: kg answers out of order and one MCQ has no options - each
+    question keeps its own slot's marks and the optionless MCQ is dropped."""
+    teacher, seeded = await _seed_paper_ready_to_generate(db_session)
+    monkeypatch.setattr(question_paper, "_bank_slots", lambda *a, **k: _no_bank())
+    slots_seen = []
+
+    async def fake_generate_paper_questions(**kwargs):
+        slots_seen.extend(kwargs["slots"])
+        out = [{"text": f"Q for slot {i}?", "answer": "x", "bloom_level": s["bloom_level"], "difficulty": s["difficulty"],
+                "question_type": "short_answer", "chapter_number": 3, "topic": "", "slot_index": i}
+               for i, s in enumerate(kwargs["slots"])]
+        out[1].update(question_type="mcq", options=None)
+        return list(reversed(out))
+
+    monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions",
+                        fake_generate_paper_questions)
+    await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
+    questions = (await question_paper.list_paper_questions(seeded["paper_id"], user=teacher, session=db_session)).items
+    expected = [i for i in range(len(slots_seen)) if i != 1]
+    assert [q.text for q in questions] == [f"Q for slot {i}?" for i in expected]
+    assert [q.marks for q in questions] == [slots_seen[i]["marks"] for i in expected]

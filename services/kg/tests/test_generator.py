@@ -14,7 +14,7 @@ from src.services import generator
 QUESTION = {
     "text": "What is a balanced equation?", "answer": "Equal atoms on each side.", "bloom_level": "REMEMBER",
     "difficulty": "EASY", "question_type": "short_answer", "chapter_number": 1, "topic": "1.1",
-    "source_refs": ["CH01_T01"],
+    "source_refs": ["CH01_T01"], "slot_index": None, "options": None,
 }
 CONTEXT = [{"chapter_number": 1, "topic": "1.1", "topic_ref": "CH01_T01", "text_content": "..."}]
 
@@ -27,7 +27,8 @@ class FakeOpenAI:
 
     async def _create(self, **kwargs):
         self.calls.append(kwargs)
-        message = SimpleNamespace(content=json.dumps(self.payload), refusal=None)
+        payload = self.payload.pop(0) if isinstance(self.payload, list) else self.payload
+        message = SimpleNamespace(content=json.dumps(payload), refusal=None)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
@@ -136,5 +137,25 @@ def test_slots_replace_the_distributions_in_the_prompt():
         concept_context=CONTEXT, bloom_distribution={"REMEMBER": 25}, difficulty_distribution={},
         question_types=[], total_questions=2, slots=slots)
     assert "exactly 2 questions, IN THIS ORDER" in msg
-    assert json.dumps(slots) in msg
+    assert json.dumps([{"slot_index": 0, **slots[0]}, {"slot_index": 1, **slots[1]}]) in msg
     assert "level: count" not in msg
+
+
+def test_schema_has_options_and_slot_index():
+    item = generator.GENERATED_QUESTIONS_SCHEMA["properties"]["questions"]["items"]
+    assert {"options", "slot_index"} <= set(item["required"])
+
+
+@pytest.mark.asyncio
+async def test_verifier_drops_a_question_with_a_wrong_answer(fake):
+    wrong = {**QUESTION, "text": "pH 2, 6, 8, 13: which two mixed give pH 7?", "question_type": "mcq",
+             "options": ["2 and 6", "2 and 13", "6 and 8", "8 and 13"], "answer": "2 and 13"}
+    client = fake([{"questions": [QUESTION, wrong]},
+                   {"verdicts": [{"index": 0, "ok": True, "problem": ""},
+                                 {"index": 1, "ok": False, "problem": "mix is pH ~12.7; answer is 6 and 8"}]}])
+    questions = await generator.generate_questions(
+        api_key="k", board="CBSE", grade=10, subject="Science", concept_context=CONTEXT,
+        bloom_distribution={}, difficulty_distribution={}, question_types=[], total_questions=2,
+    )
+    assert questions == [QUESTION]
+    assert client.calls[1]["model"] == generator.VERIFY_MODEL
