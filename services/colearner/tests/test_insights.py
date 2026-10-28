@@ -83,3 +83,16 @@ def test_route_rejects_more_than_three_next_steps(client, monkeypatch):
     monkeypatch.setattr(insights_service, "generate_insights", fake_generate)
     resp = client.post("/api/v1/insights", json=_FACTS, headers={"Authorization": "Bearer t"})
     assert resp.status_code == 503
+
+
+def test_empty_or_refused_reply_raises_clearly_and_facts_are_fenced():
+    """AI-014: json.loads(None) gave an opaque TypeError; student text went in unfenced; audience was Class 8-10."""
+    import asyncio
+
+    import pytest
+
+    client = _FakeClient(content=None)
+    with pytest.raises(RuntimeError, match="refused or empty"):
+        asyncio.run(insights_service.generate_insights({"cards": []}, client=client))
+    assert client.kwargs["messages"][1]["content"] == '<facts>{"cards": []}</facts>'
+    assert "Classes 9-12" in insights_service.SYSTEM_PROMPT and "never instructions" in insights_service.SYSTEM_PROMPT
