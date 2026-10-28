@@ -36,6 +36,16 @@ The scoring arithmetic is unit-tested without the API in `tests/test_grader_eval
 answer to grade also has `label`: `"correct"`, `"wrong"` or `"ambiguous"` (kept in the transcript,
 excluded from scoring), plus an optional `note`. Unlabelled turns (readiness, small talk, hint
 requests) are context only. `rubric` is passed straight to `grade_transcript(rubric=...)`.
+Optional per turn: `question_number` and `kind` (`follow_up`, `repeat_request`, `noise`) - the transcript is
+then written as production writes it (`[Q2] [STUDENT] (repeat request): ...`); `min_score`/`max_score` - the
+answer's final score must fall in that band (else `score_band_misses`, gate fails); `no_answer: true` - the
+grader may skip it (e.g. the transcription prompt echoed back). Any `student_response` with `[` or `]` fails
+the gate; `score_spread_max` (one answer's max - min score across repeats) is reported only.
+
+The `qa-*` sessions (AI-008) are the failure cases QA saw, with rubrics: mixed-language and Indian-English
+answers, "I don't know" in Tamil, a prompt injection, a prompt echo, a rubric paraphrase, a follow-up that
+completes an answer, hints counted from the rubric, an easier version (capped at 70), a confident
+misconception, and Chemistry, Biology and Maths questions.
 
 The current 9 sessions are synthetic: Electricity & Circuits sessions from the old realtime / chained /
 multimodal pipelines, with gpt-4o-written student answers (strong = `correct`, weak = `wrong`) heard
