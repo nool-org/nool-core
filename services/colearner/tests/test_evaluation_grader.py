@@ -11,7 +11,7 @@ from src.services.session_store import session_store
 def _answer(n, level, score, correct, hints=0):
     return {
         "question_number": n, "blooms_attribute": level, "question_asked": f"Q{n}?", "student_response": f"A{n}",
-        "probing_or_hints_given": None, "points_covered": [], "misconception": None, "score_percent": score,
+        "probing_or_hints_given": None, "key_points_met": [], "misconception": None, "score_percent": score,
         "is_substantively_correct": correct, "reason": "r", "confidence": 0.9, "hints_used": hints,
     }
 
@@ -153,3 +153,12 @@ def test_rubric_says_how_many_points_a_two_or_three_question_needs():
     rubric = build_rubric([q("Tell me two or three uses of copper."), q("Why does a wire get hot?")], {})
     assert [r["points_needed"] for r in rubric] == [2, 3]
     assert "points_needed" in grader.SYSTEM_PROMPT
+
+
+def test_points_covered_are_the_rubric_points_the_model_numbered():
+    """AI-004: free-text points_covered never matched the rubric wording, so said points showed as missed."""
+    a = {**_answer(1, "Understanding", 60, True), "key_points_met": [2, 2, 9, 0]}
+    _, report = _grade(_FakeClient({"overall_feedback": "", "answers": [a]}),
+                       rubric=[{"question_number": 1, "key_points": ["A", "B", "C"]}])
+    assert report["qa_transcripts"][0]["points_covered"] == ["B"]
+    assert "key_points_met" in grader.RESPONSE_FORMAT["json_schema"]["schema"]["properties"]["answers"]["items"]["required"]

@@ -39,7 +39,7 @@ _ANSWER_SCHEMA = {
         "question_asked": {"type": "string"},
         "student_response": {"type": "string"},
         "probing_or_hints_given": {"type": ["string", "null"]},
-        "points_covered": {"type": "array", "items": {"type": "string"}},
+        "key_points_met": {"type": "array", "items": {"type": "integer"}},
         "misconception": {"type": ["string", "null"]},
         "score_percent": {"type": "integer"},
         "is_substantively_correct": {"type": "boolean"},
@@ -49,7 +49,7 @@ _ANSWER_SCHEMA = {
     },
     "required": [
         "question_number", "blooms_attribute", "question_asked", "student_response", "probing_or_hints_given",
-        "points_covered", "misconception", "score_percent", "is_substantively_correct", "reason", "confidence",
+        "key_points_met", "misconception", "score_percent", "is_substantively_correct", "reason", "confidence",
         "hints_used",
     ],
 }
@@ -79,7 +79,7 @@ For every substantive question the Co-Learner asked, and the student's answer to
 - question_asked: the question itself (without the Co-Learner's acknowledgement of the previous answer).
 - student_response: the student's own words for this answer, copied exactly from the STUDENT turns (join the turns for this question with " ... "). Never summarise, translate, describe, or add notes or brackets. If the student said nothing usable, return "".
 - probing_or_hints_given: any hint or probe the Co-Learner gave on this question, else null.
-- points_covered: the correct key points the answer actually states (empty if none).
+- key_points_met: the numbers (1-based) of this question's rubric key_points that the answer states correctly, in meaning - everyday words count. [] if none or no rubric.
 - misconception: the specific wrong idea the answer contains, else null.
 - score_percent: 0-100 for how well the answer shows correct understanding at the target level.
 - is_substantively_correct: true only if the core idea of the answer is scientifically/factually correct.
@@ -149,13 +149,17 @@ def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str,
     `planned` [(bloom level, question text)] in order: questions after the last one answered weren't
     reached in time and score 0 - a slow student is behind, and the mastery says so."""
     easier = {r.get("question_number") for r in rubric or [] if r.get("version") == "easier"}
+    key_points = {r.get("question_number"): r.get("key_points") or [] for r in rubric or []}
     qa = []
     for a in graded.get("answers") or []:
         raw = _clamp_score(a["score_percent"])
+        kp = key_points.get(a.get("question_number")) or []
+        met = sorted({i for i in a.get("key_points_met") or [] if isinstance(i, int) and 0 < i <= len(kp)})
         capped = min(raw, EASIER_MAX_SCORE) if a.get("question_number") in easier else raw
         qa.append({
             **a,
             "student_response": _own_words(a.get("student_response")),
+            "points_covered": [kp[i - 1] for i in met],  # the rubric's own wording, so core can match it exactly
             "raw_score_percent": raw,
             "score_percent": penalized_score(capped, a.get("hints_used")),
             "confidence": max(0.0, min(1.0, float(a.get("confidence") or 0))),

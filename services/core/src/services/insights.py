@@ -242,10 +242,12 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         "per_bloom": per_bloom,
         "topics": topics,
         "cards": [{
-            "question_number": c["question_number"], "question_text": c["question_text"],
-            "you_said": c["you_said"], "missed_points": c["missed_points"],
-            "key_idea": words["key_ideas"].get(c["question_number"]) or fallback["key_ideas"][c["question_number"]],
-        } for c in cards],
+            "question_number": c["question_number"], "question_text": c["question_text"], "you_said": c["you_said"],
+            # the key idea is often a missed point word for word (always in the template): show it once
+            "missed_points": [p for p in c["missed_points"] if _norm(p) != _norm(key_idea)],
+            "key_idea": key_idea,
+        } for c in cards
+            for key_idea in [words["key_ideas"].get(c["question_number"]) or fallback["key_ideas"][c["question_number"]]]],
         "next_steps": (list(words["next_steps"]) + fallback["next_steps"])[:3],
         "recap_text": words["recap_text"],
         "generated_at": generated_at,

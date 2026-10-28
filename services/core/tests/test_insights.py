@@ -193,9 +193,9 @@ async def test_numbers_cards_and_words(db, monkeypatch):
     assert out.cards[0].question_text == "Question 2?"
     assert out.cards[0].you_said == "multiply them"
     assert out.cards[0].missed_points == ["Use V = IR", "Units are ohms"]
-    assert out.cards[1].missed_points == ["P = VI"]
     assert out.cards[0].key_idea == "Voltage is current times resistance."
     assert out.cards[1].key_idea == "P = VI"  # colearner skipped it -> template
+    assert out.cards[1].missed_points == []  # its only missed point is the key idea - shown once (AI-004)
     assert out.headline == "H" and out.recap_text == "Lovely effort."
 
     facts, token = calls[0]
@@ -260,6 +260,7 @@ async def test_falls_back_to_template_words_when_colearner_fails(db, monkeypatch
     assert out.mastery_percent == 55
     assert out.headline == "You are strongest at Remember and can grow most at Analyze."
     assert [c.key_idea for c in out.cards] == ["Use V = IR", "P = VI"]
+    assert [c.missed_points for c in out.cards] == [["Units are ohms"], []]  # the key idea isn't repeated as a bullet
     assert len(out.next_steps) == 3 and out.next_steps[0].reference == "Electric Power"
     assert "insights_words_fallback" in caplog.text
     stored = (await db_session.execute(text(
