@@ -267,7 +267,7 @@ async def test_prep_swaps_a_question_generation_could_not_reword(schema, monkeyp
         return {"questions": [{
             "dataset_question_id": c["id"], "bloom_level": c["bloom_level"],
             "reworded_text": c["text"] if c["id"] == str(stuck.id) else f"In simple words: {c['text']}",
-            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1", "h2"],
+            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1?", "h2?"],
         } for c in payload["candidates"]]}
     monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", prep)
     monkeypatch.setattr(voice_test_prep, "_pick", _pick_in_order(stuck, good))
@@ -289,7 +289,7 @@ async def test_prep_drops_a_question_no_alternative_can_replace(schema, monkeypa
         return {"questions": [{
             "dataset_question_id": c["id"], "bloom_level": c["bloom_level"],
             "reworded_text": c["text"] if c["id"] == str(stuck.id) else f"In simple words: {c['text']}",
-            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1", "h2"],
+            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1?", "h2?"],
         } for c in payload["candidates"]]}
     monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", prep)
 

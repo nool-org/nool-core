@@ -222,7 +222,7 @@ def _units(text: str) -> set[str]:
 
 
 # asks a spoken answer can't meet - the prompt turns these into "tell me two or three ..."
-_WRITTEN_ASK = re.compile(r"\b(?:write|draw|tabulate)\b|\bany (?:three|four|five|six)\b", re.IGNORECASE)
+_WRITTEN_ASK = re.compile(r"\b(?:write|draw|tabulate|equations?|formulae?)\b|\bany (?:three|four|five|six)\b", re.IGNORECASE)
 
 
 def _has_word(text: str, word: str) -> bool:
