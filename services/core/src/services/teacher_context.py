@@ -9,7 +9,7 @@ classes + subjects this teacher teaches, in their school.
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import (
@@ -106,12 +106,18 @@ async def build_teacher_facts(session: AsyncSession, teacher: User, *, voice_tes
         .order_by("avg").limit(STRUGGLING)
     )).all() if test_ids else []
 
+    # a recent test's homework, and (whole view only) homework set straight from a chapter of a
+    # class and subject the teacher teaches - newest first, so a just-sent one is never cut off
+    set_from_chapter = and_(Homework.test_id.is_(None), exists().where(
+        Chapter.id == Homework.chapter_id, TeacherClassAssignment.teacher_id == teacher.id,
+        TeacherClassAssignment.class_id == Homework.class_id, TeacherClassAssignment.subject_id == Chapter.subject_id))
     homework_rows = (await session.execute(
         select(Homework.gap_topic, StudentHomeworkProgress.status, func.count())
         .join(StudentHomeworkProgress, StudentHomeworkProgress.homework_id == Homework.id)
-        .where(Homework.test_id.in_(test_ids))
+        .where(or_(Homework.test_id.in_(test_ids), *([] if scoped else [set_from_chapter])))
         .group_by(Homework.gap_topic, StudentHomeworkProgress.status)
-    )).all() if test_ids else []
+        .order_by(func.max(Homework.created_at).desc())
+    )).all()
     homework: dict[str, dict[str, int]] = defaultdict(lambda: {"done": 0, "total": 0})
     for topic, status, count in homework_rows:
         homework[topic]["total"] += count

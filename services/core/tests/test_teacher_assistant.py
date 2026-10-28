@@ -108,3 +108,32 @@ async def test_a_challenge_summary_is_only_for_the_teachers_own_challenge_with_r
         await assistant.challenge_summary(voice_test_id=str(uuid.uuid4()), quiz_test_id=None, user=teacher,
                                           session=db_session)
     assert calls == []  # no model call for a challenge that isn't theirs
+
+
+async def test_homework_set_from_a_chapter_is_in_the_facts(db_session):
+    """T-010: homework sent straight from a chapter wasn't in the facts, so Milo said none was pending."""
+    from src.domain.models import (
+        AssignmentTargetMode, Chapter, Homework, HomeworkDifficulty, SchoolClass, StudentHomeworkProgress,
+        StudentHomeworkStatus, Subject, TeacherClassAssignment)
+    from src.services.teacher_context import build_teacher_facts
+
+    teacher = await _teacher(db_session)
+    student = User(firebase_uid=f"s-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com", display_name="Manish",
+                   role=Role.STUDENT, school_id=teacher.school_id, status=UserStatus.ACTIVE)
+    subject = Subject(name=f"Science-{uuid.uuid4()}")
+    section = SchoolClass(school_id=teacher.school_id, grade=10, section="A")
+    db_session.add_all([student, subject, section])
+    await db_session.flush()
+    chapter = Chapter(subject_id=subject.id, name="Heredity")
+    db_session.add_all([chapter, TeacherClassAssignment(teacher_id=teacher.id, class_id=section.id, subject_id=subject.id)])
+    await db_session.flush()
+    hw = Homework(chapter_id=chapter.id, class_id=section.id, gap_topic="Heredity", gap_mastery_percent=0,
+                  total_questions=5, difficulty=HomeworkDifficulty.MIXED, target_mode=AssignmentTargetMode.WHOLE_CLASS)
+    db_session.add(hw)
+    await db_session.flush()
+    db_session.add(StudentHomeworkProgress(homework_id=hw.id, student_id=student.id, status=StudentHomeworkStatus.ASSIGNED))
+    await db_session.flush()
+
+    facts = await build_teacher_facts(db_session, teacher)
+
+    assert facts["homework_completion"] == [{"topic": "Heredity", "done": 0, "total": 1}]
