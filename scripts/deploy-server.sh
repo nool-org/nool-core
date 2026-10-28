@@ -31,7 +31,10 @@ rm -rf "$dir.prev"
 mv "$new" "$dir"
 chmod 755 "$dir"
 
-core() { cd /opt/nool/nool-core && docker compose up -d --build --remove-orphans "$@"; }
+# nginx is left running across a rebuild but keeps the old containers'
+# addresses, so after one it routes /auth and /api to the wrong place (or
+# nowhere) - restart it so it looks them up again
+core() { cd /opt/nool/nool-core && docker compose up -d --build --remove-orphans "$@" && docker compose restart nginx; }
 case "$repo" in
   nool-core) core ;;
   nool-kg) core nool-kg ;;
