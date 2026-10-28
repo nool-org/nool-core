@@ -166,12 +166,18 @@ async def voice_report(session: AsyncSession, test: VoiceTest) -> dict:
     questions: dict[int, dict] = {}
     hints: Counter = Counter()
     started = set()
-    for student_id, report in (await session.execute(
-            select(AiAssessorSession.student_id, AiAssessorSessionRecord.report)
+    graded: dict[uuid.UUID, list] = {}  # each student's latest graded session - the one their result shows
+    for student_id, report, needs_review in (await session.execute(
+            select(AiAssessorSession.student_id, AiAssessorSessionRecord.report, AiAssessorSessionRecord.needs_review)
             .join(AiAssessorSessionRecord, AiAssessorSessionRecord.session_id == AiAssessorSession.id)
-            .where(AiAssessorSession.test_id == test.id))).all():
+            .where(AiAssessorSession.test_id == test.id)
+            .order_by(AiAssessorSessionRecord.created_at.desc()))).all():
         started.add(student_id)
-        for qa in (report or {}).get("qa_transcripts") or []:
+        qa_rows = (report or {}).get("qa_transcripts") if not needs_review else None
+        if qa_rows and student_id not in graded:
+            graded[student_id] = qa_rows
+    for student_id, qa_rows in graded.items():
+        for qa in qa_rows:
             n = qa.get("question_number") or 0
             q = questions.setdefault(n, {"text": qa.get("question_asked") or "", "scores": [], "misconceptions": [],
                                          "hints": 0, "level": VOICE_LEVELS.get(qa.get("blooms_attribute") or "", "")})

@@ -25,6 +25,7 @@ class VoiceTestOut(CamelModel):
     created_at: datetime
     due_at: datetime | None = None  # end of the completion window (set once scheduled)
     opens_at: datetime | None = None  # when students can start it (set once scheduled; may be later)
+    question_count: int = 0  # prepared questions (0 until prep ran) - not len(bloom_levels)
 
 
 class RemindIn(CamelModel):

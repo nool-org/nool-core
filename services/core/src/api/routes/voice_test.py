@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from sqlalchemy import and_, select, union
+from sqlalchemy import and_, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
@@ -82,6 +82,8 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> VoiceTestOut:
         created_at=test.created_at,
         due_at=test.due_at,
         opens_at=test.scheduled_at,
+        question_count=await session.scalar(
+            select(func.count()).select_from(VoiceTestQuestion).where(VoiceTestQuestion.voice_test_id == test.id)),
     )
 
 
