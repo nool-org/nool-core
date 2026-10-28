@@ -54,7 +54,8 @@ async def test_hardest_questions_use_only_each_students_latest_graded_session(db
     record = (await db_session.execute(
         select(AiAssessorSessionRecord).join(AiAssessorSession, AiAssessorSession.id == AiAssessorSessionRecord.session_id)
         .where(AiAssessorSession.test_id == test.id))).scalar_one()
-    record.report = {"qa_transcripts": [{"question_number": 1, "question_asked": "Q1", "score_percent": 90}]}
+    record.report = {"qa_transcripts": [{"question_number": 1, "question_asked": "Q1", "score_percent": 90,
+                                         "student_response": "V is IR"}]}
     older = AiAssessorSession(student_id=student.id, test_id=test.id, context_label="x", duration_seconds=60)
     db_session.add(older)
     await db_session.flush()
@@ -66,3 +67,21 @@ async def test_hardest_questions_use_only_each_students_latest_graded_session(db
     report = await challenge_report.voice_report(db_session, test)
 
     assert [(q["percent"], q["answered"]) for q in report["questions"]] == [(90, 1)]
+
+
+async def test_a_blank_answer_is_not_counted_as_answered_and_the_copy_reads_cleanly(db_session):
+    """T-005: "1 answered" for a "No answer" question, "only 0% got it", a cut word, a stray "- "."""
+    test, _ = await _seed(db_session)
+    record = (await db_session.execute(
+        select(AiAssessorSessionRecord).join(AiAssessorSession, AiAssessorSession.id == AiAssessorSessionRecord.session_id)
+        .where(AiAssessorSession.test_id == test.id))).scalar_one()
+    asked = "Why does the copper wire inside the torch get warm when the current flows through it for a long time today"
+    record.report = {"qa_transcripts": [{"question_number": 5, "question_asked": asked, "score_percent": 0,
+                                         "student_response": "  ", "misconception": "- Thinks copper never heats."}]}
+    await db_session.flush()
+
+    report = await challenge_report.voice_report(db_session, test)
+
+    q = report["questions"][0]
+    assert (q["answered"], q["notes"]) == (0, ["Thinks copper never heats."])
+    assert any(a.endswith("…\" together - nobody got it.") and "inside the torch" in a for a in report["actions"])

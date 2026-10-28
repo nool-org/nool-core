@@ -100,7 +100,9 @@ def _actions(report: dict) -> list[str]:
         acts.append(f"Practise '{s['name']}' questions - the class's weakest thinking skill ({s['percent']}%).")
     if report["questions"] and report["questions"][0]["percent"] < 40:
         q = report["questions"][0]
-        acts.append(f"Go over \"{q['text'][:90]}\" together - only {q['percent']}% got it.")
+        text = q["text"] if len(q["text"]) <= 90 else q["text"][:90].rsplit(" ", 1)[0] + "…"
+        got = "nobody got it" if q["percent"] == 0 else f"only {q['percent']}% got it"
+        acts.append(f"Go over \"{text}\" together - {got}.")
     if report["not_started"]:
         n = len(report["not_started"])
         acts.append(f"{n} haven't started yet ({', '.join(report['not_started'][:4])}{'…' if n > 4 else ''}) - nudge them.")
@@ -180,10 +182,12 @@ async def voice_report(session: AsyncSession, test: VoiceTest) -> dict:
         for qa in qa_rows:
             n = qa.get("question_number") or 0
             q = questions.setdefault(n, {"text": qa.get("question_asked") or "", "scores": [], "misconceptions": [],
-                                         "hints": 0, "level": VOICE_LEVELS.get(qa.get("blooms_attribute") or "", "")})
+                                         "hints": 0, "answered": 0,
+                                         "level": VOICE_LEVELS.get(qa.get("blooms_attribute") or "", "")})
             q["scores"].append(qa.get("score_percent") or 0)
-            if qa.get("misconception"):
-                q["misconceptions"].append(qa["misconception"])
+            q["answered"] += bool(str(qa.get("student_response") or "").strip())  # "No answer" on the result isn't one
+            if note := str(qa.get("misconception") or "").strip().lstrip("-•* ").strip():
+                q["misconceptions"].append(note)
             q["hints"] += qa.get("hints_used") or 0
             hints[student_id] += qa.get("hints_used") or 0
 
@@ -215,7 +219,7 @@ async def voice_report(session: AsyncSession, test: VoiceTest) -> dict:
     return _finish(_base(test, "speak", school_class, chapter, students, topic_scores, topics, names,
                          skill_scores, [
                              {"text": q["text"], "level": SKILL_NAMES.get(q["level"], ""), "percent": _avg(q["scores"]),
-                              "answered": len(q["scores"]), "hints": q["hints"],
+                              "answered": q["answered"], "hints": q["hints"],
                               "notes": [m for m, _ in Counter(q["misconceptions"]).most_common(3)]}
                              for _, q in sorted(questions.items())]))
 
