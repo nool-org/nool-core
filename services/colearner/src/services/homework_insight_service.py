@@ -3,9 +3,8 @@ the gap" content shown on the student's Homework details screen (nool-apps'
 homework-learn.tsx) - see src/api/routes/homework_insight.py for the
 stateless REST endpoint Core calls this behind.
 
-Reuses the same JSON-mode grading-call pattern as chained_service.py's
-generate_bloom_report - a single gpt-4o-mini call producing structured
-JSON, with a deterministic, clearly-labeled fallback if the call fails
+A single gpt-4o-mini call with strict Structured Outputs (RESPONSE_FORMAT),
+with a deterministic, clearly-labeled fallback if the call fails
 (no API key configured, rate limited, network error, malformed JSON) so a
 slow/broken LLM never breaks the Homework screen, it just falls back to a
 generic paragraph the same shape as before this feature existed.
@@ -35,6 +34,26 @@ openai_client = (
 )
 
 
+_STR = {"type": "string"}
+RESPONSE_FORMAT = {"type": "json_schema", "json_schema": {"name": "homework_insight", "strict": True, "schema": {
+    "type": "object", "additionalProperties": False,
+    "required": ["what_needs_understanding", "references", "key_idea_title", "key_idea_body", "connection_prompt"],
+    "properties": {
+        "what_needs_understanding": _STR,
+        "references": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                                                  "required": ["title", "subtitle"],
+                                                  "properties": {"title": _STR, "subtitle": _STR}}},
+        "key_idea_title": _STR, "key_idea_body": _STR, "connection_prompt": _STR}}}}
+
+SYSTEM_PROMPT = """You are Milo, a warm study coach for Indian CBSE students aged 14-18. Write in simple Indian English.
+<student> gives a student's weak spot after a test; <syllabus> is the textbook excerpt for it. Write:
+- what_needs_understanding: 1 sentence naming the specific idea they need (not "practise more").
+- references: 1-2 items; title = a section or concept name that appears in <syllabus>, subtitle = why, in under 8 words. If <syllabus> has no excerpt, use the topic name as the only title - never invent section names.
+- key_idea_title: the concept name. key_idea_body: 2-3 sentences explaining it, using only <syllabus> (or standard content for the student's grade if it has no excerpt).
+- connection_prompt: one everyday Indian example (under 25 words) linking the idea to the student's life.
+Never mention scores or percentages."""
+
+
 def _fallback(topic: str) -> dict:
     return {
         "what_needs_understanding": f"You need more practice with {topic}.",
@@ -62,47 +81,27 @@ async def generate_homework_insight(
         f"{grade} {subject} coverage of {topic}."
     )
 
-    prompt = f"""A student in {grade} just finished a {subject} test on '{topic}' and scored {mastery_percent}% overall, weakest on the '{weak_bloom_level}' Bloom's Taxonomy level. Generate real, specific homework guidance - not generic filler - adhering strictly to this JSON schema:
-
-```json
-{{
-  "what_needs_understanding": "<1 sentence, specific to their actual weak spot - not just 'practice more'>",
-  "references": [
-    {{"title": "<a specific section/concept name from the context below, not 'Class notes'>", "subtitle": "<why this one, in a few words>"}}
-  ],
-  "key_idea_title": "<the core concept name>",
-  "key_idea_body": "<2-3 sentences clearly explaining that concept, grounded in the context below>",
-  "connection_prompt": "<one concrete real-world analogy or everyday scenario connecting this concept to something the student already experiences>"
-}}
-```
-
-SYLLABUS CONTEXT:
-\"\"\"
-{context_text}
-\"\"\"
-
-Return 1-2 references. Be concrete and grounded in the context above, not vague ("this chapter", "the material") - name the actual idea.
-"""
+    # static instructions first (cacheable), the student's data last
+    user = (f"<student>grade={grade}; subject={subject}; topic={topic}; mastery={mastery_percent}%; "
+            f"weakest_bloom={weak_bloom_level}</student>\n<syllabus>{context_text}</syllabus>")
 
     try:
         resp = await openai_client.chat.completions.create(
             model=LLM_MODEL,
             **llm_gateway.call_kwargs("chat"),
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a precise, encouraging study coach. Output strictly valid JSON.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
+            response_format=RESPONSE_FORMAT,
         )
-        data = json.loads(resp.choices[0].message.content)
+        msg = resp.choices[0].message
+        if getattr(msg, "refusal", None) or not msg.content:
+            raise RuntimeError(f"homework insight refused or empty: {getattr(msg, 'refusal', None)}")
+        data = json.loads(msg.content)
         fallback = _fallback(topic)
-        references = data.get("references")
+        references = [r for r in data.get("references") or []
+                      if isinstance(r, dict) and isinstance(r.get("title"), str) and r["title"].strip()][:2]
         return {
             "what_needs_understanding": data.get("what_needs_understanding") or fallback["what_needs_understanding"],
-            "references": references if isinstance(references, list) and references else fallback["references"],
+            "references": references or fallback["references"],
             "key_idea_title": data.get("key_idea_title") or fallback["key_idea_title"],
             "key_idea_body": data.get("key_idea_body") or fallback["key_idea_body"],
             "connection_prompt": data.get("connection_prompt") or fallback["connection_prompt"],

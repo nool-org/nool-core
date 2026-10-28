@@ -102,3 +102,28 @@ def test_real_client_is_async_with_timeout_and_retries(monkeypatch):
     finally:
         monkeypatch.delenv("OPENAI_API_KEY")
         importlib.reload(homework_insight_service)
+
+
+def test_strict_schema_refusal_falls_back_and_malformed_references_are_dropped(monkeypatch):
+    """AI-013: json_object mode let non-dict references through; a refusal crashed into the fallback opaquely."""
+    from types import SimpleNamespace
+
+    def client(message):
+        async def create(**kwargs):
+            client.kwargs = kwargs
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    args = dict(topic="Light", grade="Class 10", subject="Science", mastery_percent=40, weak_bloom_level="APPLY",
+                textbook_context="Refraction of light")
+    monkeypatch.setattr(homework_insight_service, "openai_client", client(SimpleNamespace(refusal="no", content=None)))
+    assert asyncio.run(homework_insight_service.generate_homework_insight(**args)) == homework_insight_service._fallback("Light")
+
+    body = ('{"what_needs_understanding": "x", "references": ["Refraction", {"title": "Refraction", "subtitle": "s"}], '
+            '"key_idea_title": "k", "key_idea_body": "b", "connection_prompt": "c"}')
+    fake = client(SimpleNamespace(refusal=None, content=body))
+    monkeypatch.setattr(homework_insight_service, "openai_client", fake)
+    out = asyncio.run(homework_insight_service.generate_homework_insight(**args))
+    assert out["references"] == [{"title": "Refraction", "subtitle": "s"}]
+    assert client.kwargs["response_format"]["json_schema"]["strict"] is True
+    assert client.kwargs["messages"][1]["content"].endswith("<syllabus>Refraction of light</syllabus>")
