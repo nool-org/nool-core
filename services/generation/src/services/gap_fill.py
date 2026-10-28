@@ -114,6 +114,8 @@ no facts, formulas or data that aren't in them or standard for this class.
 - Match each slot's Bloom level (REMEMBER: recall; UNDERSTAND: explain; APPLY: use in a new situation or
   a numerical; ANALYZE: compare/break down; EVALUATE: justify/judge; CREATE: design/propose) and difficulty.
 - Text only: never refer to a figure, diagram or table the student can't see.
+- Plain text, no markup: write formulas and equations with Unicode (H₂SO₄, Ca²⁺, →, x², √2, ½), never
+  LaTeX, $...$ or {{tex}}. Every chemical equation you write is balanced.
 - The examples show the style and level of the question bank - match them, never copy or paraphrase them,
   and don't repeat anything in `avoid`. Every question in this set is different: its own numbers,
   expressions and examples, and not the same template with the values changed.
