@@ -281,7 +281,7 @@ async def list_school_challenges(
         r = await quiz_tests.results(session, test) if test.status == "published" else None
         items.append(SchoolChallengeOut(
             id=str(test.id), title=test.title, class_label=_class_label(school_class), subject_name=subject.name,
-            teacher_name=teacher, status=test.status, student_count=r["student_count"] if r else 0,
+            teacher_name=teacher, status=quiz_tests.status_of(test), student_count=r["student_count"] if r else 0,
             done_count=r["done"] if r else 0, average_percent=r["average_percent"] if r else None,
             created_at=test.created_at))
     return ListEnvelope(items=items, total=total)

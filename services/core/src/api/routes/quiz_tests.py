@@ -31,7 +31,7 @@ def _out(test: QuizTest, done: int = 0, students: int = 0) -> QuizTestOut:
     return QuizTestOut(done_count=done, student_count=students,
         id=str(test.id), class_id=str(test.class_id), subject_id=str(test.subject_id),
         chapter_id=str(test.chapter_id), title=test.title, topic_ids=test.topic_ids, mix=test.mix,
-        status=test.status, due_at=test.due_at,
+        status=quiz_tests.status_of(test), due_at=test.due_at,
         opens_at=test.published_at if test.status in ("published", "scheduled") else None,
         created_at=test.created_at, question_count=len(test.question_ids),
         completion_window_hours=test.completion_window_hours, student_ids=test.student_ids)
