@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from src.services.paper_plan import (
-    QUICK_ACTIONS, PlanRequest, _Changes, _NewSpec, _Plan, _PlanOp, _Written, plan_paper,
+    QUICK_ACTIONS, PlanRequest, _Changes, _NewSpec, _Plan, _PlanOp, _Verdict, _Verdicts, _Written, plan_paper,
 )
 from src.services.transcribe import MAX_AUDIO_BYTES, TranscribeRequest, get_transcriber
 
@@ -41,6 +41,9 @@ class FakeLLM:
         return out
 
 
+OK = _Verdicts(verdicts=[_Verdict(index=0, ok=True, problem="")])
+
+
 def spec(**kw):
     return _NewSpec(**{"bank_candidate_id": None, "write_brief": None, "question_type": "SHORT_ANSWER", "marks": 3,
                        "bloom_level": "APPLY", "difficulty": "MEDIUM", "chapter_id": "ch1", "topic_id": None, **kw})
@@ -69,7 +72,7 @@ async def test_bank_candidate_is_copied_without_a_write_call():
 async def test_without_a_bank_fit_the_writer_model_writes_the_exact_spec():
     written = _Written(text="Why does a pencil in water look bent?", options=None, answer="Refraction ...")
     llm = FakeLLM(_Plan(reply="ok", ops=[op("replace", question_id="q1", new_question=spec(write_brief="bent pencil"))]),
-                  written)
+                  written, OK)
     result = await plan_paper(llm, req(message="harder q1"), plan_model="mini", write_model="big")
     nq = result.ops[0].new_question
     assert (nq.source, nq.dataset_question_id, nq.marks, nq.bloom_level, nq.text) == ("ai", None, 3, "APPLY", written.text)
@@ -97,7 +100,7 @@ async def test_failed_or_unresolvable_ops_are_dropped_and_the_rest_kept():
 async def test_rewrite_brief_edits_text_and_keeps_other_changes():
     llm = FakeLLM(_Plan(reply="ok", ops=[op("edit", question_id="q2", changes=_Changes(
         rewrite_brief="simpler words", marks=None, bloom_level=None, difficulty=None, question_type=None))]),
-        _Written(text="What does Snell's law say?", options=["x"], answer="sin i / sin r is constant"))
+        _Written(text="What does Snell's law say?", options=["x"], answer="sin i / sin r is constant"), OK)
     result = await plan_paper(llm, req(quick_action="simplify_wording"), plan_model="mini", write_model="big")
     ch = result.ops[0].changes
     assert (ch.text, ch.options, ch.marks) == ("What does Snell's law say?", None, None)
@@ -158,3 +161,19 @@ def test_api_503_without_key_then_plan_and_transcribe(monkeypatch):
         assert response.json() == {"text": "make question 3 harder"}
         assert seen == {"audio": b"voice", "filename": "audio.m4a", "prompt": "Light, refraction"}
         assert client.post("/v1/transcribe", json={"audio_base64": "!!"}).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_writer_is_grounded_and_a_wrong_answer_from_it_is_dropped_by_the_verifier():
+    """AI-015: the writer sees the chapter's textbook text, and a written
+    question whose answer the verifier disagrees with never reaches the paper."""
+    wrong = _Written(text="A ray goes from air into glass. Does it bend away from the normal?", options=None,
+                     answer="Yes, away from the normal.")
+    llm = FakeLLM(_Plan(reply="ok", ops=[op("replace", question_id="q1", new_question=spec(write_brief="glass")),
+                                         op("remove", question_id="q2")]),
+                  wrong, _Verdicts(verdicts=[_Verdict(index=0, ok=False, problem="it bends towards the normal")]))
+    result = await plan_paper(llm, req(message="x", textbook={"ch1": "Light bends towards the normal in glass."}),
+                              plan_model="mini", write_model="big")
+    assert [o.op for o in result.ops] == ["remove"]
+    assert "bends towards the normal in glass" in llm.calls[1][3]  # writer got the textbook
+    assert [c[:2] for c in llm.calls][2] == ("_Verdicts", "mini")
