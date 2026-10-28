@@ -88,6 +88,10 @@ really not the right one)? Is it clear and on the topic? Does nothing give the a
 already states the reason, a choice that labels itself wrong, a right choice much longer than the rest?
 Answer ok=true only if all of that holds;
 otherwise ok=false and say what's wrong in problem."""
+VERIFY_OWN = """
+For this make_your_own: code marks the student's answer with `check` (its kind and params). Do the params
+say exactly the condition the question names (same numbers, same relation), so every answer that meets
+the question passes and no other does? Does the example meet it? If not, ok=false."""
 
 
 class Claim(BaseModel):
@@ -186,10 +190,9 @@ def to_spec(kind: str, draft) -> tuple[str, dict]:
     if kind == "fix_steps":
         return draft.problem, {"problem": draft.problem, "steps": draft.steps, "wrong_step": draft.wrong_step,
                                "fixes": [f.model_dump() for f in draft.fixes], "explanation": draft.explanation}
-    try:
-        params = json.loads(draft.params_json)
-    except json.JSONDecodeError:
-        params = {}
+    params = json.loads(draft.params_json)  # bad JSON raises: the draft is retried, never kept with {} params
+    if not isinstance(params, dict):
+        raise ValueError("params_json is not a JSON object")
     return draft.question, {"check": {"kind": draft.check_kind, "params": params}, "labels": draft.labels,
                             "example": draft.example, "explanation": draft.explanation}
 
@@ -211,14 +214,16 @@ async def _one(llm: StructuredLLM, body: SpecialRequest, i: int, slot: SpecialSl
         try:
             draft = await llm(model=model, effort="low", system=system, user=user, output_type=OUTPUT[slot.kind])
             text, spec = to_spec(slot.kind, draft)
-            if slot.kind != "make_your_own":
-                verdict = await llm(model=verify_model, effort="low",
-                                    system=VERIFY.format(kind=slot.kind, grade=body.grade, subject=body.subject),
-                                    user=json.dumps({"question": text, **spec}, ensure_ascii=False),
-                                    output_type=Verdict)
-                if not verdict.ok:
-                    user += f"\n\nYour last question had this problem - fix it:\n{verdict.problem}"
-                    continue
+            # make_your_own too: core checks the example against the params in code, but only a
+            # reader can tell the params state the question's condition (else right answers fail)
+            verdict = await llm(model=verify_model, effort="low",
+                                system=VERIFY.format(kind=slot.kind, grade=body.grade, subject=body.subject)
+                                + (VERIFY_OWN if slot.kind == "make_your_own" else ""),
+                                user=json.dumps({"question": text, **spec}, ensure_ascii=False),
+                                output_type=Verdict)
+            if not verdict.ok:
+                user += f"\n\nYour last question had this problem - fix it:\n{verdict.problem}"
+                continue
             return SpecialQuestion(slot_index=i, kind=slot.kind, bloom_level=slot.bloom_level, text=text, spec=spec)
         except Exception as exc:  # one slot's failure mustn't sink the others
             logger.warning("special_question_failed", extra={"kind": slot.kind, "attempt": attempt,

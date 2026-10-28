@@ -110,7 +110,8 @@ class _Verdicts(BaseModel):
 
 GENERATE_SYSTEM = """You write homework questions for CBSE Class {grade} {subject} students.
 Write exactly one question for each requested slot, based ONLY on the given NCERT textbook sections -
-no facts, formulas or data that aren't in them or standard for this class.
+no facts, formulas or data that aren't in them (a standard Class {grade} formula or definition only if the
+sections use it).
 - Match each slot's Bloom level (REMEMBER: recall; UNDERSTAND: explain; APPLY: use in a new situation or
   a numerical; ANALYZE: compare/break down; EVALUATE: justify/judge; CREATE: design/propose) and difficulty.
 - Text only: never refer to a figure, diagram or table the student can't see.
@@ -134,12 +135,12 @@ SUBJECT_STYLE = {
     "Mathematics": """
 MATHS - write PROBLEMS, not text questions:
 - Almost every question is something to work out: numbers to compute, a short word problem, a value to find,
-  a claim to check by calculating - the way CBSE Class 10 board papers ask (e.g. find the HCF/LCM of given
+  a claim to check by calculating - the way CBSE board papers ask (e.g. find the HCF/LCM of given
   numbers; a real-life word problem such as bells or lights repeating, packing or cutting into equal parts;
   find the other number given HCF, LCM and one number; find the smallest n that makes a product a perfect
   square; decide whether a given number can end in a digit). Only a REMEMBER slot may ask for a statement or
   definition, and even then prefer recognising a correct example.
-- Use numbers a Class 10 student can handle on paper in 1-3 minutes, no calculator.
+- Use numbers a student of this class can handle on paper in 1-3 minutes, no calculator.
 - MCQ options are answers (numbers or short expressions). Every wrong option is what a typical mistake
   gives - LCM instead of HCF, highest powers instead of lowest, a dropped prime, an arithmetic slip - never a
   random number.

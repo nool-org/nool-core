@@ -54,7 +54,7 @@ def test_code_checks():
 def test_retries_once_with_the_problems_then_gives_up():
     llm = FakeLLM(deck(n=3), deck())
     assert len(asyncio.run(svc.write_cards(llm, REQUEST, model="m")).cards) == 6
-    assert "write 6-8 cards, not 3" in llm.calls[1]["user"]
+    assert "write 4-8 cards, not 3" in llm.calls[1]["user"]
 
     llm = FakeLLM(deck(n=3), deck(n=3))
     try:
