@@ -175,21 +175,3 @@ async def test_a_failing_background_homework_build_is_contained(monkeypatch):
     assert tasks
     await asyncio.gather(*tasks)   # completes without raising
     assert all(t.exception() is None for t in tasks)
-
-
-async def test_homework_is_spread_over_every_weak_topic_weakest_first(monkeypatch):
-    """C-010: only the single weakest topic got questions; a 0% topic tied or just above was left out."""
-    import uuid as _uuid
-
-    from src.services import homework_autogen as ag
-
-    calls = []
-
-    async def build(_session, *, total, focus, boss, keep, **_kw):
-        calls.append((focus.topic_id, total, boss, len(keep)))
-        return [object()] * total
-    monkeypatch.setattr(ag, "build_homework_questions", build)
-    t1, t2 = _uuid.uuid4(), _uuid.uuid4()
-    boss = ag.Focus(topic_id=t1)
-    drafts = await ag.build_on_weak_topics(None, [t1, t2], total=5, seed="s", focus=ag.Focus(topic_id=t1), boss=boss)
-    assert len(drafts) == 5 and calls == [(t1, 3, boss, 0), (t2, 2, None, 3)]

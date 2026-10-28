@@ -17,7 +17,7 @@ class after reviewing results).
 
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import (
@@ -34,7 +34,6 @@ from src.domain.models import (
     StudentHomeworkProgress,
     StudentTestResult,
     StudentTestResultTopicScore,
-    Topic,
     User,
     VoiceTest,
     VoiceTestQuestion,
@@ -45,7 +44,6 @@ from src.services.homework_builder import Focus, build_homework_questions, groun
 AUTO_HOMEWORK_QUESTION_COUNT = 5
 AUTO_HOMEWORK_COMPLETION_WINDOW_HOURS = 48
 WEAK_PERCENT = 50  # below this an answer/topic is "weak" (same cut as the insights' "weak" status)
-MAX_GAP_TOPICS = 3  # a homework's questions are spread over at most this many weak topics
 
 
 async def auto_generate_homework(
@@ -68,9 +66,8 @@ async def auto_generate_homework(
     if dataset_id is None:
         return None
 
-    topics = await weak_topics(session, test.id, student_id)
-    gap = await session.get(Topic, topics[0]) if topics else await session.get(Chapter, test.chapter_id)
-    gap_topic = gap.name if gap is not None else "this chapter"  # the weakest topic, else the chapter
+    chapter = await session.get(Chapter, test.chapter_id)
+    gap_topic = chapter.name if chapter is not None else "this chapter"
 
     hw = Homework(
         test_id=test.id,
@@ -91,8 +88,8 @@ async def auto_generate_homework(
     session.add(StudentHomeworkProgress(homework_id=hw.id, student_id=student_id))
 
     student = await session.get(User, student_id)
-    drafts = await build_on_weak_topics(
-        session, topics, user=student, test=test, total=AUTO_HOMEWORK_QUESTION_COUNT,
+    drafts = await build_homework_questions(
+        session, user=student, test=test, total=AUTO_HOMEWORK_QUESTION_COUNT,
         bloom_weights=_even_bloom_distribution(bloom_levels, AUTO_HOMEWORK_QUESTION_COUNT),
         difficulty=HomeworkDifficulty.MIXED, fallback_dataset_id=dataset_id, seed=str(hw.id),
         student_id=student_id, **await weak_spots(session, test_id=test.id, student_id=student_id),
@@ -157,40 +154,6 @@ async def weak_spots(session: AsyncSession, *, test_id, student_id) -> dict:
         spots["boss"] = Focus(topic_id=q.topic_id, subtopic_id=q.subtopic_id, concepts=tuple(q.concepts or []),
                               bloom_level=q.bloom_level)
     return spots
-
-
-async def weak_topics(session: AsyncSession, test_id, student_id=None) -> list[uuid.UUID]:
-    """The test's topics scored under WEAK_PERCENT, weakest first (ties kept, by id), at most
-    MAX_GAP_TOPICS: this student's, or (None) the class's average over its results."""
-    score = func.avg(StudentTestResultTopicScore.percent)
-    query = (select(StudentTestResultTopicScore.topic_id)
-             .join(StudentTestResult, StudentTestResult.id == StudentTestResultTopicScore.student_test_result_id)
-             .where(StudentTestResult.test_id == test_id, StudentTestResultTopicScore.topic_id.is_not(None))
-             .group_by(StudentTestResultTopicScore.topic_id).having(score < WEAK_PERCENT)
-             .order_by(score, StudentTestResultTopicScore.topic_id).limit(MAX_GAP_TOPICS))
-    if student_id is not None:
-        query = query.where(StudentTestResult.student_id == student_id)
-    return list((await session.execute(query)).scalars())
-
-
-async def build_on_weak_topics(session: AsyncSession, topic_ids: list, *, total: int, seed: str,
-                               focus: Focus | None = None, boss: Focus | None = None, **kw) -> list:
-    """build_homework_questions with its `total` spread over the weak topics (the weakest
-    gets any extra; the boss rides with it) - so a 0% topic is never left out because
-    another one was a little weaker. No weak topic: one build on `focus` as given."""
-    if not topic_ids:
-        return await build_homework_questions(session, total=total, seed=seed, focus=focus, boss=boss, **kw)
-    drafts: list = []
-    for n, topic_id in enumerate(topic_ids):
-        count = total // len(topic_ids) + (n < total % len(topic_ids))
-        if not count:
-            continue
-        on = focus is not None and focus.topic_id == topic_id
-        drafts += await build_homework_questions(
-            session, total=count, seed=f"{seed}:{n}", keep=[*drafts], boss=boss if n == 0 else None,
-            focus=Focus(topic_id=topic_id, subtopic_id=focus.subtopic_id if on else None,
-                        concepts=focus.concepts if focus else ()), **kw)
-    return drafts
 
 
 def _even_bloom_distribution(levels: list[BloomLevel], count: int) -> dict[BloomLevel, int]:

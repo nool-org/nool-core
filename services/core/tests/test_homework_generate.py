@@ -35,7 +35,6 @@ async def _setup(db_session, monkeypatch, status):
 
     monkeypatch.setattr(homework, "grounding_dataset_id", grounding)
     monkeypatch.setattr(homework, "build_homework_questions", build)
-    monkeypatch.setattr(homework.homework_autogen, "build_homework_questions", build)  # generate goes through it
     return a, hw, dataset
 
 
