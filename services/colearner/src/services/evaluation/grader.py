@@ -100,7 +100,7 @@ Rules:
 - Every student turn tagged with the same [Qn] is one answer: a reply to the Co-Learner's follow-up ("Can you tell me why?", "How would you explain that to a friend?") or after a hint is judged together with the first reply. Ignore turns marked (repeat request) or (noise).
 - Partial credit, against the question's expected key points (or the textbook answer if no rubric): all key points stated correctly = 85-100; about half of them correct = 50-60 (partial, is_substantively_correct true only if the core idea is right); a little relevant but mostly missing = 20-40; none, off-topic or "I don't know" = 0-15. A confidently wrong central claim stays under 40 whatever else is covered.
 - Do NOT include the opening readiness exchange (e.g. "Are you ready to begin?") or closing small talk.
-- If a rubric is given, use its expected key points and known misconceptions for that question. Its points_needed is how many key points a full answer must state (fewer than all when the question asks for "two or three" things): that many stated correctly counts as all key points.
+- If a rubric is given, return one entry per rubric question the student was asked, with that question_number (hints_used and blooms_attribute are then filled in by code), and use its expected key points and known misconceptions for that question. Its points_needed is how many key points a full answer must state (fewer than all when the question asks for "two or three" things): that many stated correctly counts as all key points.
 - A rubric entry with version "easier" means the student was asked a simpler version of the question (its text is in the rubric): grade against that version, and score it at most 70.
 
 overall_feedback: 1-2 sentences on the student's engagement and conceptual understanding."""
@@ -148,14 +148,21 @@ def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str,
     """Turns the model's per-answer grades into the report core consumes, aggregates computed here.
     `planned` [(bloom level, question text)] in order: questions after the last one answered weren't
     reached in time and score 0 - a slow student is behind, and the mastery says so."""
-    easier = {r.get("question_number") for r in rubric or [] if r.get("version") == "easier"}
-    key_points = {r.get("question_number"): r.get("key_points") or [] for r in rubric or []}
+    by_n = {r.get("question_number"): r for r in rubric or []}
+    seen = set()
     qa = []
     for a in graded.get("answers") or []:
+        r = by_n.get(a.get("question_number"), {})
+        if by_n:  # prepared questions: what code knows (number, level, text, hints) isn't the model's to say
+            if not r or a["question_number"] in seen:
+                continue  # not one of the asked questions, or a second entry for one
+            seen.add(a["question_number"])
+            a = {**a, "hints_used": r.get("hints_used") or 0, "question_asked": r.get("question") or a.get("question_asked"),
+                 "blooms_attribute": r.get("bloom_level") or a.get("blooms_attribute")}
         raw = _clamp_score(a["score_percent"])
-        kp = key_points.get(a.get("question_number")) or []
+        kp = r.get("key_points") or []
         met = sorted({i for i in a.get("key_points_met") or [] if isinstance(i, int) and 0 < i <= len(kp)})
-        capped = min(raw, EASIER_MAX_SCORE) if a.get("question_number") in easier else raw
+        capped = min(raw, EASIER_MAX_SCORE) if r.get("version") == "easier" else raw
         qa.append({
             **a,
             "student_response": _own_words(a.get("student_response")),

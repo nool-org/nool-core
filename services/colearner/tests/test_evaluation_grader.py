@@ -113,7 +113,7 @@ def test_easier_version_is_capped_at_70_before_the_hint_penalty():
     payload = {"overall_feedback": "", "answers": [
         _answer(1, "Understanding", 95, True), _answer(2, "Understanding", 95, True, hints=1),
         _answer(3, "Understanding", 50, True)]}
-    rubric = [{"question_number": 1, "version": "standard"}, {"question_number": 2, "version": "easier"},
+    rubric = [{"question_number": 1, "version": "standard"}, {"question_number": 2, "version": "easier", "hints_used": 1},
               {"question_number": 3, "version": "easier"}]
     client = _FakeClient(payload)
     _, report = _grade(client, rubric=rubric)
@@ -162,3 +162,15 @@ def test_points_covered_are_the_rubric_points_the_model_numbered():
                        rubric=[{"question_number": 1, "key_points": ["A", "B", "C"]}])
     assert report["qa_transcripts"][0]["points_covered"] == ["B"]
     assert "key_points_met" in grader.RESPONSE_FORMAT["json_schema"]["schema"]["properties"]["answers"]["items"]["required"]
+
+
+def test_hints_level_and_numbering_come_from_the_rubric_not_the_model():
+    """AI-005: the hint penalty, Bloom level and question join used the model's own counting."""
+    payload = {"overall_feedback": "", "answers": [
+        _answer(1, "Creating", 90, True, hints=0), _answer(1, "Creating", 10, False), _answer(7, "Understanding", 90, True)]}
+    rubric = [{"question_number": 1, "bloom_level": "APPLY", "question": "Asked text?", "hints_used": 2}]
+    _, report = _grade(_FakeClient(payload), rubric=rubric)
+    qa = [a for a in report["qa_transcripts"] if not a.get("not_reached")]
+    assert len(qa) == 1  # the duplicate and the 7th (not asked) are dropped
+    assert (qa[0]["score_percent"], qa[0]["hints_used"], qa[0]["blooms_attribute"], qa[0]["question_asked"]) == (
+        70, 2, "APPLY", "Asked text?")
