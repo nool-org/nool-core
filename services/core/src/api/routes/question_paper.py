@@ -672,6 +672,24 @@ def _by_slot(generated: list[dict], count: int) -> dict[int, dict]:
     return out
 
 
+def _kept_slots(keep: list[QuestionPaperQuestion], slots: list[dict], sections: list[str]) -> dict:
+    """Kept question id -> the blueprint slot it fills: the first free slot
+    that matches it best (section, then marks, then Bloom level and
+    difficulty), so fill-missing finds a gap mid-paper instead of assuming
+    the kept questions are the first slots."""
+    taken: dict = {}
+    prev = -1
+    for q in keep:
+        def fit(i, q=q, prev=prev):
+            slot, value = slots[i], lambda e: getattr(e, "value", e)
+            return ((sections[i] if i < len(sections) else None) == q.section_name, slot["marks"] == q.marks,
+                    slot["bloom_level"] == value(q.bloom_level), slot["difficulty"] == value(q.difficulty),
+                    i > prev, -i)  # ties: the first slot after the previous kept question
+        free = [i for i in range(len(slots)) if i not in taken.values()]
+        taken[q.id] = prev = max(free, key=fit)
+    return taken
+
+
 def _mcq_ok(q: dict) -> bool:
     """Every paper question is saved here: an MCQ without 4 real options
     (C-009: AI MCQs printed with none) leaves its slot empty instead."""
@@ -750,11 +768,14 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
     references: list[dict] = []
     if keep and len(keep) >= len(slots):
         raise ConflictError("This paper already has every question its blueprint asks for.")
+    section_sequence = [s.label for s in sections for _ in range(s.question_count)]
+    kept_slot = _kept_slots(keep, slots, section_sequence)
+    free = [i for i in range(len(slots)) if i not in kept_slot.values()]
     if chapter_refs:
         subject_name, board, grade = await _paper_kg_identity(session, paper)
         references = await _dataset_reference_questions(session, paper, user)
         from_bank = {} if keep else await _bank_slots(session, paper, user, slots)
-        open_slots = [slot for i, slot in enumerate(slots) if i not in from_bank and i >= len(keep)]
+        open_slots = [slots[i] for i in free if i not in from_bank]
         generated = _by_slot(await kg_client.generate_paper_questions(
             subject=subject_name,
             board=board,
@@ -768,8 +789,8 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
             reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
             slots=[{k: v for k, v in s.items() if k != "chapter_id"} for s in open_slots],
         ) if open_slots else [], len(open_slots))
-        open_index = {i: n for n, i in enumerate(i for i in range(len(keep), len(slots)) if i not in from_bank)}
-        picked = [(i, from_bank.get(i) or generated.get(open_index.get(i))) for i in range(len(keep), len(slots))]
+        open_index = {i: n for n, i in enumerate(i for i in free if i not in from_bank)}
+        picked = [(i, from_bank.get(i) or generated.get(open_index.get(i))) for i in free]
         picked = [(i, q) for i, q in picked if q and _mcq_ok(q)]
         questions = [q for _, q in picked]
         slot_of = [i for i, _ in picked]
@@ -782,7 +803,6 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
             await session.delete(row)
         await session.flush()
 
-    section_sequence = [s.label for s in sections for _ in range(s.question_count)]
     chapters_by_number = {c.order_index: c for c in (await session.execute(
         select(Chapter).where(Chapter.subject_id == paper.subject_id, Chapter.order_index.is_not(None))
     )).scalars().all()}
@@ -790,7 +810,8 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         select(Topic).where(Topic.chapter_id.in_([c.id for c in chapters_by_number.values()]))
     )).scalars().all() if chapters_by_number else []
     bank_by_text = {normalize(r["text"]): r["id"] for r in references}
-    for order, (q, i) in enumerate(zip(questions, slot_of), start=len(keep) + 1):
+    placed = [(kept_slot[k.id], k) for k in keep]
+    for q, i in zip(questions, slot_of):
         chapter = (next((c for c in chapters_by_number.values() if c.id == q["chapter_id"]), None)
                    if q.get("chapter_id") else chapters_by_number.get(q.get("chapter_number")))
         topic = (next((t for t in topics if t.id == q["topic_id"]), None) if q.get("topic_id") else
@@ -798,17 +819,19 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         # the kg prompt allows "minimal edits" to a reused bank question, so match closely, not exactly
         close = difflib.get_close_matches(normalize(q["text"]), list(bank_by_text), n=1, cutoff=0.8)
         bank_id = q.get("bank_id") or (bank_by_text[close[0]] if close else None)
-        session.add(
-            QuestionPaperQuestion(
-                paper_id=paper.id, order=order, bloom_level=q["bloom_level"], marks=slots[i]["marks"], text=q["text"],
-                question_type=_question_type(q.get("question_type")) or _question_type(slots[i]["question_type"]),
-                difficulty=_enum_or_none(PaperDifficultyLevel, q.get("difficulty")),
-                chapter_id=chapter.id if chapter else None, topic_id=topic.id if topic else None,
-                section_name=section_sequence[i] if i < len(section_sequence) else None,
-                options=q.get("options"), answer=q.get("answer"),
-                source=QuestionSource.BANK.value if bank_id else QuestionSource.AI.value, dataset_question_id=bank_id,
-            )
-        )
+        placed.append((i, QuestionPaperQuestion(
+            paper_id=paper.id, order=0, bloom_level=q["bloom_level"], marks=slots[i]["marks"], text=q["text"],
+            question_type=_question_type(q.get("question_type")) or _question_type(slots[i]["question_type"]),
+            difficulty=_enum_or_none(PaperDifficultyLevel, q.get("difficulty")),
+            chapter_id=chapter.id if chapter else None, topic_id=topic.id if topic else None,
+            section_name=section_sequence[i] if i < len(section_sequence) else None,
+            options=q.get("options"), answer=q.get("answer"),
+            source=QuestionSource.BANK.value if bank_id else QuestionSource.AI.value, dataset_question_id=bank_id,
+        )))
+    # paper order follows the blueprint's slots, so a gap mid-paper is filled where it is
+    for order, (_, row) in enumerate(sorted(placed, key=lambda p: p[0]), start=1):
+        row.order = order
+        session.add(row)
 
     existing_validation = await session.execute(
         select(QuestionPaperValidation).where(QuestionPaperValidation.paper_id == paper.id)

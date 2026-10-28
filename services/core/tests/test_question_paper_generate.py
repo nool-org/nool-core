@@ -247,8 +247,14 @@ async def test_kg_questions_land_by_slot_index_and_an_mcq_without_options_is_not
     teacher, seeded = await _seed_paper_ready_to_generate(db_session)
     monkeypatch.setattr(question_paper, "_bank_slots", lambda *a, **k: _no_bank())
     slots_seen = []
+    calls = []
 
     async def fake_generate_paper_questions(**kwargs):
+        calls.append(kwargs["slots"])
+        if len(calls) == 2:  # fill-missing: the one open slot
+            return [{"text": "Filled slot 1?", "answer": "x", "bloom_level": s["bloom_level"], "difficulty": s["difficulty"],
+                     "question_type": "short_answer", "chapter_number": 3, "topic": "", "slot_index": 0}
+                    for s in kwargs["slots"]]
         slots_seen.extend(kwargs["slots"])
         out = [{"text": f"Q for slot {i}?", "answer": "x", "bloom_level": s["bloom_level"], "difficulty": s["difficulty"],
                 "question_type": "short_answer", "chapter_number": 3, "topic": "", "slot_index": i}
@@ -263,3 +269,11 @@ async def test_kg_questions_land_by_slot_index_and_an_mcq_without_options_is_not
     expected = [i for i in range(len(slots_seen)) if i != 1]
     assert [q.text for q in questions] == [f"Q for slot {i}?" for i in expected]
     assert [q.marks for q in questions] == [slots_seen[i]["marks"] for i in expected]
+
+    # the gap is slot 1 (mid-paper): fill-missing asks for that slot only and fills it in place
+    await question_paper.fill_missing(seeded["paper_id"], user=teacher, session=db_session)
+    assert calls[1] == [slots_seen[1]]
+    questions = (await question_paper.list_paper_questions(seeded["paper_id"], user=teacher, session=db_session)).items
+    assert [q.text for q in questions] == ["Q for slot 0?", "Filled slot 1?"] + [f"Q for slot {i}?" for i in expected[1:]]
+    assert [q.order for q in questions] == list(range(1, len(slots_seen) + 1))
+    assert questions[1].marks == slots_seen[1]["marks"]
