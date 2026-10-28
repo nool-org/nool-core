@@ -56,3 +56,18 @@ def test_summary_excludes_ambiguous_and_applies_the_gate():
     low_acc = [{"label": "correct", "verdict": False}] * 4 + [{"label": "correct", "verdict": True}] * 46
     assert ge.summarize(low_acc, [], 0, 0)["verdict_accuracy_pct"] == 92.0
     assert not ge.summarize(low_acc, [], 0, 0)["passed"]
+
+
+def test_qa_failure_cases_tags_score_bands_and_skipped_no_answers():
+    """AI-008: the production [Qn]/(kind) format, per-answer score bands, and a no-answer turn the grader may skip."""
+    session = {"id": "q", "turns": [
+        {"role": "co_learner", "text": "What is a fuse?", "question_number": 1},
+        {"role": "student", "text": "Can you repeat?", "question_number": 1, "kind": "repeat_request"},
+        {"role": "student", "text": "it melts and breaks the circuit", "question_number": 1, "label": "correct",
+         "max_score": 80},
+        {"role": "student", "text": "echoed transcription prompt words", "label": "wrong", "no_answer": True}]}
+    assert ge.transcript(session).splitlines()[1] == "[Q1] [STUDENT] (repeat request): Can you repeat?"
+    rows = ge.align(session, {"qa_transcripts": [_qa("it melts and breaks the circuit", True, 95)]})
+    s = ge.summarize(rows, [], 0, 0)
+    assert s["verdict_accuracy_pct"] == 100.0  # the skipped no-answer turn is not a miss
+    assert s["score_band_misses"] == 1 and not s["passed"]  # 95 with two hints should be <= 80

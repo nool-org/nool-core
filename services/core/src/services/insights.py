@@ -63,9 +63,12 @@ def _latest_report(records: list[AiAssessorSessionRecord]) -> tuple[AiAssessorSe
     return None, []
 
 
-def build_cards(qa: list[dict], questions: dict[int, VoiceTestQuestion]) -> list[dict]:
+def build_cards(qa: list[dict], questions: dict[int, VoiceTestQuestion], answers: list | None = None) -> list[dict]:
     """Answers scoring under CARD_SCORE_BELOW, in question order. missed_points =
-    the question's expected points the grader didn't list as covered."""
+    the question's expected points the grader didn't list as covered. you_said is
+    the stored transcript of the answer (answers[n].first_answer, as the teacher view
+    shows it), not the grader's student_response, which the model writes."""
+    heard = {a.get("question_number"): a.get("first_answer") for a in answers or [] if isinstance(a, dict)}
     cards = []
     for entry in sorted(qa, key=lambda e: e.get("question_number") or 0):
         score = entry.get("score_percent")
@@ -78,7 +81,7 @@ def build_cards(qa: list[dict], questions: dict[int, VoiceTestQuestion]) -> list
         cards.append({
             "question_number": number if isinstance(number, int) else 0,
             "question_text": (question.reworded_text if question else None) or str(entry.get("question_asked") or ""),
-            "you_said": str(entry.get("student_response") or ""),
+            "you_said": " ".join(str(heard.get(number) or entry.get("student_response") or "").split()),
             "expected_points": expected,
             "missed_points": [p for p in expected if _norm(p) not in covered],
             "topic_id": question.topic_id if question else None,
@@ -187,7 +190,7 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
     questions = {q.order: q for q in (await session.execute(
         select(VoiceTestQuestion).where(VoiceTestQuestion.voice_test_id == test_uuid)
     )).scalars()}
-    cards = build_cards(qa, questions)
+    cards = build_cards(qa, questions, record.answers if record else None)
 
     names: dict[uuid.UUID, str] = {}
     topic_ids = {c["topic_id"] for c in cards} - {None}
@@ -239,10 +242,12 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         "per_bloom": per_bloom,
         "topics": topics,
         "cards": [{
-            "question_number": c["question_number"], "question_text": c["question_text"],
-            "you_said": c["you_said"], "missed_points": c["missed_points"],
-            "key_idea": words["key_ideas"].get(c["question_number"]) or fallback["key_ideas"][c["question_number"]],
-        } for c in cards],
+            "question_number": c["question_number"], "question_text": c["question_text"], "you_said": c["you_said"],
+            # the key idea is often a missed point word for word (always in the template): show it once
+            "missed_points": [p for p in c["missed_points"] if _norm(p) != _norm(key_idea)],
+            "key_idea": key_idea,
+        } for c in cards
+            for key_idea in [words["key_ideas"].get(c["question_number"]) or fallback["key_ideas"][c["question_number"]]]],
         "next_steps": (list(words["next_steps"]) + fallback["next_steps"])[:3],
         "recap_text": words["recap_text"],
         "generated_at": generated_at,

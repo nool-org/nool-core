@@ -34,7 +34,7 @@ def test_regrade_grades_the_stored_transcript_with_the_rubric(client, monkeypatc
     assert "[Q1] [STUDENT]: V equals I R" in seen["transcript"]
     assert "[Q1] [CO-LEARNER]: What is Ohm's law?" in seen["transcript"]
     assert seen["rubric"] == [{"question_number": 1, "bloom_level": "REMEMBER", "question": "What is Ohm's law?",
-                               "key_points": ["V = IR"], "misconceptions": [], "hints_used": 2,
+                               "key_points": ["V = IR"], "points_needed": 1, "misconceptions": [], "hints_used": 2,
                                "version": "standard"}]
 
 

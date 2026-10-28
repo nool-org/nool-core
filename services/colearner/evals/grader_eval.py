@@ -2,7 +2,9 @@
 
 Run inside the colearner image (needs OPENAI_API_KEY):
     python evals/grader_eval.py [--repeats 2] [--data evals/grader_set.json]
-Exit code 1 if verdict accuracy < 95% or more than 1 in 30 wrong answers are marked correct.
+Exit code 1 if verdict accuracy < 95%, more than 1 in 30 wrong answers are marked correct, a labelled
+answer's score falls outside its min_score/max_score, or a student_response has a [bracketed] note.
+score_spread_max (one answer's max - min score across repeats) is reported, not gated yet (AI-007).
 """
 import argparse
 import asyncio
@@ -20,7 +22,14 @@ ROLES = {"co_learner": "CO-LEARNER", "student": "STUDENT"}
 
 
 def transcript(session: dict) -> str:
-    return "\n".join(f"[{ROLES[t['role']]}]: {t['text']}" for t in session["turns"])
+    """The production format (realtime_service._transcript_text): [Qn] tags and (kind) for non-answers."""
+    return "\n".join(
+        (f"[Q{t['question_number']}] " if t.get("question_number") else "")
+        + f"[{ROLES[t['role']]}]"
+        + (f" ({t['kind'].replace('_', ' ')})" if t.get("kind") not in (None, "answer") else "")
+        + f": {t['text']}"
+        for t in session["turns"]
+    )
 
 
 def _words(s: str) -> set:
@@ -35,7 +44,8 @@ def overlap(a: str, b: str) -> float:
 def align(session: dict, report: dict) -> list:
     """One row per labelled student answer: {label, verdict (True/False/None if the grader skipped it), score}."""
     labelled = [t for t in session["turns"] if t.get("label")]
-    rows = [{"label": t["label"], "text": t["text"], "verdict": None, "score": None} for t in labelled]
+    rows = [{"label": t["label"], "text": t["text"], "verdict": None, "score": None, "no_answer": t.get("no_answer", False),
+             "min_score": t.get("min_score", 0), "max_score": t.get("max_score", 100)} for t in labelled]
     used = set()
     for qa in report.get("qa_transcripts") or []:
         resp = qa.get("student_response") or ""
@@ -63,7 +73,10 @@ def summarize(rows: list, gaps: list, cost_usd: float, errors: int) -> dict:
     scored = [r for r in rows if r["label"] in ("correct", "wrong")]
     right = [r for r in scored if r["label"] == "correct"]
     wrong = [r for r in scored if r["label"] == "wrong"]
-    hits = sum(r["verdict"] is (r["label"] == "correct") for r in scored)
+    # a no_answer turn (e.g. the transcription prompt echoed back) may also be skipped by the grader
+    hits = sum(r["verdict"] is (r["label"] == "correct") or (r["verdict"] is None and bool(r.get("no_answer"))) for r in scored)
+    band_misses = [r for r in scored if isinstance(r.get("score"), (int, float))
+                   and not r.get("min_score", 0) <= r["score"] <= r.get("max_score", 100)]
     false_pass = sum(r["verdict"] is True for r in wrong)
     false_fail = sum(r["verdict"] is False for r in right)
     accuracy = hits / len(scored) if scored else 0.0
@@ -74,11 +87,12 @@ def summarize(rows: list, gaps: list, cost_usd: float, errors: int) -> dict:
         "wrong_marked_correct": f"{false_pass}/{len(wrong)}",
         "right_marked_wrong": f"{false_fail}/{len(right)}",
         "skipped_by_grader": sum(r["verdict"] is None for r in scored),
+        "score_band_misses": len(band_misses),
         "grading_errors": errors,
         "mastery_gap_mean": round(statistics.mean(gaps), 1) if gaps else None,
         "mastery_gap_max": round(max(gaps), 1) if gaps else None,
         "cost_usd": round(cost_usd, 4),
-        "passed": accuracy >= MIN_ACCURACY and false_pass_rate <= MAX_FALSE_PASS_RATE,
+        "passed": accuracy >= MIN_ACCURACY and false_pass_rate <= MAX_FALSE_PASS_RATE and not band_misses,
     }
 
 
@@ -98,18 +112,30 @@ async def run(data: dict, repeats: int) -> dict:
         return s, report, state.total_cost_usd
 
     results = await asyncio.gather(*(grade(s) for _ in range(repeats) for s in data["sessions"]))
-    rows, gaps, cost, errors, misses = [], [], 0.0, 0, []
+    rows, gaps, cost, errors, misses, by_answer, bracketed = [], [], 0.0, 0, [], {}, 0
     for s, report, c in results:
         cost += c
         errors += "grading_error" in report
+        bracketed += sum(bool(re.search(r"[\[\]]", qa.get("student_response") or ""))
+                         for qa in report.get("qa_transcripts") or [])
         r = align(s, report)
         rows += r
+        for i, x in enumerate(r):
+            if isinstance(x["score"], (int, float)):
+                by_answer.setdefault((s["id"], i), []).append(x["score"])
         gap = mastery_gap(report, r)
         if gap is not None:
             gaps.append(gap)
         misses += [f"{s['id']}: {x['label']} answer judged {x['verdict']}: {x['text'][:90]}"
-                   for x in r if x["label"] != "ambiguous" and x["verdict"] is not (x["label"] == "correct")]
-    return {**summarize(rows, gaps, cost, errors), "repeats": repeats, "misjudged": misses}
+                   for x in r if x["label"] != "ambiguous" and x["verdict"] is not (x["label"] == "correct")
+                   and not (x["verdict"] is None and x["no_answer"])]
+        misses += [f"{s['id']}: score {x['score']} outside {x['min_score']}-{x['max_score']}: {x['text'][:90]}"
+                   for x in r if x["label"] != "ambiguous" and isinstance(x["score"], (int, float))
+                   and not x["min_score"] <= x["score"] <= x["max_score"]]
+    summary = summarize(rows, gaps, cost, errors)
+    spread = max((max(v) - min(v) for v in by_answer.values()), default=0)
+    return {**summary, "score_spread_max": spread, "bracketed_student_responses": bracketed,
+            "passed": summary["passed"] and not bracketed, "repeats": repeats, "misjudged": misses}
 
 
 def main() -> int:
