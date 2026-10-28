@@ -52,6 +52,13 @@ logger = get_logger(__name__)
 VOICE_TEST_GOAL_KEY = "goal-finish-voice-test"
 # colearner hangs a call up by 8 min + 3 min warm-up + grace; past this an unfinished call was abandoned
 ABANDONED_AFTER_SECONDS = 15 * 60
+# A reload reopens an unfinished session this long after it was opened (_unfinished_session):
+# the longest legitimate session - 3 min warm-up + 8 min test + 10 min of pauses (colearner's
+# READY_ALLOWANCE_SECONDS, MAX_CALL_SECONDS, MAX_PAUSE_SECONDS) + its 20 s grace = 21.3 min - plus slack.
+# Longer than ABANDONED_AFTER_SECONDS on purpose: that watcher is per call and, once a reload has
+# moved the session to a new call, only finds the old call id gone (colearner drops it).
+# A session with a record never reopens, whatever its age.
+RESUME_WINDOW_SECONDS = 25 * 60
 _background: set[asyncio.Task] = set()
 
 
@@ -116,7 +123,7 @@ async def _unfinished_session(db: AsyncSession, student_id, test_id) -> AiAssess
     could still be live - the one a reload must carry on."""
     if test_id is None:
         return None
-    since = datetime.now(timezone.utc) - timedelta(seconds=ABANDONED_AFTER_SECONDS)
+    since = datetime.now(timezone.utc) - timedelta(seconds=RESUME_WINDOW_SECONDS)
     return await db.scalar(
         select(AiAssessorSession).where(
             AiAssessorSession.student_id == student_id, AiAssessorSession.test_id == test_id,

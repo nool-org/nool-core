@@ -45,7 +45,7 @@ async def create_call(body: CreateCallIn, _user: AuthenticatedUser = Depends(get
     answer out. See realtime_service's module docstring."""
     try:
         answer, call = await realtime_service.create_call(
-            sdp_offer=body.sdp, config=body.config, owner_ref=body.owner_ref
+            sdp_offer=body.sdp, config=body.config, owner_ref=body.owner_ref, owner_uid=_user.uid
         )
     except realtime_service.RealtimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

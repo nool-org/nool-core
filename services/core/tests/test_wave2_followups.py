@@ -9,6 +9,7 @@ inside the test's own transaction (rolled back with everything else).
 
 import importlib.util
 import logging
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -220,6 +221,13 @@ async def test_reopening_an_unfinished_test_carries_on_the_same_session(schema, 
     again = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
     assert not first.resumed
     assert again.session_id == first.session_id and again.resumed
+
+    # a long but legitimate session (warm-up + test + pauses, past the 15-min abandon watcher)
+    opened = await db.get(AiAssessorSession, first.session_id)
+    opened.created_at -= timedelta(minutes=20)
+    await db.flush()
+    late = await ai_assessor.open_session(_open(s['test']), app_user=student, db=db)
+    assert late.session_id == first.session_id and late.resumed
 
     # finished (a record exists): a later open is a new session
     db.add(AiAssessorSessionRecord(session_id=first.session_id, report={}))
