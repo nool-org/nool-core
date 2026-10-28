@@ -207,3 +207,10 @@ async def test_maths_gets_problem_first_rules_science_does_not():
     await fill_gaps(Recording([_Drafts(questions=[question(0)])], [_Verdicts(verdicts=ok(0))]), science,
                     generation_model="gen", verify_model="ver")
     assert "PROBLEMS" not in next(s for t, s in systems if t == "_Drafts")
+
+
+def test_the_writer_is_told_plain_unicode_and_balanced_equations():
+    """C-007: generated homework stems carried $...$ LaTeX and an unbalanced equation."""
+    from src.services.gap_fill import GENERATE_SYSTEM
+
+    assert "never" in GENERATE_SYSTEM and "LaTeX" in GENERATE_SYSTEM and "balanced" in GENERATE_SYSTEM
