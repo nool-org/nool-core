@@ -81,13 +81,15 @@ async def open_session(
         test = await db.get(VoiceTest, body.test_id)
         if test.opens_later(datetime.now(timezone.utc)):
             raise ConflictError("This test hasn't opened yet.", code="NOT_OPEN_YET")
-        if await db.scalar(select(VoiceTest.id).where(VoiceTest.id == body.test_id, VoiceTest.still_open())) is None:
-            raise ConflictError("This test's deadline has passed, so it can't be taken any more.")
-        prep_status = await db.scalar(select(VoiceTest.prep_status).where(VoiceTest.id == body.test_id))
-        if prep_status == VoiceTestPrepStatus.PENDING:
+        if test.prep_status == VoiceTestPrepStatus.PENDING:
             # the app waits and tries again on its own for this code (voice-session.tsx)
             raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.",
                                 code="QUESTIONS_PREPARING")
+        if test.prep_status == VoiceTestPrepStatus.FAILED:  # never run a test without its questions (V-006, AI-011)
+            raise ConflictError("Milo couldn't get this test's questions ready. Your teacher can try again.",
+                                code="QUESTIONS_FAILED")
+        if await db.scalar(select(VoiceTest.id).where(VoiceTest.id == body.test_id, VoiceTest.still_open())) is None:
+            raise ConflictError("This test's deadline has passed, so it can't be taken any more.")
     ai_session = AiAssessorSession(
         student_id=app_user.id,
         test_id=body.test_id,

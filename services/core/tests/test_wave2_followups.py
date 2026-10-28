@@ -195,10 +195,10 @@ async def test_open_session_waits_for_prep_and_returns_the_question_count(schema
     with pytest.raises(ConflictError, match="getting this test's questions ready"):
         await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
 
-    s["test"].prep_status = VoiceTestPrepStatus.FAILED  # no questions: open, improvise
+    s["test"].prep_status = VoiceTestPrepStatus.FAILED  # no questions: never opens (V-006, AI-011)
     await db.flush()
-    out = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
-    assert out.model_dump(by_alias=True)["questionCount"] == 0
+    with pytest.raises(ConflictError, match="couldn't get this test's questions ready"):
+        await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
 
     await _question(db, s, B.REMEMBER, "Define resistance.")
     await _question(db, s, B.UNDERSTAND, "Explain why a wire heats up.")

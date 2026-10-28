@@ -104,6 +104,7 @@ async def test_whole_class_target_resolves_current_roster_at_creation_time(db_se
     # still a DRAFT - students only see it once the teacher schedules it
     my_tests = await assigned_test.list_my_tests(user=student_a, session=db_session)
     assert result.id not in {t.id for t in my_tests.items}
+    await _questions_ready(db_session, result.id)
     await voice_test.schedule_test(result.id, user=teacher, _feature=teacher, session=db_session)
 
     # The real end-to-end regression check: each student's own
@@ -135,6 +136,7 @@ async def test_specific_students_target_still_only_delivers_to_the_picked_studen
     result = await voice_test.create_test(body, background_tasks=BackgroundTasks(), user=teacher, session=db_session)
 
     assert result.assigned_count == 1
+    await _questions_ready(db_session, result.id)
     await voice_test.schedule_test(result.id, user=teacher, _feature=teacher, session=db_session)
 
     picked_tests = await assigned_test.list_my_tests(user=picked, session=db_session)
@@ -142,3 +144,9 @@ async def test_specific_students_target_still_only_delivers_to_the_picked_studen
 
     not_picked_tests = await assigned_test.list_my_tests(user=not_picked, session=db_session)
     assert result.id not in {t.id for t in not_picked_tests.items}
+
+
+async def _questions_ready(db, test_id):
+    """The prep background task never runs in a direct route call - settle it as a successful prep does."""
+    from src.domain.models.voice_test import VoiceTest, VoiceTestPrepStatus
+    (await db.get(VoiceTest, uuid.UUID(str(test_id)))).prep_status = VoiceTestPrepStatus.READY

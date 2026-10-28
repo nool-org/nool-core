@@ -205,8 +205,8 @@ async def _scheduled_test(db, w):
                      completion_window_hours=48, target=AssignmentTarget(mode=AssignmentTargetMode.WHOLE_CLASS)),
         background_tasks=BackgroundTasks(), user=w.teacher, _feature=w.teacher, session=db)
     # The question-prep background task never runs in this direct-call test;
-    # settle it the way prep does when no dataset question fits, so sessions may start.
-    (await db.get(VoiceTest, uuid.UUID(str(created.id)))).prep_status = VoiceTestPrepStatus.FAILED
+    # settle it as a successful prep does - students only get a test once its questions are ready (V-006).
+    (await db.get(VoiceTest, uuid.UUID(str(created.id)))).prep_status = VoiceTestPrepStatus.READY
     w.test = await voice_test.schedule_test(created.id, user=w.teacher, _feature=w.teacher, session=db)
     return w.test
 

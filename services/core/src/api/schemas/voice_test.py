@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import Field
 
 from src.domain.models import BloomLevel, TestStatus, VoiceTestQuestionStatus
+from src.domain.models.voice_test import VoiceTestPrepStatus
 
 from .bloom import BloomTarget  # noqa: F401 - re-exported for convenience
 from .common import CamelModel
@@ -25,6 +26,8 @@ class VoiceTestOut(CamelModel):
     created_at: datetime
     due_at: datetime | None = None  # end of the completion window (set once scheduled)
     opens_at: datetime | None = None  # when students can start it (set once scheduled; may be later)
+    # pending while Milo prepares the questions; students get the test only once ready (failed: POST .../prepare)
+    prep_status: VoiceTestPrepStatus = VoiceTestPrepStatus.READY
 
 
 class RemindIn(CamelModel):

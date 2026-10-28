@@ -22,6 +22,7 @@ import re
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,18 +38,21 @@ from src.domain.models import (
     StudentProfile,
     StudentTopicMastery,
     Subject,
+    TestStatus,
     Topic,
     User,
     VoiceTest,
     VoiceTestBloomLevel,
     VoiceTestQuestion,
     VoiceTestQuestionStatus,
+    VoiceTestTargetStudent,
 )
 from src.domain.models.question_paper import PaperDifficultyLevel
 from src.domain.models.voice_test import VoiceTestPrepStatus
 from src.repositories import get_session
 from src.repositories.dataset_access import visible_datasets
-from src.services import ai_context, challenge_suggester, daily_practice, generation_client, kg_client, question_types
+from src.services import (ai_context, challenge_suggester, daily_practice, generation_client, kg_client, push,
+                          question_types)
 from src.services.question_selector import Slot, select_questions
 
 logger = logging.getLogger(__name__)
@@ -96,13 +100,31 @@ async def prepare_in_background(test_id: uuid.UUID, teacher_id: uuid.UUID) -> No
 
 
 async def prepare_test(session: AsyncSession, test: VoiceTest, teacher: User) -> None:
-    """Sets test.prep_status: PENDING while it runs (sessions wait), then
-    READY with questions or FAILED without (the co-learner improvises)."""
+    """Sets test.prep_status: PENDING while it runs, then READY with
+    questions or FAILED without. Students only get the test once READY
+    (VoiceTest.still_open), so a test sent while this runs is announced here."""
     test.prep_status = VoiceTestPrepStatus.PENDING
     await session.commit()
     test.prep_status = (VoiceTestPrepStatus.READY if await _prepare(session, test, teacher)
                         else VoiceTestPrepStatus.FAILED)
     await session.commit()
+    await announce(session, test)
+
+
+async def announce(session: AsyncSession, test: VoiceTest) -> None:
+    """The "new voice test" push, once the test is both sent (open now) and
+    has its questions - called after each of those two commits, so whichever
+    happens second sends it.
+    ponytail: if both commit at the same instant students may get it twice."""
+    await session.refresh(test)
+    if (test.status != TestStatus.SCHEDULED or not test.questions_ready or test.scheduled_at is None
+            or test.opens_later(datetime.now(timezone.utc))):
+        return
+    chapter = await session.get(Chapter, test.chapter_id)
+    student_ids = (await session.execute(
+        select(VoiceTestTargetStudent.student_id).where(VoiceTestTargetStudent.test_id == test.id))).scalars().all()
+    await push.notify(session, student_ids, f"New voice test: {chapter.name if chapter else 'Chapter'}",
+                      "Tap to start when you're ready.", {"type": "voice_test", "testId": str(test.id)})
 
 
 async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> bool:
