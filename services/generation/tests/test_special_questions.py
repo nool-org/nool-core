@@ -33,7 +33,7 @@ def request(*kinds):
 
 
 def test_writes_verifies_and_maps_to_cores_spec():
-    llm = FakeLLM({"WhoIsRight": [WHO], "Verdict": [{"ok": True, "problem": ""}], "MakeYourOwn": [MINE]})
+    llm = FakeLLM({"WhoIsRight": [WHO], "Verdict": [{"ok": True, "problem": ""}] * 2, "MakeYourOwn": [MINE]})
     out = asyncio.run(svc.write_questions(llm, request("who_is_right", "make_your_own"), model="gpt-5.1",
                                           verify_model="gpt-5-mini")).questions
     who, mine = sorted(out, key=lambda q: q.slot_index)
@@ -42,7 +42,7 @@ def test_writes_verifies_and_maps_to_cores_spec():
     assert mine.spec["check"] == {"kind": "pair_hcf_lcm", "params": {"hcf": 6, "lcm": 36}}
     assert mine.spec["example"] == ["12", "18"]
     types = [c["type"] for c in llm.calls]
-    assert types.count("Verdict") == 1  # make_your_own is checked by code in core, not by a model
+    assert types.count("Verdict") == 2  # make_your_own too: do its params state the question's condition?
     assert "pair_hcf_lcm: two numbers" in next(c for c in llm.calls if c["type"] == "MakeYourOwn")["system"]
 
 
@@ -65,3 +65,17 @@ def test_a_question_built_from_an_official_one_uses_it_and_the_cheaper_model():
     writer = next(c for c in llm.calls if c["type"] == "WhoIsRight")
     assert writer["model"] == "gpt-5-mini" and "OFFICIAL QUESTION: Can 15ⁿ end with the digit 0?" in writer["system"]
     assert "15ⁿ = 3ⁿ × 5ⁿ has no factor 2." in writer["system"] and q.kind == "who_is_right"
+
+
+def test_a_make_your_own_with_params_not_matching_its_question_is_rewritten():
+    """AI-019: make_your_own skipped the verifier, so params of another condition (or unreadable
+    params_json kept as {}) would mark right answers wrong."""
+    off = {**MINE, "params_json": '{"hcf": 6, "lcm": 72}', "example": ["18", "24"]}
+    llm = FakeLLM({"MakeYourOwn": [off, MINE], "Verdict": [{"ok": False, "problem": "LCM 72, not 36."},
+                                                            {"ok": True, "problem": ""}]})
+    [q] = asyncio.run(svc.write_questions(llm, request("make_your_own"), model="m", verify_model="v")).questions
+    assert q.spec["check"]["params"] == {"hcf": 6, "lcm": 36} and "LCM 72, not 36." in llm.calls[2]["user"]
+    assert "say exactly the condition" in llm.calls[1]["system"]
+
+    llm = FakeLLM({"MakeYourOwn": [{**MINE, "params_json": "hcf 6"}] * 2, "Verdict": []})
+    assert asyncio.run(svc.write_questions(llm, request("make_your_own"), model="m", verify_model="v")).questions == []

@@ -21,7 +21,6 @@
 
 import logging
 import re
-import random
 import uuid
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -58,7 +57,8 @@ from src.repositories.subscription_repository import get_active_plan
 from src.services.feature_entitlements import is_feature_enabled
 from src.services import ai_context, answer_checks, generation_client, question_types
 from src.services.homework_builder import _sections
-from src.services.mcq_test import award_points, correct_index, explanation_of, strip_inline_options
+from src.services.mcq_test import (award_points, correct_index, explanation_of, shuffle_options, strip_inline_options,
+                                   unlabel)
 from src.services.question_selector import text_only_filter
 
 logger = logging.getLogger(__name__)
@@ -214,8 +214,8 @@ async def _import_bank(session: AsyncSession, dataset_ids: list[uuid.UUID], topi
         uids.add(uid)
         added.append(PracticeQuestion(
             chapter_id=topic.chapter_id, topic_id=topic.id, bloom_level=q.bloom_level, kind=kind,
-            text=strip_inline_options(q.text) if kind == "mcq" else q.text,
-            options=[str(o).strip() for o in q.options] if kind == "mcq" else None, correct_index=index,
+            text=strip_inline_options(q.text, q.options) if kind == "mcq" else q.text,
+            options=[unlabel(o) for o in q.options] if kind == "mcq" else None, correct_index=index,
             expected_points=[], misconceptions=[], source_question_id=q.id, origin="bank", used_count=0))
         if len(added) == BANK_IMPORT_LIMIT:
             break
@@ -259,13 +259,12 @@ async def _generate(session: AsyncSession, school_class: SchoolClass, chapter_id
         if index is None or not 0 <= slot_index < len(slots) or slot_index in made:
             continue
         slot = slots[slot_index]
-        options = [str(o).strip() for o in g["options"]]
-        answer = options[index]
-        random.Random(f"{seed}:{slot_index}").shuffle(options)  # models tend to put the answer first
+        options, index, explanation = shuffle_options([str(o).strip() for o in g["options"]], index,
+                                                      g.get("explanation") or "", f"{seed}:{slot_index}")
         made[slot_index] = PracticeQuestion(
             chapter_id=chapter_id, topic_id=slot.topic.id, bloom_level=slot.bloom_level, kind="mcq",
-            text=g["text"], options=options, correct_index=options.index(answer),
-            explanation=g.get("explanation") or None, hint=g.get("hint") or None,
+            text=strip_inline_options(g["text"], options), options=options, correct_index=index,
+            explanation=explanation or None, hint=g.get("hint") or None,
             expected_points=[], misconceptions=[], origin="generated", used_count=0)
     session.add_all(made.values())
     await session.flush()

@@ -224,3 +224,16 @@ async def test_a_students_homework_reuses_questions_generated_for_another_studen
 
     again = await build_for(a)                                     # A already had it: a fresh one
     assert [d.text for d in again] == ["generated q2"] and len(calls) == 2
+
+
+def test_a_bank_mcq_lists_its_options_once_and_drops_the_source_numbering():
+    """C-008: the stem's own (A)-(D) plus our (a)-(d) printed the options twice; "Ans. (2)" leaked."""
+    from src.domain.models import DatasetQuestion, QuestionType
+    from src.services.homework_builder import _from_bank
+
+    q = DatasetQuestion(id=uuid.uuid4(), dataset_id=uuid.uuid4(), bloom_level=BloomLevel.REMEMBER,
+                        question_type=QuestionType.MCQ, external_uid="u1", options=["lemon juice", "vinegar"],
+                        text="Which is acetic acid?\n(A) lemon juice\n(B) vinegar", answer="vinegar", solution="Ans. (2)")
+    draft = _from_bank(q)
+    assert draft.text == "Which is acetic acid?\n(a) lemon juice\n(b) vinegar"
+    assert draft.answer == "(b) vinegar"

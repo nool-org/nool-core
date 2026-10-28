@@ -54,6 +54,7 @@ from src.domain.models import (
     StudentTestResult,
     StudentTestResultBloomScore,
     Subject,
+    Topic,
     User,
     VoiceTest,
     VoiceTestBloomLevel,
@@ -63,7 +64,7 @@ from src.repositories.dataset_access import visible_datasets
 from src.repositories.database import get_session
 from src.services import generation_client, push
 from src.services.growth import corrected, growth_entries, percent
-from src.services.homework_builder import _sections, question_uid
+from src.services.homework_builder import _sections, chain_uids, question_uid
 from src.services.question_selector import text_only_filter
 
 logger = logging.getLogger(__name__)
@@ -91,11 +92,16 @@ def status(mcq: McqTest) -> str:
 _INLINE_OPTION = re.compile(r"^\s*\(?[a-dA-D][.)]\s+\S")
 
 
-def strip_inline_options(text: str) -> str:
+def strip_inline_options(text: str, options: list[str] | None = None) -> str:
     """Bank questions sometimes carry their choices in the stem ("a. -20 cm").
-    The options are shown as buttons, so drop those trailing lines."""
+    The options are shown as buttons, so drop those trailing lines. Given the
+    options, only lines that are options (and blank lines between them) - a
+    stem's own lettered list ("A. Riya adds water...") stays."""
     lines = text.rstrip().split("\n")
-    while lines and _INLINE_OPTION.match(lines[-1]):
+    opts = {unlabel(o).lower() for o in options or []}
+    while lines and (_INLINE_OPTION.match(lines[-1]) or (opts and not lines[-1].strip())):
+        if opts and lines[-1].strip() and unlabel(lines[-1]).lower() not in opts:
+            break
         lines.pop()
     return "\n".join(lines).rstrip() or text
 
@@ -236,6 +242,36 @@ class _Draft:
     hint: str = ""
 
 
+_LABEL = re.compile(r"^\s*(?:\([a-dA-D]\)|[a-dA-D][.)])\s+")
+# "option (A)", "Options B and D", "option (c)" - a reference to an option by its letter
+# (a bare lowercase "option a" is left alone: it's usually the article)
+_OPTION_LETTERS = re.compile(
+    r"\b(?i:options?)\s*(?:\([A-Da-d]\)|[A-D])(?:\s*(?:,|and|or|&)\s*(?:\([A-Da-d]\)|[A-D]))*(?!\w)")
+_LETTER = re.compile(r"(?<![A-Za-z])[A-Da-d](?![A-Za-z])")  # a lone letter, not one inside "options"/"and"
+
+
+def unlabel(option: str) -> str:
+    """An option without its own leading "(A)"/"A." label - the app letters the buttons."""
+    return _LABEL.sub("", str(option)).strip() or str(option).strip()
+
+
+def relabel(text: str, order: list[int]) -> str:
+    """`text`'s "option (A)"-style letters moved with the options, after
+    options = [options[i] for i in order]."""
+    def letter(m: re.Match) -> str:
+        abc = "ABCD" if m.group().isupper() else "abcd"
+        return abc[order.index(abc.index(m.group()))]
+    return _OPTION_LETTERS.sub(lambda m: _LETTER.sub(letter, m.group()), text or "")
+
+
+def shuffle_options(options: list[str], index: int, explanation: str, seed: str) -> tuple[list[str], int, str]:
+    """The options in a seeded order (models put the answer first), unlabelled, with
+    the new answer index and the explanation's option letters following them."""
+    order = list(range(len(options)))
+    random.Random(seed).shuffle(order)
+    return [unlabel(options[i]) for i in order], order.index(index), relabel(explanation, order)
+
+
 def explanation_of(options: list[str], index: int, explanation: str | None = None) -> str:
     return (explanation or "").strip() or f"The answer is {options[index]}."
 
@@ -291,7 +327,6 @@ async def _generate(session, *, test, slots, open_slots, scores: VoiceScores, dr
         return
     subject = await session.get(Subject, test.subject_id)
     school_class = await session.get(SchoolClass, test.class_id)
-    all_misconceptions = [m for ms in scores.misconceptions.values() for m in ms]
     payload = {
         "subject": subject.name if subject else "Science",
         "grade": school_class.grade if school_class else 10,
@@ -300,7 +335,8 @@ async def _generate(session, *, test, slots, open_slots, scores: VoiceScores, dr
         "slots": [{"bloom_level": slots[i][0].value, "difficulty": "HARD" if i == len(slots) - 1 else "MEDIUM",
                    "question_type": "mcq",
                    "concept": slots[i][1],
-                   "misconceptions": list(dict.fromkeys(scores.misconceptions.get(slots[i][1]) or all_misconceptions))[:6]}
+                   # only this concept's: another question's misconceptions make off-topic distractors
+                   "misconceptions": list(dict.fromkeys(scores.misconceptions.get(slots[i][1]) or []))[:6]}
                   for i in open_slots],
         "examples": [],
         "avoid": [d.text for d in drafts.values()],
@@ -315,11 +351,10 @@ async def _generate(session, *, test, slots, open_slots, scores: VoiceScores, dr
         if index is None or not 0 <= g.get("slot_index", -1) < len(open_slots):
             continue
         slot = open_slots[g["slot_index"]]
-        options = [str(o).strip() for o in g["options"]]
-        answer = options[index]
-        random.Random(f"{seed}:{slot}").shuffle(options)  # models tend to put the answer first
-        drafts[slot] = _Draft(slots[slot][0], slots[slot][1], g["text"], options, options.index(answer),
-                              explanation=g.get("explanation") or "", hint=g.get("hint") or "")
+        options, index, explanation = shuffle_options([str(o).strip() for o in g["options"]], index,
+                                                      g.get("explanation") or "", f"{seed}:{slot}")
+        drafts[slot] = _Draft(slots[slot][0], slots[slot][1], g["text"], options, index,
+                              explanation=explanation, hint=g.get("hint") or "")
 
 
 async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -> list[McqTestQuestion]:
@@ -333,7 +368,7 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     scores = await voice_scores(session, student.id, test)
     slots = plan_slots(scores.levels, scores.concepts)
     bank = await _bank(session, student, test)
-    used: set[str] = set()
+    used: set[str] = await chain_uids(session, test.id, student.id)  # never the test's or homework's own
 
     def take(pred, pool=bank) -> DatasetQuestion | None:
         for q in pool:
@@ -343,9 +378,13 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
         return None
 
     def from_bank(q: DatasetQuestion, concept: str) -> _Draft:
-        concept = concept if _has_concept(q, concept) else next(
-            (c for c in scores.concepts if _has_concept(q, c)), concept)
-        return _Draft(q.bloom_level, concept, q.text, [str(o).strip() for o in q.options],
+        # labelled with what the question is about (its gap_concept follows): a weak concept it is
+        # tagged with - or, untagged, asked under its topic - else its own tag or its topic's name
+        def on(c: str) -> bool:
+            return _has_concept(q, c) if q.concepts else q.topic_id in (topics_of.get(c.lower()) or asked)
+        concept = concept if on(concept) else next(
+            (c for c in scores.concepts if on(c)), (q.concepts or [None])[0] or topic_names.get(q.topic_id) or concept)
+        return _Draft(q.bloom_level, concept, q.text, [unlabel(o) for o in q.options],
                       correct_index(q.options, q.answer), q.id)
 
     drafts: dict[int, _Draft] = {}
@@ -354,6 +393,8 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     # Only the slots it can't fill are designed by the generation service, aimed at the
     # student's own weak concepts with wrong options from their voice-test misconceptions.
     topics_of, asked = await _concept_topics(session, test)
+    topic_names = {t.id: re.sub(r"^[\d.]+\s*", "", t.name) for t in (await session.execute(
+        select(Topic).where(Topic.id.in_({q.topic_id for q in bank if q.topic_id})))).scalars()} if bank else {}
     for i, (level, concept) in enumerate(slots):
         on_concept = topics_of.get(concept.lower()) or asked
         q = take(lambda q: q.bloom_level == level and (_has_concept(q, concept) or q.topic_id in on_concept))
@@ -379,7 +420,8 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     await _explain_bank(drafts)
     # anything still without them gets the deterministic fallbacks
     rows = [McqTestQuestion(mcq_test_id=mcq.id, order=order, bloom_level=d.bloom_level, concept=d.concept,
-                            text=strip_inline_options(d.text), options=d.options, correct_index=d.correct_index,
+                            text=strip_inline_options(d.text, d.options), options=d.options,
+                            correct_index=d.correct_index,
                             source_question_id=d.source_question_id,
                             explanation=explanation_of(d.options, d.correct_index, d.explanation),
                             hint=hint_of(d.concept, d.options[d.correct_index], d.hint),

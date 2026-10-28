@@ -1,4 +1,4 @@
-"""Revision cards: 6-8 short cards that sum up one textbook topic - its key
+"""Revision cards: 4-8 short cards that sum up one textbook topic - its key
 ideas, definitions and formulas, one common mistake and one or two quick
 self-check questions. Core generates a topic's deck once and shows it to every
 student (services/core/src/services/revision_cards.py).
@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from src.services.llm import StructuredLLM
 
-MIN_CARDS, MAX_CARDS = 6, 8
+MIN_CARDS, MAX_CARDS = 4, 8  # 4: a thin topic gets fewer cards, never padding from outside the text
 MAX_TITLE = 80
 MAX_BODY = 400
 MAX_ANSWER = 250
@@ -30,7 +30,9 @@ Write {min_cards}-{max_cards} cards, in this order:
 - exactly one "mistake" card: a common mistake or misconception students make in this topic, and the fix,
 - one or two "check" cards: a quick self-check question in body, and its short answer in answer.
 Rules:
-- Use ONLY what the textbook text says - no facts from outside it.
+- Use ONLY what the textbook text says - no facts from outside it. If the text is too thin for more,
+  write fewer concept cards rather than adding anything it doesn't say.
+- A "check" card's answer must be stated in the text.
 - title: a few words. body: 2-3 short sentences, plain text in simple Indian English, under 60 words.
 - Maths and formulas in LaTeX inside $...$ (e.g. $v = u + at$). No markdown, no bullet lists.
 - answer: only for "check" cards (one short sentence or value); null for every other card.

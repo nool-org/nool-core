@@ -3,6 +3,7 @@
 import uuid
 
 import pytest
+from sqlalchemy import select
 
 from src.domain.models import (
     BloomLevel, Chapter, Dataset, DatasetQuestion, HomeworkDifficulty, QuestionType, Role, Subject, Topic, User,
@@ -123,3 +124,34 @@ async def test_off_difficulty_is_only_accepted_near_the_gap(db_session):
     far = await select_questions(db_session, dataset_ids=[s["imp"].id], chapter_id=s["chapter"].id,
                                  slots=[Slot(B.APPLY, D.HARD)])
     assert far.picked == [] and far.unfilled == [Slot(B.APPLY, D.HARD)]
+
+
+@pytest.mark.asyncio
+async def test_untrustworthy_keys_and_a_repeated_sub_question_stay_out(db_session):
+    """C-008: a key with a marker's note, an MCQ whose solution names another option, and a
+    second bank question repeating a picked one's sub-question never reach a homework."""
+    s = await _seed(db_session)
+    user_id = (await db_session.execute(select(DatasetQuestion.created_by).limit(1))).scalar_one()
+    opts = ["Both true, R explains A.", "Both true, R doesn't explain A.", "A is true but R is false.",
+            "A is false but R is true."]
+    dry = "Dry HCl gas does not change the colour of dry litmus paper. Why?"
+
+    def q(uid, **kw):
+        return DatasetQuestion(dataset_id=s["imp"].id, chapter_id=s["chapter"].id, topic_id=s["topic"].id,
+                               bloom_level=B.UNDERSTAND, difficulty=D.MEDIUM, created_by=user_id, external_uid=uid,
+                               **{"question_type": QuestionType.SHORT_ANSWER, "text": uid, "answer": "a", **kw})
+    db_session.add_all([
+        q("note", answer="(B) and (D). Marking scheme indicates (d) for another question."),
+        q("clash", question_type=QuestionType.MCQ, options=opts, answer=opts[3],
+          solution="(c) A is true but R is false.\nExplanation: ..."),
+        q("relettered", question_type=QuestionType.MCQ, options=opts, answer=opts[2],
+          solution="(b) A is true but R is false."),  # the source's own lettering, same answer: fine
+        q("dry-1", text=f"(a) What is an acid?\n(b) {dry}"),
+        q("dry-2", text=f"{dry} Explain."),
+    ])
+    await db_session.flush()
+    picked = _uids(await select_questions(
+        db_session, dataset_ids=[s["imp"].id], chapter_id=s["chapter"].id, topic_id=s["topic"].id,
+        slots=[Slot(B.UNDERSTAND, D.MEDIUM)] * 5, text_only=True, seed=1))
+    assert "note" not in picked and "clash" not in picked and "relettered" in picked
+    assert len({"dry-1", "dry-2"} & set(picked)) == 1

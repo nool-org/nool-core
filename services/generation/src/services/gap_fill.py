@@ -110,16 +110,22 @@ class _Verdicts(BaseModel):
 
 GENERATE_SYSTEM = """You write homework questions for CBSE Class {grade} {subject} students.
 Write exactly one question for each requested slot, based ONLY on the given NCERT textbook sections -
-no facts, formulas or data that aren't in them or standard for this class.
+no facts, formulas or data that aren't in them (a standard Class {grade} formula or definition only if the
+sections use it).
 - Match each slot's Bloom level (REMEMBER: recall; UNDERSTAND: explain; APPLY: use in a new situation or
   a numerical; ANALYZE: compare/break down; EVALUATE: justify/judge; CREATE: design/propose) and difficulty.
 - Text only: never refer to a figure, diagram or table the student can't see.
+- Plain text, no markup: write formulas and equations with Unicode (H₂SO₄, Ca²⁺, →, x², √2, ½), never
+  LaTeX, $...$ or {{tex}}. Every chemical equation you write is balanced.
 - The examples show the style and level of the question bank - match them, never copy or paraphrase them,
-  and don't repeat anything in `avoid`.
+  and don't repeat anything in `avoid`. Every question in this set is different: its own numbers,
+  expressions and examples, and not the same template with the values changed.
 - Give a model answer a teacher can mark against, and a short worked solution.
 - A slot with question_type "mcq" must be an mcq on its `concept` with exactly 4 options; build the wrong
-  options from its `misconceptions` (each a plausible belief a student really holds), never silly ones.
-  Give it an `explanation` (one short line: why the right option is right) and a `hint` (one line nudging
+  options from its `misconceptions` (each a plausible belief a student really holds; none given: common
+  mistakes on that concept), never silly or off-topic ones. Options carry no "(A)"/"A." labels - they are
+  shuffled and lettered by the app. Give it an `explanation` (one short line: why the right option is
+  right, by its idea - never "option A", the letters change) and a `hint` (one line nudging
   toward the idea - it never names, quotes or gives away the right option).
 - If a slot has `feedback`, your previous question for it was rejected for that reason - fix it."""
 
@@ -129,12 +135,12 @@ SUBJECT_STYLE = {
     "Mathematics": """
 MATHS - write PROBLEMS, not text questions:
 - Almost every question is something to work out: numbers to compute, a short word problem, a value to find,
-  a claim to check by calculating - the way CBSE Class 10 board papers ask (e.g. find the HCF/LCM of given
+  a claim to check by calculating - the way CBSE board papers ask (e.g. find the HCF/LCM of given
   numbers; a real-life word problem such as bells or lights repeating, packing or cutting into equal parts;
   find the other number given HCF, LCM and one number; find the smallest n that makes a product a perfect
   square; decide whether a given number can end in a digit). Only a REMEMBER slot may ask for a statement or
   definition, and even then prefer recognising a correct example.
-- Use numbers a Class 10 student can handle on paper in 1-3 minutes, no calculator.
+- Use numbers a student of this class can handle on paper in 1-3 minutes, no calculator.
 - MCQ options are answers (numbers or short expressions). Every wrong option is what a typical mistake
   gives - LCM instead of HCF, highest powers instead of lowest, a dropped prime, an arithmetic slip - never a
   random number.

@@ -11,11 +11,12 @@ look in the same format (attempt 2: fresh problems on the topics they
 missed) - mastered, or their teacher is told.
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -98,28 +99,55 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
     return test
 
 
+PREPARE_TIMEOUT_SECONDS = 300  # past this the teacher sees 'failed' and can set it again
+STALE_AFTER = timedelta(minutes=10)  # a 'preparing' this old lost its task (a restart) - it's failed
+
+
 async def prepare(test_id: uuid.UUID) -> None:
     """Picks the test's questions in its own session: pool first, then the bank,
     then generation (a type that can't be made becomes an MCQ on that level).
-    'ready' with questions, else 'failed'. Logged, never raised."""
+    'ready' with questions, else 'failed' - also on an error or after
+    PREPARE_TIMEOUT_SECONDS, so it never stays 'preparing'. Logged, never raised."""
+    try:
+        await asyncio.wait_for(_prepare(test_id), PREPARE_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001 - TimeoutError included
+        logger.exception("quiz_test_prepare_failed", extra={"quiz_test_id": str(test_id)})
+        from src.repositories import get_session
+
+        try:
+            async with get_session() as session:
+                await session.execute(update(QuizTest).where(
+                    QuizTest.id == test_id, QuizTest.status == "preparing").values(status="failed"))
+                await session.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("quiz_test_mark_failed_failed", extra={"quiz_test_id": str(test_id)})
+
+
+async def _prepare(test_id: uuid.UUID) -> None:
     from src.repositories import get_session
 
-    try:
-        async with get_session() as session:
-            test = await session.get(QuizTest, test_id)
-            if test is None or test.status != "preparing":
-                return
-            teacher = await session.get(User, test.created_by)
-            school_class = await session.get(SchoolClass, test.class_id)
-            topics = [await session.get(Topic, uuid.UUID(t)) for t in test.topic_ids]
-            with ai_context.feature("quiz_test_questions"):
-                chosen = await daily_practice._fill(session, teacher, school_class, plan(topics, test.mix),
-                                                    daily_practice.today_ist(), str(test.id), exact_level=True)
-            test.question_ids = [str(q.id) for _, q in chosen]
-            test.status = "ready" if chosen else "failed"
-            await session.commit()
-    except Exception:  # noqa: BLE001
-        logger.exception("quiz_test_prepare_failed", extra={"quiz_test_id": str(test_id)})
+    async with get_session() as session:
+        test = await session.get(QuizTest, test_id)
+        if test is None or test.status != "preparing":
+            return
+        teacher = await session.get(User, test.created_by)
+        school_class = await session.get(SchoolClass, test.class_id)
+        topics = [await session.get(Topic, uuid.UUID(t)) for t in test.topic_ids]
+        with ai_context.feature("quiz_test_questions"):
+            chosen = await daily_practice._fill(session, teacher, school_class, plan(topics, test.mix),
+                                                daily_practice.today_ist(), str(test.id), exact_level=True)
+        test.question_ids = [str(q.id) for _, q in chosen]
+        test.status = "ready" if chosen else "failed"
+        await session.commit()
+
+
+def status_of(test: QuizTest, now: datetime | None = None) -> str:
+    """Its status, with a 'preparing' whose background task died (a restart
+    mid-prepare) shown as 'failed' once it can no longer finish."""
+    now = now or datetime.now(timezone.utc)
+    if test.status == "preparing" and test.created_at and now - test.created_at > STALE_AFTER:
+        return "failed"
+    return test.status
 
 
 async def own_test(session: AsyncSession, teacher: User, test_id: str) -> QuizTest:

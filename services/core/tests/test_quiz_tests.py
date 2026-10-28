@@ -187,6 +187,34 @@ async def test_publishing_needs_ready_questions_and_maths_has_no_voice_tests(db_
                                        session=db_session)
 
 
+async def test_preparing_never_sticks_on_a_hang_an_error_or_a_restart(db_session, monkeypatch):
+    """T-009: the teacher saw "Picking questions..." for 7+ minutes - prepare() logged an
+    error (or hung on the model) and left the test 'preparing' for good."""
+    import asyncio
+
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)
+
+    async def hang(*a, **k):
+        await asyncio.sleep(30)
+
+    async def boom(*a, **k):
+        raise KeyError("text")
+
+    monkeypatch.setattr(service, "PREPARE_TIMEOUT_SECONDS", 0.05, raising=False)
+    for fill in (boom, hang):
+        monkeypatch.setattr(service.daily_practice, "_fill", fill)
+        created = await _create(db_session, s, monkeypatch)
+        assert (await routes.get_quiz_test(created.id, user=s.teacher, session=db_session)).status == "failed"
+        await db_session.delete(await db_session.get(QuizTest, service.uuid.UUID(created.id)))
+
+    # the server restarted mid-prepare: shown as failed once it can't finish
+    test = QuizTest(status="preparing", created_at=datetime.now(timezone.utc) - timedelta(minutes=11))
+    assert service.status_of(test) == "failed"
+    test.created_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    assert service.status_of(test) == "preparing"
+
+
 async def test_a_maths_challenge_is_fix_milos_homework_only(db_session, monkeypatch):
     """The other formats are for check-ins."""
     from src.domain.models import Chapter, Subject

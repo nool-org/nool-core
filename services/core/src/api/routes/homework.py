@@ -46,7 +46,7 @@ from src.repositories.lookups import (
 )
 from src.repositories.roster_repository import teaches_class_subject
 from src.services.question_selector import figure_svgs
-from src.services import push
+from src.services import homework_autogen, push
 from src.services.bloom_defaults import resolve_bloom_targets
 from src.services.homework_builder import QuestionDraft, build_homework_questions, grounding_dataset_id, question_uid
 
@@ -167,7 +167,10 @@ async def create_homework(
         raise ForbiddenError("You don't teach this subject in this class.")
     await ensure_datasets_visible(session, user, body.dataset_ids, subject_id=test.subject_id, grade=class_grade)
 
-    gap = await session.get(Topic, test.topic_id) if test.topic_id else await session.get(Chapter, test.chapter_id)
+    # a whole-chapter test's gap is the class's weakest topic on it (homework_autogen.weak_topics)
+    weakest = None if test.topic_id else next(iter(await homework_autogen.weak_topics(session, test.id)), None)
+    gap = (await session.get(Topic, test.topic_id or weakest) if test.topic_id or weakest
+           else await session.get(Chapter, test.chapter_id))
     hw = Homework(
         test_id=test.id,
         class_id=test.class_id,
@@ -267,8 +270,10 @@ async def generate_homework(
     await session.commit()  # the claim is visible to other requests; the lock is released
 
     try:
-        drafts = await build_homework_questions(
-            session, user=user, test=test, total=hw.total_questions, bloom_weights=bloom_distribution,
+        # a whole-chapter test: spread over the class's weak topics on it, not anywhere in the chapter
+        weak = [] if test.topic_id else await homework_autogen.weak_topics(session, test.id)
+        drafts = await homework_autogen.build_on_weak_topics(
+            session, weak, user=user, test=test, total=hw.total_questions, bloom_weights=bloom_distribution,
             difficulty=hw.difficulty, fallback_dataset_id=fallback_dataset_id, picked_dataset_ids=picked or None,
             seed=str(hw.id), release_before_generation=True,
         )
