@@ -19,6 +19,7 @@
 """
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -45,6 +46,17 @@ MAX_EXAMPLES = 4
 
 
 _HANDED_OUT = (HomeworkStatus.ASSIGNED, HomeworkStatus.IN_PROGRESS, HomeworkStatus.COMPLETED)
+
+# a marking-scheme bullet's own marks: "- Names the reaction. (0.5)"
+_BULLET_MARKS = re.compile(r"^(\s*[-*•].*?)\s*\(\d+(?:\.\d+)?\)[ \t]*$", re.MULTILINE)
+
+
+def _with_solution(answer: str, solution: str | None) -> str:
+    """The answer plus its worked solution, without the marks a bank's
+    marking-scheme bullets carry (T-012: "(1.0)" showed in the answer)."""
+    if not solution or solution.strip() == answer.strip():
+        return answer
+    return f"{answer}\n\n{_BULLET_MARKS.sub(r'\1', solution)}"
 
 
 @dataclass
@@ -237,8 +249,7 @@ def _from_bank(q: DatasetQuestion) -> QuestionDraft:
         text += "\n" + "\n".join(f"({letters[i]}) {o}" for i, o in enumerate(q.options))
         if answer in q.options:
             answer = f"({letters[q.options.index(answer)]}) {answer}"
-    if q.solution and q.solution.strip() != answer.strip():
-        answer = f"{answer}\n\n{q.solution}"
+    answer = _with_solution(answer, q.solution)
     return QuestionDraft(bloom_level=q.bloom_level, text=text, answer=answer, dataset_id=q.dataset_id,
                          source_question_id=q.id, source_uid=question_uid(q))
 
@@ -290,7 +301,7 @@ async def _generate(session, *, test, topic_id, slots, open_slots, drafts, examp
         text = q["text"]
         if q.get("options"):
             text += "\n" + "\n".join(f"({'abcd'[i]}) {o}" for i, o in enumerate(q["options"][:4]))
-        answer = q["answer"] if not q.get("solution") else f"{q['answer']}\n\n{q['solution']}"
+        answer = _with_solution(q["answer"], q.get("solution"))
         draft = QuestionDraft(bloom_level=slots[slot_index].bloom_level, text=text, answer=answer,
                               dataset_id=fallback_dataset_id)
         if user is not None and school_class is not None:
