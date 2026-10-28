@@ -64,7 +64,7 @@ from src.repositories.dataset_access import visible_datasets
 from src.repositories.database import get_session
 from src.services import generation_client, push
 from src.services.growth import corrected, growth_entries, percent
-from src.services.homework_builder import _sections, question_uid
+from src.services.homework_builder import _sections, chain_uids, question_uid
 from src.services.question_selector import text_only_filter
 
 logger = logging.getLogger(__name__)
@@ -368,7 +368,7 @@ async def ensure_questions(session: AsyncSession, mcq: McqTest, student: User) -
     scores = await voice_scores(session, student.id, test)
     slots = plan_slots(scores.levels, scores.concepts)
     bank = await _bank(session, student, test)
-    used: set[str] = set()
+    used: set[str] = await chain_uids(session, test.id, student.id)  # never the test's or homework's own
 
     def take(pred, pool=bank) -> DatasetQuestion | None:
         for q in pool:

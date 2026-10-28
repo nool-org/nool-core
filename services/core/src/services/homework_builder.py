@@ -19,6 +19,7 @@
 """
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -34,7 +35,7 @@ from src.domain.models.curriculum import Subtopic
 from src.domain.models.homework import Homework
 from src.repositories.dataset_access import visible_datasets
 from src.services import gap_packs, generation_client, homework_content_resolver
-from src.services.question_selector import Slot, plan_slots, select_questions, text_only_filter
+from src.services.question_selector import Slot, plan_slots, select_questions, sentences, text_only_filter
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,8 @@ async def build_homework_questions(
                    and (picked is None or str(d.id) in picked or d.name.startswith(gap_packs.PREFIX))]
 
     slots = plan_slots(total, bloom_weights, difficulty)
-    seen = await _seen_uids(session, test.class_id, student_id) | {d.source_uid for d in keep if d.source_uid}
+    seen = (await _seen_uids(session, test.class_id, student_id) | {d.source_uid for d in keep if d.source_uid}
+            | await chain_uids(session, test.id, student_id))
     focus = focus or Focus()
     topic_id = focus.topic_id or test.topic_id
     select_args = dict(dataset_ids=dataset_ids, chapter_id=test.chapter_id, seed=seed, text_only=True,
@@ -230,15 +232,46 @@ async def _seen_uids(session: AsyncSession, class_id, student_id=None) -> set[st
     return {uid for (uid,) in rows.all()}
 
 
+async def chain_uids(session: AsyncSession, test_id, student_id=None) -> set[str]:
+    """Bank questions already met on this voice test's chain: the test's own, and the
+    student's MCQ re-check and homework on it - so homework and re-check never repeat them."""
+    from src.domain.models import McqTest, McqTestQuestion, VoiceTestQuestion
+
+    sources = [select(VoiceTestQuestion.dataset_question_id).where(VoiceTestQuestion.voice_test_id == test_id)]
+    if student_id is not None:
+        sources += [
+            select(McqTestQuestion.source_question_id).join(McqTest, McqTest.id == McqTestQuestion.mcq_test_id)
+            .where(McqTest.voice_test_id == test_id, McqTest.student_id == student_id),
+            select(HomeworkQuestion.source_question_id).join(Homework, Homework.id == HomeworkQuestion.homework_id)
+            .where(Homework.test_id == test_id, or_(
+                Homework.target_mode == AssignmentTargetMode.WHOLE_CLASS,
+                Homework.id.in_(select(HomeworkTargetStudent.homework_id)
+                                .where(HomeworkTargetStudent.student_id == student_id))))]
+    ids = {i for q in sources for i in (await session.execute(q)).scalars() if i is not None}
+    if not ids:
+        return set()
+    uid = func.coalesce(DatasetQuestion.external_uid, cast(DatasetQuestion.id, String))
+    return set((await session.execute(select(uid).where(DatasetQuestion.id.in_(ids)))).scalars())
+
+
+# "Ans. (2)" on a line of its own: the source paper's numbering, meaningless here
+_ANS_NUMBER = re.compile(r"^\s*Ans\.?\s*\(\d+\)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
 def _from_bank(q: DatasetQuestion) -> QuestionDraft:
+    from src.services.mcq_test import strip_inline_options  # mcq_test imports this module
+
     text, answer = q.text, q.answer
     if q.options and q.question_type in (QuestionType.MCQ, QuestionType.TRUE_FALSE):
         letters = "abcdefgh"
-        text += "\n" + "\n".join(f"({letters[i]}) {o}" for i, o in enumerate(q.options))
+        # the stem's own copy of the options goes - they're listed once, lettered as the key says
+        text = strip_inline_options(text, q.options) + "\n" + "\n".join(
+            f"({letters[i]}) {o}" for i, o in enumerate(q.options))
         if answer in q.options:
             answer = f"({letters[q.options.index(answer)]}) {answer}"
     if q.solution and q.solution.strip() != answer.strip():
         answer = f"{answer}\n\n{q.solution}"
+    answer = re.sub(r"\n{3,}", "\n\n", _ANS_NUMBER.sub("", answer)).strip()
     return QuestionDraft(bloom_level=q.bloom_level, text=text, answer=answer, dataset_id=q.dataset_id,
                          source_question_id=q.id, source_uid=question_uid(q))
 
@@ -317,15 +350,17 @@ async def _bank_relaxed_fill(session, *, test, topic_id, dataset_ids, open_slots
                     text_only_filter(pictures=True))
              # same topic first, then the rest of the chapter
              .order_by((DatasetQuestion.topic_id == topic_id).desc().nulls_last(), DatasetQuestion.id))
+    used_sentences = {s for d in drafts.values() for s in sentences(d.text)}
     free = iter(open_slots)
     slot = next(free, None)
     for q in (await session.execute(query)).scalars():
         if slot is None:
             break
         uid = question_uid(q)
-        if uid in used_uids:
+        if uid in used_uids or sentences(q.text) & used_sentences:
             continue
         used_uids.add(uid)
+        used_sentences |= sentences(q.text)
         drafts[slot] = _from_bank(q)
         slot = next(free, None)
 

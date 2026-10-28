@@ -115,7 +115,8 @@ no facts, formulas or data that aren't in them or standard for this class.
   a numerical; ANALYZE: compare/break down; EVALUATE: justify/judge; CREATE: design/propose) and difficulty.
 - Text only: never refer to a figure, diagram or table the student can't see.
 - The examples show the style and level of the question bank - match them, never copy or paraphrase them,
-  and don't repeat anything in `avoid`.
+  and don't repeat anything in `avoid`. Every question in this set is different: its own numbers,
+  expressions and examples, and not the same template with the values changed.
 - Give a model answer a teacher can mark against, and a short worked solution.
 - A slot with question_type "mcq" must be an mcq on its `concept` with exactly 4 options; build the wrong
   options from its `misconceptions` (each a plausible belief a student really holds; none given: common

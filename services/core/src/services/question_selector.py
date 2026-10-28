@@ -18,10 +18,12 @@ import random
 import uuid
 from dataclasses import dataclass, field
 
-from sqlalchemy import and_, literal_column, not_, or_, select
+import re
+
+from sqlalchemy import and_, func, literal_column, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.models import BloomLevel, DatasetQuestion, HomeworkDifficulty
+from src.domain.models import BloomLevel, DatasetQuestion, HomeworkDifficulty, QuestionType
 from src.domain.models.question_paper import PaperDifficultyLevel
 
 
@@ -32,7 +34,7 @@ def _has(path: str):
 
 def text_only_filter(*, pictures: bool = False):
     """Questions the app can show: no figure, no reference to a figure the
-    import couldn't attach, no blank MCQ option. `pictures`: also ones whose
+    import couldn't attach, no blank MCQ option, a key that can be trusted (sound_key). `pictures`: also ones whose
     figures are all drawn inline (an "svg" - Nool's picture questions), for
     screens that render them; never an imported image file (a "blob")."""
     drawn = and_(_has("svg"), not_(_has("blob")))
@@ -44,7 +46,37 @@ def text_only_filter(*, pictures: bool = False):
         or_(DatasetQuestion.options.is_(None),
             not_(DatasetQuestion.options.op("@?")(literal_column(
                 """'$[*] ? (@.type() == "string" && @ like_regex "^[[:space:]]*$")'::jsonpath""")))),
+        sound_key(),
     )
+
+
+_NOTE = r"marking scheme|another question"
+
+
+def sound_key():
+    """Questions whose key can be trusted: no marker's note left in it ("Marking scheme
+    indicates ... for another question"), and no MCQ whose solution opens with another
+    option ("(c) A is true but R is false." under the answer "A is false but R is true.")."""
+    letter = func.substring(DatasetQuestion.solution, r"^\s*\(([a-dA-D])\)")
+    named = DatasetQuestion.options.op("->>")(func.ascii(func.lower(letter)) - 97)
+    rest = func.btrim(func.substring(DatasetQuestion.solution, r"^\s*\([a-dA-D]\)\s*([^\n]*)"))
+    clash = and_(DatasetQuestion.question_type == QuestionType.MCQ, letter.is_not(None),
+                 named.is_distinct_from(func.btrim(DatasetQuestion.answer)),
+                 rest.is_distinct_from(func.btrim(DatasetQuestion.answer)),
+                 func.lower(func.coalesce(func.substring(DatasetQuestion.answer, r"^\s*\(?([a-dA-D])\)"), ""))
+                 != func.lower(letter))
+    return and_(not_(DatasetQuestion.answer.op("~*")(_NOTE)),
+                not_(func.coalesce(DatasetQuestion.solution, "").op("~*")(_NOTE)), not_(clash))
+
+
+def sentences(text: str) -> set[str]:
+    """Normalised sentences of a question, long enough to mean the same sub-question
+    ("Dry HCl gas does not change the colour of dry litmus paper. Why?") wherever it sits."""
+    return {key for part in re.split(r"(?<=[.?!])\s+|\n+", text or "")
+            if len(key := re.sub(r"\W+", "", _PART.sub("", part).lower())) >= 30}
+
+
+_PART = re.compile(r"^\s*\(?(?:[a-hA-H]|[ivx]{1,4}|\d{1,2})[.)]\s*")  # "(b) " / "ii. " / "3) " before a sub-question
 
 
 def figure_svg(question: DatasetQuestion | None) -> str | None:
@@ -190,11 +222,12 @@ async def select_questions(
     focus = {c.lower() for c in focus_concepts}
     used: set[str] = set()
     used_concepts: set[str] = set()
+    used_sentences: set[str] = set()  # one sub-question shared by two bank questions only once
     for slot in slots:
         target = _DIFFICULTY_ORDER.index(slot.difficulty)
         best_key, best_rank = None, None
         for key, q in candidates.items():
-            if key in used or q.bloom_level != slot.bloom_level:
+            if key in used or q.bloom_level != slot.bloom_level or sentences(q.text) & used_sentences:
                 continue
             distance = abs(_DIFFICULTY_ORDER.index(q.difficulty) - target) if q.difficulty else 1
             scope = scope_rank(q)
@@ -222,6 +255,7 @@ async def select_questions(
         used.add(best_key)
         chosen = candidates[best_key]
         used_concepts |= {c.lower() for c in chosen.concepts or []}
+        used_sentences |= sentences(chosen.text)
         selection.picked.append((slot, chosen))
         selection.by_slot.append(chosen)
     return selection
