@@ -179,8 +179,8 @@ async def voice_scores(session: AsyncSession, student_id: uuid.UUID, test: Voice
     if not levels:
         levels = sorted((await session.execute(select(VoiceTestBloomLevel.bloom_level).where(
             VoiceTestBloomLevel.test_id == test.id))).scalars().all(), key=_BLOOM_ORDER.index) or [BloomLevel.UNDERSTAND]
-    for level in levels:
-        bloom.setdefault(level.value, mastery)
+    # no made-up 'before' for a level the result didn't score: Results says "Not assessed" for it,
+    # so Class growth leaves it out too (growth_entries skips a level without a before)
 
     per_concept: dict[str, list[int]] = {}
     misconceptions: dict[str, list[str]] = {}
