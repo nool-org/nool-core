@@ -330,6 +330,25 @@ async def test_an_untagged_bank_question_matches_through_its_topic(schema, monke
     assert len(calls[0]["slots"]) == 9  # the topic-matched slot never went to generation
 
 
+async def test_a_bank_question_keeps_its_own_concept_tag(schema, monkeypatch):
+    """C-006: a bank MCQ tagged "balancing" picked by topic for the "current" slot was
+    labelled "current", so its gap_concept pointed the follow-ups at the wrong idea."""
+    db = schema
+    s = await _seed(db, taken_hours_ago=49)
+    q = await _mcq(db, s, B.REMEMBER, "balancing")
+    q.topic_id = s["test"].topic_id
+    await db.flush()
+
+    async def fake(payload):
+        return {"questions": []}
+    monkeypatch.setattr(service.generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(service.generation_client, "generate_mcq", fake)
+    item = await _open(db, s)
+    await _get_test(item.id, user=s["student"], session=db)
+    [row] = [r for r in await service.questions_of(db, uuid.UUID(item.id)) if r.source_question_id == q.id]
+    assert row.concept == "balancing" and row.gap_concept is None
+
+
 async def test_generation_down_falls_back_to_any_bank_mcq_of_the_chapter(schema, monkeypatch):
     db = schema
     s = await _seed(db, taken_hours_ago=49)
@@ -634,6 +653,39 @@ async def test_generated_mcqs_carry_explanation_and_a_safe_hint_and_a_hard_boss(
     assert rows[0].hint == f"Think about {rows[0].concept}." and rows[1].hint == "nudge 1"
     assert [r.explanation for r in rows] == [f"why {i}" for i in range(10)]
     assert rows[-1].is_boss and rows[-1].bloom_level in (B.ANALYZE, B.EVALUATE)
+
+
+async def test_shuffled_options_keep_the_explanations_letters_and_lose_their_labels(schema, monkeypatch):
+    """C-006: the options are shuffled after generation, but "Option (A) is correct" was kept,
+    naming a wrong option; a concept with no misconceptions borrowed the other concepts'."""
+    from sqlalchemy import select
+
+    from src.domain.models import VoiceTestQuestion
+    db = schema
+    s = await _seed(db, taken_hours_ago=49)
+    for q in (await db.execute(select(VoiceTestQuestion))).scalars():
+        if "power" in q.concepts:
+            q.misconceptions = []
+    await db.flush()
+    calls = []
+
+    async def fake(payload):
+        calls.append(payload)
+        return {"questions": [{"slot_index": i, "text": f"gen {i}", "answer": "(A) ok",
+                               "options": ["(A) ok", "(B) m1", "(C) m2", "(D) m3"],
+                               "explanation": "Option (A) is correct; options B and (c) are not."}
+                              for i in range(len(payload["slots"]))]}
+    monkeypatch.setattr(service.generation_client, "is_configured", lambda: True)
+    monkeypatch.setattr(service.generation_client, "generate_mcq", fake)
+    item = await _open(db, s)
+    await _get_test(item.id, user=s["student"], session=db)
+    rows = await service.questions_of(db, uuid.UUID(item.id))
+    assert len(rows) == 10 and {r.options[r.correct_index] for r in rows} == {"ok"}
+    for r in rows:
+        assert sorted(r.options) == ["m1", "m2", "m3", "ok"]
+        key, b, c = "ABCD"[r.correct_index], "ABCD"[r.options.index("m1")], "abcd"[r.options.index("m2")]
+        assert r.explanation == f"Option ({key}) is correct; options {b} and ({c}) are not."
+    assert next(sl for sl in calls[0]["slots"] if sl["concept"] == "power")["misconceptions"] == []
 
 
 # ------------------------------------------------------------- migration

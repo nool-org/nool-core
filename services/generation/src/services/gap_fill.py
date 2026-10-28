@@ -118,8 +118,10 @@ no facts, formulas or data that aren't in them or standard for this class.
   and don't repeat anything in `avoid`.
 - Give a model answer a teacher can mark against, and a short worked solution.
 - A slot with question_type "mcq" must be an mcq on its `concept` with exactly 4 options; build the wrong
-  options from its `misconceptions` (each a plausible belief a student really holds), never silly ones.
-  Give it an `explanation` (one short line: why the right option is right) and a `hint` (one line nudging
+  options from its `misconceptions` (each a plausible belief a student really holds; none given: common
+  mistakes on that concept), never silly or off-topic ones. Options carry no "(A)"/"A." labels - they are
+  shuffled and lettered by the app. Give it an `explanation` (one short line: why the right option is
+  right, by its idea - never "option A", the letters change) and a `hint` (one line nudging
   toward the idea - it never names, quotes or gives away the right option).
 - If a slot has `feedback`, your previous question for it was rejected for that reason - fix it."""
 
