@@ -336,6 +336,9 @@ async def test_step3_teacher_prepares_and_schedules_voice_test(db_session, monke
     assert test.id in {x.id for x in listed.items}
     dash = await teacher_dashboard.get_teacher_dashboard(class_id=None, user=t, session=db)
     assert dash.headline_test and dash.headline_test.id == test.id
+    # T-011: sent now = live on Today (the row stays SCHEDULED), and "3 students"
+    assert dash.headline_test.status == TestStatus.ACTIVE and dash.headline_test.meta == "Live · 0/3 complete"
+    assert dash.active_class.meta == "3 students"
 
 
 async def test_step4_student_session_completion_auto_homework_and_practice_bank(db_session, monkeypatch):
