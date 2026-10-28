@@ -50,3 +50,36 @@ async def test_school_admin_can_list_subjects_chapters_and_topics(db_session):
 
     topics = await curriculum.list_topics(str(chapter.id), user=admin, session=db_session)
     assert any(t.id == str(topic.id) for t in topics.items)
+
+
+async def test_student_can_list_chapters_only_of_a_subject_taught_in_their_class(db_session):
+    """S-001: Learn's syllabus called /subjects/{id}/chapters as a student and got 403."""
+    import pytest
+    from shared.errors import NotFoundError
+    from src.domain.models import SchoolClass, StudentProfile, TeacherClassAssignment
+
+    school = await _seed_school(db_session)
+    taught, other = Subject(name=f"Subject-{uuid.uuid4()}"), Subject(name=f"Subject-{uuid.uuid4()}")
+    section = SchoolClass(school_id=school.id, grade=10, section=str(uuid.uuid4())[:8])
+    db_session.add_all([taught, other, section])
+    await db_session.flush()
+    teacher, student = (User(firebase_uid=f"u-{uuid.uuid4()}", email=f"{uuid.uuid4()}@example.com", display_name="U",
+                             role=role, school_id=school.id, status=UserStatus.ACTIVE) for role in (Role.TEACHER, Role.STUDENT))
+    db_session.add_all([teacher, student])
+    await db_session.flush()
+    db_session.add_all([
+        SchoolCurriculum(school_id=school.id, subject_id=taught.id, enabled=True),
+        SchoolCurriculum(school_id=school.id, subject_id=other.id, enabled=True),
+        StudentProfile(user_id=student.id, class_id=section.id, roll_number=1),
+        TeacherClassAssignment(teacher_id=teacher.id, class_id=section.id, subject_id=taught.id),
+        Chapter(subject_id=taught.id, name="Real Numbers"),
+    ])
+    await db_session.flush()
+
+    route = next(r for r in curriculum.router.routes if r.path == "/api/v1/subjects/{subject_id}/chapters")
+    role_check = next(d for d in route.dependant.dependencies if d.name == "user")
+    assert await role_check.call(user=student) is student  # was a 403
+    chapters = await curriculum.list_chapters(str(taught.id), user=student, session=db_session)
+    assert [c.name for c in chapters.items] == ["Real Numbers"]
+    with pytest.raises(NotFoundError):  # enabled for the school, but not taught in their class
+        await curriculum.list_chapters(str(other.id), user=student, session=db_session)
