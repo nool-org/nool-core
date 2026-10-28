@@ -323,3 +323,29 @@ def test_template_headline_never_names_one_level_as_both_best_and_worst():
     assert headline(0, 0, 0) == "A tough one - let's build it up together."
     assert headline(60, 60, 60) == "You scored 60% at every level."
     assert headline(80, 40, 60) == "You are strongest at Remember and can grow most at Understand."
+
+
+def test_you_said_is_the_stored_transcript_not_the_graders_note():
+    """S-004: 'You said' showed the grader's annotation instead of the student's words."""
+    qa = [{"question_number": 1, "score_percent": 10, "points_covered": [],
+           "student_response": "I don't know. [followed by Tamil remarks, no scientific answer]"},
+          {"question_number": 2, "score_percent": 20, "points_covered": [], "student_response": "graded words"}]
+    answers = [{"question_number": 1, "first_answer": "I don't know,  enakku theriyala"}]
+    cards = insights.build_cards(qa, {}, answers)
+    assert [c["you_said"] for c in cards] == ["I don't know, enakku theriyala", "graded words"]
+
+
+def test_rubric_cleanup_migration_drops_marking_notes():
+    here = Path(__file__).resolve()
+    path = next((r / "database/migrations/versions/a7c3e9b1d5f2_clean_rubric_marking_notes.py"
+                 for r in (here.parents[1], *here.parents[2:4])
+                 if (r / "database/migrations/versions/a7c3e9b1d5f2_clean_rubric_marking_notes.py").is_file()), None)
+    if path is None:
+        pytest.skip("database/ not available in this environment")
+    spec = importlib.util.spec_from_file_location("rubric_cleanup", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    points = ["A.", "B. Any two or three of these are enough.", "Any two of these are enough.",
+              "In burning it is combustion, while this oxidation is endothermic. Any two are enough."]
+    cleaned = module.clean(points)
+    assert cleaned == ["A.", "B.", module.RIGHT] and module.clean(cleaned) == cleaned

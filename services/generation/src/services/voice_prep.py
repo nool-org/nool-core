@@ -172,7 +172,8 @@ Also write:
 - spoken_text: reworded_text exactly as it should be said aloud. Formulas and symbols in words
   ("V = IR" -> "V equals I times R", "2 Ω" -> "2 ohm", "m/s" -> "metre per second", "x²" -> "x squared"; chemical symbols as names: "Zn" -> "zinc").
 - expected_points: 2 to 4 short points, taken from the given answer, for the question AS REWORDED.
-  If it now asks for two or three items, list the main ones and end with "Any two or three of these are enough.";
+  Each is one fact or reasoning step from the answer - never a note to the marker ("any two are enough").
+  If it now asks for two or three items, list the main ones (the grader reads "two or three" from the question);
   if it asks how to find something, the points are the steps of reasoning, not the full calculation.
 - misconceptions: 2 or 3 common wrong ideas students of this class have about this question.
 - hints: exactly 2, a nudge ladder. Hint 1 points the student to the key concept or idea to think
@@ -270,7 +271,7 @@ def _without_bad_easier(original: str, draft: _Rewording) -> _Rewording:
 
 
 def _rubric_problem(draft: _Version, max_points: int = 4) -> str | None:
-    if not 2 <= len(_clean(draft.expected_points)) <= max_points:
+    if not 2 <= len(_points(draft.expected_points)) <= max_points:
         return f"expected_points must have 2 to {max_points} items"
     if not 2 <= len(_clean(draft.misconceptions)) <= 3:
         return "misconceptions must have 2 or 3 items"
@@ -295,6 +296,16 @@ def _gives_away(hint: str, points: list[str]) -> bool:
 
 def _clean(items: list[str]) -> list[str]:
     return [s.strip() for s in items if s.strip()]
+
+
+# a marking note ("Any two or three of these are enough.") the model adds to the points, alone or at the end of one
+_MARKING_NOTE = re.compile(r"\s*\bany (?:one|two|three|four|\d+)(?: or (?:two|three|four|\d+))?(?: of (?:these|them))?"
+                           r" (?:is|are) enough\b\.?\s*$", re.IGNORECASE)
+
+
+def _points(items: list[str]) -> list[str]:
+    """Expected points without marking notes - students see every point as an idea they may have missed."""
+    return _clean([_MARKING_NOTE.sub("", s) for s in items])
 
 
 _SPOKEN = [  # order matters: longer symbols first
@@ -428,11 +439,11 @@ def _result(i: int, c: Candidate, accepted: _Rewording | None, last: _Rewording 
         subtopic_id=c.subtopic_id, concepts=c.concepts, original_text=c.text,
         reworded_text=accepted.reworded_text.strip() if accepted else c.text,
         spoken_text=accepted.spoken_text.strip() if accepted else spoken(_MARKS.sub("", c.text.strip())),
-        expected_points=_clean(rubric.expected_points) if rubric else [],
+        expected_points=_points(rubric.expected_points) if rubric else [],
         misconceptions=_clean(rubric.misconceptions) if rubric else [],
         hints=_clean(rubric.hints) if rubric else [],
         easier=EasierVersion(
-            spoken_text=accepted.easier.spoken_text.strip(), expected_points=_clean(accepted.easier.expected_points),
+            spoken_text=accepted.easier.spoken_text.strip(), expected_points=_points(accepted.easier.expected_points),
             misconceptions=_clean(accepted.easier.misconceptions), hints=_clean(accepted.easier.hints),
         ) if accepted and accepted.easier else None,
     )

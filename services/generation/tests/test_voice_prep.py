@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from src.services.voice_prep import (
     PrepRequest,
+    _points,
     _problems,
     _Rewording,
     _Verdict,
@@ -258,3 +259,13 @@ def test_one_short_question_and_hints_that_only_ask():
     assert "gives away" in _problems(orig, leak)
     told = rewording("Where do parallel rays go after a convex mirror?").model_copy(update={"hints": ["Rays spread out from a convex mirror.", "Where do they go?"]})
     assert "never a statement" in _problems(orig, told)
+
+
+def test_marking_notes_never_reach_expected_points():
+    """S-004/C-004: "Any two or three of these are enough." was stored as a point and shown as a missed idea."""
+    assert _points(["Iron rusts.", "Paint stops air. Any two or three of these are enough.",
+                    "Any two of these are enough.", "Any one of these is enough"]) == ["Iron rusts.", "Paint stops air."]
+    draft = version("Why does iron rust?", points=["Iron reacts with air.", "Any two or three of these are enough."])
+    assert "expected_points" in _problems("Why does iron rust?", draft)  # one real point, not two
+    from src.services.voice_prep import GENERATE_SYSTEM
+    assert "Any two or three of these are enough" not in GENERATE_SYSTEM

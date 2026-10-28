@@ -135,3 +135,21 @@ def test_questions_not_reached_in_time_score_zero():
     assert [a["score_percent"] for a in qa] == [90, 80, 0, 0, 0]
     assert qa[2]["not_reached"] and qa[4]["question_asked"] == "Q5?"
     assert report["session_summary"]["overall_mastery_percent"] == 34  # 170 / 5, not 85
+
+
+def test_student_response_is_the_students_words_without_bracketed_notes():
+    """S-004: the model annotated a quote ("[followed by Tamil remarks ...]") and Insights showed it as 'You said'."""
+    a = _answer(1, "Understanding", 10, False)
+    a["student_response"] = "I don't know. [followed by Tamil remarks and requests for help, no scientific answer]"
+    _, report = _grade(_FakeClient({"overall_feedback": "", "answers": [a]}))
+    assert report["qa_transcripts"][0]["student_response"] == "I don't know."
+
+
+def test_rubric_says_how_many_points_a_two_or_three_question_needs():
+    from src.services.realtime_service import build_rubric
+
+    q = lambda text: SimpleNamespace(bloom_level="Understanding", easier=None, spoken_text=text,
+                                     expected_points=["a", "b", "c"], misconceptions=[])
+    rubric = build_rubric([q("Tell me two or three uses of copper."), q("Why does a wire get hot?")], {})
+    assert [r["points_needed"] for r in rubric] == [2, 3]
+    assert "points_needed" in grader.SYSTEM_PROMPT

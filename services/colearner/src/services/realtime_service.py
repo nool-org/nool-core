@@ -891,6 +891,15 @@ def question_answers(call: RealtimeCall) -> list[dict]:
     return answers
 
 
+# "Tell me two or three ..." (voice prep's wording for a list ask): that many key points is a full answer
+_FEW_ITEMS = re.compile(r"\b(?:two or three|any two)\b", re.IGNORECASE)
+
+
+def points_needed(question: str, key_points: list) -> int:
+    # ponytail: read from the wording voice prep is told to use; a stored count if prep ever words it otherwise
+    return min(2, len(key_points)) if _FEW_ITEMS.search(question or "") else len(key_points)
+
+
 def build_rubric(questions, answers: dict) -> list[dict] | None:
     """Per-question rubric for the grader, from the version each question was asked in.
     answers: question number -> {hints_used, version} (call progress or a stored finish payload)."""
@@ -901,6 +910,7 @@ def build_rubric(questions, answers: dict) -> list[dict] | None:
         v = _version(q, version)
         rubric.append({"question_number": n, "bloom_level": q.bloom_level, "question": v.spoken_text,
                        "key_points": v.expected_points, "misconceptions": v.misconceptions,
+                       "points_needed": points_needed(v.spoken_text, v.expected_points),
                        "hints_used": a.get("hints_used") or 0, "version": version})
     return rubric or None
 

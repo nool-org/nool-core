@@ -5,6 +5,7 @@ hint penalty) is computed here in code, never trusted to the model.
 """
 import json
 import logging
+import re
 from statistics import mean
 from typing import Any, Dict, List, Optional
 
@@ -76,7 +77,7 @@ For every substantive question the Co-Learner asked, and the student's answer to
 - question_number: 1, 2, 3... in the order asked.
 - blooms_attribute: the Bloom's level the question targets.
 - question_asked: the question itself (without the Co-Learner's acknowledgement of the previous answer).
-- student_response: the student's answer, close to verbatim.
+- student_response: the student's own words for this answer, copied exactly from the STUDENT turns (join the turns for this question with " ... "). Never summarise, translate, describe, or add notes or brackets. If the student said nothing usable, return "".
 - probing_or_hints_given: any hint or probe the Co-Learner gave on this question, else null.
 - points_covered: the correct key points the answer actually states (empty if none).
 - misconception: the specific wrong idea the answer contains, else null.
@@ -99,7 +100,7 @@ Rules:
 - Every student turn tagged with the same [Qn] is one answer: a reply to the Co-Learner's follow-up ("Can you tell me why?", "How would you explain that to a friend?") or after a hint is judged together with the first reply. Ignore turns marked (repeat request) or (noise).
 - Partial credit, against the question's expected key points (or the textbook answer if no rubric): all key points stated correctly = 85-100; about half of them correct = 50-60 (partial, is_substantively_correct true only if the core idea is right); a little relevant but mostly missing = 20-40; none, off-topic or "I don't know" = 0-15. A confidently wrong central claim stays under 40 whatever else is covered.
 - Do NOT include the opening readiness exchange (e.g. "Are you ready to begin?") or closing small talk.
-- If a rubric is given, use its expected key points and known misconceptions for that question.
+- If a rubric is given, use its expected key points and known misconceptions for that question. Its points_needed is how many key points a full answer must state (fewer than all when the question asks for "two or three" things): that many stated correctly counts as all key points.
 - A rubric entry with version "easier" means the student was asked a simpler version of the question (its text is in the rubric): grade against that version, and score it at most 70.
 
 overall_feedback: 1-2 sentences on the student's engagement and conceptual understanding."""
@@ -133,6 +134,14 @@ def penalized_score(score: Any, hints: Any) -> int:
     return max(0, score - min(HINT_PENALTY * max(0, int(hints or 0)), HINT_PENALTY_MAX))
 
 
+_NOTE = re.compile(r"\[[^\]]*\]")
+
+
+def _own_words(text: Any) -> str:
+    """student_response is shown as the student's quote: drop any [bracketed] note or tag the model added."""
+    return " ".join(_NOTE.sub(" ", str(text or "")).split())
+
+
 def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str, num_questions: int,
                  rubric: Optional[List[Dict[str, Any]]] = None,
                  planned: Optional[List[tuple]] = None) -> Dict[str, Any]:
@@ -146,6 +155,7 @@ def build_report(graded: Dict[str, Any], grade: str, subject: str, chapter: str,
         capped = min(raw, EASIER_MAX_SCORE) if a.get("question_number") in easier else raw
         qa.append({
             **a,
+            "student_response": _own_words(a.get("student_response")),
             "raw_score_percent": raw,
             "score_percent": penalized_score(capped, a.get("hints_used")),
             "confidence": max(0.0, min(1.0, float(a.get("confidence") or 0))),
