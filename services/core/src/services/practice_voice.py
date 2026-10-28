@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.errors import AppError, ValidationError
 from src.domain.models import Chapter, DatasetQuestion, PracticeQuestion, Subject, Topic, User
-from src.services import ai_context, colearner_client, generation_client
+from src.services import ai_context, colearner_client, generation_client, speakable
 from src.services.paper_copilot import _decode_audio  # base64 + 5 MB check, shared with voice notes
 
 logger = logging.getLogger(__name__)
@@ -33,8 +33,9 @@ class TranscriptionUnavailableError(AppError):
 
 async def prepare_voice_questions(session: AsyncSession, questions: list[PracticeQuestion]) -> None:
     """Voice rows without expected_points get generation's spoken wording
-    (into `text`) and rubric, in one batch. Best effort: on failure the rows
-    stay as they are (grading then judges against the question alone).
+    (into `text`) and rubric, in one batch - only a wording that passes
+    speakable.spoken_problem. Best effort: on failure the rows stay as they
+    are, and daily_practice._fill serves an MCQ in their place.
     Doesn't commit - the caller does."""
     rows = [q for q in questions if q.kind == "voice" and not q.expected_points]
     if not rows:
@@ -74,10 +75,15 @@ async def prepare_voice_questions(session: AsyncSession, questions: list[Practic
         p = by_id.get(str(q.id)) or {}
         reworded = (p.get("reworded_text") or "").strip()
         points = _strings(p.get("expected_points"))
-        if not points or not reworded or reworded == q.text.strip():  # unchanged = couldn't be made spoken
-            logger.warning("practice_voice_prep_not_reworded", extra={"practice_question_id": str(q.id)})
+        spoken = (p.get("spoken_text") or "").strip() or reworded
+        # unchanged = couldn't be made spoken; the caller serves an MCQ instead of a row left like this
+        reason = ("unchanged" if not points or not reworded or reworded == q.text.strip()
+                  else speakable.spoken_problem(spoken, p.get("hints")))
+        if reason:
+            logger.warning("practice_voice_prep_not_reworded", extra={"practice_question_id": str(q.id),
+                                                                     "reason": reason})
             continue
-        q.text = (p.get("spoken_text") or "").strip() or reworded
+        q.text = spoken
         q.expected_points = points
         q.misconceptions = _strings(p.get("misconceptions"))
 
