@@ -885,7 +885,8 @@ async def test_student_result_detail_lists_answers_and_highlights(schema, monkey
     rows = await _questions(db, s["test"])
     long_answer = "current is the flow of charge " * 10
     _wire_finish(monkeypatch, db, {
-        "report": {"qa_transcripts": [_qa(1, "Remembering", 90), _qa(2, "Understanding", 30),
+        "report": {"qa_transcripts": [_qa(1, "Remembering", 90),
+                                      {**_qa(2, "Understanding", 30), "misconception": "Thinks current is used up"},
                                       _qa(3, "Applying", 60)], "session_summary": {}},
         "answers": [
             {"question_id": str(rows[0].id), "question_number": 1, "first_answer": long_answer, "hints_used": 0,
@@ -909,6 +910,7 @@ async def test_student_result_detail_lists_answers_and_highlights(schema, monkey
     assert (second["version"], second["questionText"], second["nudgesUsed"], second["quote"]) == (
         "easier", EASIER["spoken_text"], 2, "not sure")
     assert third["version"] == "standard"
+    assert (first["misconception"], second["misconception"]) == (None, "Thinks current is used up")  # T-007
     assert dumped["highlights"] == {"best": {"questionNumber": 1, "quote": first["quote"]},
                                     "weakest": {"questionNumber": 2, "quote": "not sure"}}
 

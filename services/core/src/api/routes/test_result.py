@@ -189,5 +189,6 @@ async def _answers(session: AsyncSession, test: VoiceTest, student_id) -> list[S
             nudges_used=int(a.get("hints_used") or g.get("hints_used") or 0),
             score=round(score) if isinstance(score, (int, float)) else None,
             quote=quote if len(quote) <= MAX_QUOTE else quote[:MAX_QUOTE - 1].rstrip() + "…",
+            misconception=str(g.get("misconception") or "").strip() or None,
         ))
     return out
