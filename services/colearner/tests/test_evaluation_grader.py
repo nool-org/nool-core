@@ -103,7 +103,6 @@ def test_generate_bloom_report_delegates_to_grader(monkeypatch, tmp_path):
         return {"session_summary": {}, "qa_transcripts": [], "grading_error": "x"}
 
     monkeypatch.setattr(chained_service, "grade_transcript", fake_grade)
-    monkeypatch.setattr(chained_service.get_settings(), "reports_dir", tmp_path)
     session = session_store.create_session(SessionConfig(num_questions=1))
     report = asyncio.run(chained_service.generate_bloom_report(session, "TRANSCRIPT"))
     assert seen["t"] == "TRANSCRIPT" and report["grading_error"] == "x"

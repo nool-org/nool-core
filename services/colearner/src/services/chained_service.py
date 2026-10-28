@@ -1,5 +1,3 @@
-import json
-from datetime import datetime
 from typing import Any, Dict
 
 from openai import AsyncOpenAI
@@ -9,8 +7,8 @@ from src.domain.schemas import SessionConfig
 from src.services.evaluation import grade_transcript
 from src.services.session_store import SessionState
 
-# Shared by realtime_service and cascaded_service: the co-learner system
-# prompt, the Bloom report, and (for cascaded) the OpenAI client. The old
+# Used only by the cascaded prototype (AI-011: never by realtime, which has no
+# improvised test any more): the co-learner system prompt, the Bloom report, the OpenAI client. The old
 # per-turn chained pipeline that gave this module its name is gone.
 _settings = get_settings()
 openai_client = AsyncOpenAI(api_key=_settings.openai_api_key) if _settings.openai_api_key else None
@@ -79,21 +77,6 @@ WORKFLOW & TURN PROGRESSION:
 
 
 async def generate_bloom_report(session: SessionState, full_transcript: str) -> Dict[str, Any]:
-    """Grades the session with the strict grader (src/services/evaluation) and saves transcript + report."""
-    report_data = await grade_transcript(session, full_transcript)
-
-    # Save transcript and report files to reports/
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    reports_dir = get_settings().reports_dir
-    reports_dir.mkdir(parents=True, exist_ok=True)
-
-    transcript_path = reports_dir / f"chained_transcript_{session.session_id[:8]}_{timestamp}.txt"
-    report_path = reports_dir / f"chained_report_{session.session_id[:8]}_{timestamp}.json"
-
-    with open(transcript_path, "w", encoding="utf-8") as f:
-        f.write(full_transcript)
-
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report_data, f, indent=2)
-
-    return report_data
+    """Grades the session with the strict grader (src/services/evaluation). Nothing is written to disk:
+    student transcripts never leave the session store (AI-011)."""
+    return await grade_transcript(session, full_transcript)

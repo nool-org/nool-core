@@ -86,13 +86,17 @@ def test_session_uses_prepared_questions_and_tools():
 
 
 def test_instructions_never_carry_the_answers():
-    for config in (_config(), SessionConfig(textbook_context="Ohm's law")):
+    for config in (_config(),):
         session = rs.build_session(config)
         assert "point 1a" not in session["instructions"] and "Key points" not in session["instructions"]
         assert "give_explanation" not in json.dumps(session)
-    addendum = rs.build_session(SessionConfig()).get("instructions").lower()
-    assert "never ask whether they are ready for the next question" in addendum
-    assert "never say question numbers aloud" in addendum
+
+
+
+def test_a_session_without_prepared_questions_never_starts():
+    """AI-011: no improvised test with the old co-learner prompt (it taught, judged and summarised)."""
+    with pytest.raises(rs.RealtimeError, match="aren't ready"):
+        rs.build_session(SessionConfig(textbook_context="Ohm's law"))
 
 
 def test_speakerphone_audio_config():
@@ -101,14 +105,6 @@ def test_speakerphone_audio_config():
     # speakerphone echo of Milo's own voice must never cut him off - only "Tap to interrupt" does
     assert audio_in["turn_detection"] == {"type": "semantic_vad", "eagerness": "medium",
                                           "interrupt_response": False, "create_response": True}
-
-
-def test_fallback_without_questions_keeps_textbook_prompt():
-    config = SessionConfig(textbook_context="Ohm's law V = IR")
-    session = rs.build_session(config)
-    assert [t["name"] for t in session["tools"]] == ["end_session"]
-    assert "Ohm's law V = IR" in session["instructions"]
-    assert config.num_questions == 2
 
 
 def test_tool_events_map_answers_and_hints(monkeypatch, short_call):
@@ -488,7 +484,7 @@ def test_pause_silences_milo_and_markers_are_never_answers(monkeypatch, silence_
 
 
 def test_prompts_keep_milo_quiet_while_paused():
-    for config in (_config(), SessionConfig()):
+    for config in (_config(),):
         text = rs.build_session(config)["instructions"]
         assert 'If you receive "[PAUSED]", say nothing.' in text
         assert '"[RESUMED]", say one short welcome back line and repeat the current question exactly.' in text

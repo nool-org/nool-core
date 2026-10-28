@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from shared.config import BaseServiceSettings
 
@@ -19,12 +18,6 @@ class ColearnerSettings(BaseServiceSettings):
     # OpenAI is the only model provider (realtime, cascaded, grader,
     # homework insight); never client-supplied.
     openai_api_key: str | None = None
-
-    # Where turn-completion Bloom's/cost reports are written - see
-    # src/services/chained_service.py's generate_bloom_report(). Container-local; not a
-    # durable store (no volume mount), matching the in-memory session
-    # store's own v1 limitation (see src/services/session_store.py).
-    reports_dir: Path = Path("reports")
 
 
 def get_settings() -> ColearnerSettings:

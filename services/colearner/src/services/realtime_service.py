@@ -17,7 +17,7 @@ With prepared questions (config.questions, contract C3) Milo asks exactly
 those, in order, and the model calls ask_question / give_hint / end_session
 tools - so the sideband knows which question
 each student turn belongs to, and finish grades against each question's rubric.
-Without them Milo improvises from the textbook context (the original flow).
+Without them there is no session (AI-011) - core only opens a test once its questions are ready.
 
 ponytail: calls live in-process memory, same v1 limitation as session_store
 - one colearner replica, lost on restart; move to shared state if this ever scales out.
@@ -38,7 +38,6 @@ from websockets.asyncio.client import connect as ws_connect
 
 from src.config.settings import get_settings
 from src.domain.schemas import SessionConfig
-from src.services.chained_service import build_chained_system_prompt
 from src.services.evaluation import grade_transcript
 from src.services.cost_service import add_realtime_usage, add_transcription_usage, realtime_cost_report
 from src.services.session_store import SessionState, session_store
@@ -145,29 +144,6 @@ GIVE_HINT_TOOL = {
     ),
     "parameters": _QUESTION_NUMBER,
 }
-
-_REALTIME_ADDENDUM = """
-
-LIVE VOICE SESSION RULES (this is a real-time spoken call):
-- Speak first: open with a short, warm greeting that names the chapter and ends with "Are you ready to begin?".
-- Keep every turn to 1-2 short spoken sentences (under 20 words in total), then stop and let the student talk.
-- Greet once. Whatever the student says to "Are you ready?", give at most one reassuring sentence and ask the first question.
-- Never announce what you are doing ("let me think", "let me find a nudge") - just say it.
-- Never explain, recap or lecture, and never repeat what the student said back to them - one quick acknowledgement at most.
-- "Are you ready to begin?" is asked ONCE, at the start. Never ask whether they are ready for the next question and never ask for any other confirmation between questions - after a short neutral acknowledgement, go straight on.
-- Never say question numbers aloud (no "question two", "next is question 3"); "last one" is fine.
-- If the student asks for the answer or asks you to explain, kindly say you can't give answers during the test but they should give it their best guess, and stay on the question.
-- Every turn after the student speaks is ONE reply: acknowledge and ask the next question together. Never send a separate filler turn like "let me set the stage" or "let me think of a question" - just ask it.
-- If the student interrupts you, stop and listen - respond to what they said.
-- If what you heard is unclear, empty, or just noise, briefly ask them to repeat - never count it as an answer.
-- If the student explicitly asks for a hint or a tip, give ONE short guiding nudge on the current question (never the answer, never whether they were right), and stay on that question.
-- Once the student has answered the last question, call the end_session tool (you'll then be asked to say goodbye). Do not say "[SESSION_COMPLETED]" aloud.
-- If you receive "[TIME_UP]", say one short warm closing sentence, then call end_session.
-- If the student asks to stop, quit, exit or end the test early, kindly say the test can't be stopped midway and you'll finish it together, then repeat the current question. Never call end_session for that.
-- If you receive "[PAUSED]", say nothing.
-- If you receive "[RESUMED]", say one short welcome back line and repeat the current question exactly.
-"""
-
 
 
 @dataclass
@@ -300,12 +276,11 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 
 
 def build_session(config: SessionConfig) -> dict:
-    if config.questions:
-        instructions = build_question_instructions(config)
-        tools = [ASK_QUESTION_TOOL, GIVE_HINT_TOOL, END_SESSION_TOOL]
-    else:
-        instructions = build_chained_system_prompt(config) + _REALTIME_ADDENDUM
-        tools = [END_SESSION_TOOL]
+    if not config.questions:
+        # never a test Milo improvises (AI-011): core opens a session only once its questions are ready
+        raise RealtimeError("This test's questions aren't ready yet.")
+    instructions = build_question_instructions(config)
+    tools = [ASK_QUESTION_TOOL, GIVE_HINT_TOOL, END_SESSION_TOOL]
     return {
         "type": "realtime",
         "model": REALTIME_MODEL,
@@ -448,8 +423,6 @@ async def _handle_event(call: RealtimeCall, ws, event: dict) -> None:
             spoken = any(c.get("type") == "input_audio" for c in item.get("content") or [])
             if is_new and item["role"] == "user" and spoken:
                 call.spoken_turns += 1
-                if not call.state.config.questions:  # improvised questions: "yes, ready" starts the clock
-                    _start_clock(call)
             elif is_new and item["role"] == "user":
                 _pause_marker(call, item)
                 _card_answer(call, item)

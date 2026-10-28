@@ -65,7 +65,8 @@ MESSAGE = {"type": "message"}
 
 
 def test_session_config_caps_output_tokens():
-    session = rs.build_session(SessionConfig())
+    session = rs.build_session(SessionConfig(questions=[
+        {"id": "q1", "order": 1, "bloom_level": "Understanding", "spoken_text": "Short one?"}]))
     assert session["max_output_tokens"] == rs.MAX_REPLY_TOKENS
     # 220 tokens (~10 s) cut off the ~14-15 s replies we saw; 2 sentences now fit, a runaway stays bounded
     assert 17 * 15 < rs.MAX_REPLY_TOKENS <= 17 * 40

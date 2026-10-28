@@ -126,8 +126,8 @@ async def _colearner_config(
 ) -> tuple[dict, int]:
     """colearner's SessionConfig for this session, plus its question count.
     With the test's questions (contract C3 `questions`) the co-learner asks
-    exactly those, in order; without (prep found none) it improvises from
-    textbook_context."""
+    exactly those, in order; without, colearner refuses the call (AI-011) -
+    open_session only lets a student start a test whose questions are ready."""
     test = await db.get(VoiceTest, ai_session.test_id) if ai_session.test_id else None
     chapter = await db.get(Chapter, test.chapter_id) if test else None
     subject = await db.get(Subject, test.subject_id) if test else None
