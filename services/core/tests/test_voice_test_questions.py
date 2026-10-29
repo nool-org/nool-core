@@ -771,6 +771,35 @@ async def test_an_abandoned_call_is_finished_and_its_cost_recorded_once(schema, 
     assert record_row.transcript == payload["transcript"]
 
 
+def test_abandon_watcher_outlasts_the_longest_legitimate_call():
+    """V-011: 3 min warm-up + 8 min test + 10 min of pauses + grace is 21.3 min - a paused test
+    must not be finished as exited at 15 min."""
+    assert ai_assessor.ABANDONED_AFTER_SECONDS > (3 + 8 + 10) * 60 + 20
+
+
+async def test_a_call_replaced_by_a_resume_is_not_finished_by_its_old_watcher(schema, monkeypatch):
+    db = schema
+    s = await _prepared(db, monkeypatch)
+    _student, ai_session = await _student_session(db, s)
+    finished = []
+
+    async def finish(*, call_id, owner_ref, token):
+        finished.append(call_id)
+        return {"report": None, "answers": [], "transcript": [], "cost": {"total_usd": 0.0}}
+
+    async def record(*args, **kwargs):
+        pass
+    _wire_finish(monkeypatch, db, {})
+    monkeypatch.setattr(ai_assessor, "finish_realtime_call", finish)
+    monkeypatch.setattr(ai_assessor.ai_usage, "record", record)
+    monkeypatch.setattr(ai_assessor, "ABANDONED_AFTER_SECONDS", 0)
+
+    ai_assessor._watch_for_abandon(ai_session.id, "old", "t")
+    ai_assessor._watch_for_abandon(ai_session.id, "new", "t")  # the reload resumed it in a new call
+    await asyncio.gather(*ai_assessor._background)
+    assert finished == ["new"]
+
+
 # ------------------------------------------------ co-learner improvements
 def test_easier_version_is_kept_only_when_complete():
     assert voice_test_prep._easier(EASIER) == EASIER

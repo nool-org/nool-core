@@ -32,6 +32,8 @@ class CreateCallOut(BaseModel):
     resumed: bool = False
     # resumed only: test seconds left on the clock (the app's timer carries on from here)
     seconds_left: int | None = None
+    # resumed only: nudges already given (the app's hints counter carries on from here)
+    hints_used: int | None = None
 
 
 class FinishCallIn(BaseModel):
@@ -54,7 +56,8 @@ async def create_call(body: CreateCallIn, _user: AuthenticatedUser = Depends(get
     logger.info("realtime_call_started call_id=%s owner_ref=%s student=%s school=%s feature=%s", call_id,
                 body.owner_ref, caller.get("student", ""), caller.get("school", ""), caller.get("feature", ""))
     left = max(round(realtime_service.call_time_limit(body.config) - call.clock_used), 0) if call.resumed else None
-    return CreateCallOut(sdp=answer, call_id=call_id, resumed=call.resumed, seconds_left=left)
+    hints = sum(p["hints_used"] for p in call.progress.values()) if call.resumed else None
+    return CreateCallOut(sdp=answer, call_id=call_id, resumed=call.resumed, seconds_left=left, hints_used=hints)
 
 
 @router.post("/colearner/realtime/calls/{call_id}/finish", summary="End a live voice call and score it")
