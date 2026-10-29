@@ -50,12 +50,16 @@ async def list_subjects(
 ) -> ListEnvelope[SubjectOut]:
     """The subjects a Super Admin has enabled for the caller's school
     (school_curriculum). Only a Super Admin controls a school's subjects -
-    a school with none enabled yet has none, no "everything" fallback."""
-    result = await session.execute(
-        select(Subject).join(SchoolCurriculum, SchoolCurriculum.subject_id == Subject.id).where(
-            SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.enabled.is_(True)
-        )
+    a school with none enabled yet has none, no "everything" fallback.
+    A teacher gets only the subjects they're assigned to teach - the same
+    rule a paper or test in that subject is checked against."""
+    query = select(Subject).join(SchoolCurriculum, SchoolCurriculum.subject_id == Subject.id).where(
+        SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.enabled.is_(True)
     )
+    if user.role == Role.TEACHER:
+        query = query.where(select(TeacherClassAssignment.id).where(
+            TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.subject_id == Subject.id).exists())
+    result = await session.execute(query)
     # `grade` narrows to that grade's subjects (legacy grade-less subjects always match)
     items = [SubjectOut(id=str(s.id), name=s.name, grade=s.grade, voice_tests=subject_rules.voice_tests_allowed(s.name), formats=list(subject_rules.formats(s.name))) for s in result.scalars().all()
              if grade is None or s.grade in (None, grade)]

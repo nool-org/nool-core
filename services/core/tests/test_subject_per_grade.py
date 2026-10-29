@@ -73,11 +73,19 @@ async def test_a_grade_9_subject_cant_be_attached_to_grade_10(db_session):
 @pytest.mark.asyncio
 async def test_the_school_subject_list_tells_the_two_sciences_apart(db_session):
     s = await _seed(db_session)
-    everything = await curriculum.list_subjects(grade=None, user=s["teacher"], session=db_session)
+    everything = await curriculum.list_subjects(grade=None, user=s["admin"], session=db_session)
     grades = {x.grade for x in everything.items if x.id in (str(s["nine"].id), str(s["ten"].id))}
     assert grades == {9, 10}
-    tenth = await curriculum.list_subjects(grade=10, user=s["teacher"], session=db_session)
+    tenth = await curriculum.list_subjects(grade=10, user=s["admin"], session=db_session)
     assert str(s["nine"].id) not in {x.id for x in tenth.items}
+
+
+@pytest.mark.asyncio
+async def test_a_teacher_is_offered_only_the_subjects_they_teach(db_session):
+    """T-022: the paper subject picker offered a Science teacher Mathematics."""
+    s = await _seed(db_session)
+    mine = await curriculum.list_subjects(grade=None, user=s["teacher"], session=db_session)
+    assert [x.id for x in mine.items] == [str(s["ten"].id)]
 
 
 @pytest.mark.asyncio
