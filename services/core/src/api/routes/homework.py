@@ -271,11 +271,13 @@ async def generate_homework(
 
     try:
         # a whole-chapter test: spread over the class's weak topics on it, not anywhere in the chapter
-        weak = [] if test.topic_id else await homework_autogen.weak_topics(session, test.id)
-        drafts = await homework_autogen.build_on_weak_topics(
-            session, weak, user=user, test=test, total=hw.total_questions, bloom_weights=bloom_distribution,
-            difficulty=hw.difficulty, fallback_dataset_id=fallback_dataset_id, picked_dataset_ids=picked or None,
-            seed=str(hw.id), release_before_generation=True,
+        # (a topic test or homework set on a chapter has none: one build, as before)
+        weak = [] if test.topic_id or hw.test_id is None else await homework_autogen.weak_topics(session, test.id)
+        build = homework_autogen.build_on_weak_topics if weak else build_homework_questions
+        drafts = await build(
+            session, *([weak] if weak else []), user=user, test=test, total=hw.total_questions,
+            bloom_weights=bloom_distribution, difficulty=hw.difficulty, fallback_dataset_id=fallback_dataset_id,
+            picked_dataset_ids=picked or None, seed=str(hw.id), release_before_generation=True,
         )
         if not drafts:
             raise ConflictError("Couldn't find or write any question for this homework - try again later.")
