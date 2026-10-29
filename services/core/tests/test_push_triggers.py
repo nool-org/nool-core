@@ -24,7 +24,8 @@ from tests.test_homework_assign import _seed_student as _hw_student
 from tests.test_homework_assign import _seed_teacher as _hw_teacher
 from tests.test_mcq_test import _seed as _mcq_seed
 from tests.test_mcq_test import schema  # noqa: F401 - fixture
-from tests.test_voice_test import _seed_class_subject_chapter_topic, _seed_school, _seed_student, _seed_teacher
+from tests.test_voice_test import (_questions_ready, _seed_class_subject_chapter_topic, _seed_school, _seed_student,
+                                   _seed_teacher)
 
 
 @pytest.fixture
@@ -61,6 +62,7 @@ async def _scheduled_test(db):
         completion_window_hours=48, target=AssignmentTarget(mode=AssignmentTargetMode.WHOLE_CLASS),
     )
     created = await voice_test.create_test(body, background_tasks=BackgroundTasks(), user=teacher, session=db)
+    await _questions_ready(db, created.id)
     result = await voice_test.schedule_test(created.id, user=teacher, _feature=teacher, session=db)
     return result, {str(a.id), str(b.id)}
 

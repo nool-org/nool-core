@@ -327,6 +327,27 @@ async def test_real_bank_questions_come_before_written_ones(db_session):
     assert sum(q.used_count for q in written) == 2
 
 
+async def test_an_unspeakable_or_unreworded_spoken_question_is_never_served(db_session, monkeypatch):
+    """C-002: a bank question that can't be answered aloud is never imported; a spoken one that
+    couldn't be reworded is replaced by an MCQ on its topic, never served raw."""
+    s = await _seed(db_session)
+    await _full_class(db_session, s)
+    blanks = DatasetQuestion(dataset_id=s.dataset.id, chapter_id=s.current.chapter_id, topic_id=s.current.id,
+                             bloom_level=B.UNDERSTAND, question_type=QuestionType.SHORT_ANSWER,
+                             text="Fill in the blanks: current is measured in ________.", answer="amperes",
+                             created_by=s.teacher.id, external_uid=f"uid-{uuid.uuid4()}")
+    db_session.add(blanks)
+    await db_session.flush()
+
+    async def prepare_fails(session, questions):
+        return None  # generation couldn't reword any of them
+    monkeypatch.setattr(practice_voice, "prepare_voice_questions", prepare_fails)
+    out = await _today(db_session, s.student)
+    assert len(out.items) == 8 and {i.kind for i in out.items} == {"mcq"}
+    assert (await db_session.execute(select(PracticeQuestion.id).where(
+        PracticeQuestion.source_question_id == blanks.id))).first() is None
+
+
 async def test_generates_mcqs_when_pool_and_bank_are_empty(db_session, monkeypatch, _no_models):
     s = await _seed(db_session)
     await _teach(db_session, s, s.current)

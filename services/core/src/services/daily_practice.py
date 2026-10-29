@@ -55,7 +55,7 @@ from src.domain.models import (
 from src.repositories.dataset_access import visible_datasets
 from src.repositories.subscription_repository import get_active_plan
 from src.services.feature_entitlements import is_feature_enabled
-from src.services import ai_context, answer_checks, generation_client, question_types
+from src.services import ai_context, answer_checks, generation_client, question_types, speakable
 from src.services.homework_builder import _sections
 from src.services.mcq_test import (award_points, correct_index, explanation_of, shuffle_options, strip_inline_options,
                                    unlabel)
@@ -204,12 +204,16 @@ async def _import_bank(session: AsyncSession, dataset_ids: list[uuid.UUID], topi
     else:
         query = query.where(DatasetQuestion.question_type == QuestionType.SHORT_ANSWER,
                             func.length(DatasetQuestion.text) <= VOICE_MAX_CHARS)
-    rows = (await session.execute(query.order_by(DatasetQuestion.id).limit(BANK_IMPORT_LIMIT * 3))).scalars().all()
+    # a topic's spoken candidates are read in full: the unspeakable ones are skipped, so a capped read
+    # could be all of them, every time
+    rows = (await session.execute(query.order_by(DatasetQuestion.id)
+                                  .limit(BANK_IMPORT_LIMIT * 3 if kind == "mcq" else None))).scalars().all()
     added, uids = [], set()
     for q in rows:
         uid = q.external_uid or str(q.id)  # the same question sits in several datasets
         index = correct_index(q.options, q.answer) if kind == "mcq" else None
-        if uid in uids or (kind == "mcq" and index is None):
+        if (uid in uids or (kind == "mcq" and index is None)
+                or (kind == "voice" and speakable.problem(q.text, q.question_type))):
             continue
         uids.add(uid)
         added.append(PracticeQuestion(
@@ -433,10 +437,17 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
                 slots[i] = replace(slots[i], kind="mcq")
                 picked[i] = q
                 exclude.add(q.id)
+    await _prepare_voice(session, list(picked.values()))
+    # never a spoken item without its spoken wording (C-002): an MCQ on the topic instead, else none
+    for i in [i for i, q in picked.items() if q.kind == "voice" and not q.expected_points]:
+        del picked[i]
+        q = await pool(slots[i].topic, "mcq", slots[i].bloom_level, False)
+        if q is not None:
+            slots[i], picked[i] = replace(slots[i], kind="mcq"), q
+            exclude.add(q.id)
     chosen = [(slots[i], picked[i]) for i in sorted(picked)]
     questions = [q for _, q in chosen]
     await _explain(questions, {s.topic.id: s.topic.name for s, _ in chosen})
-    await _prepare_voice(session, questions)
     for q in questions:
         q.used_count = (q.used_count or 0) + 1
     logger.info("daily_practice_built", extra={"student_id": str(student.id), "items": len(chosen),

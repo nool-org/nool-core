@@ -196,10 +196,10 @@ async def test_open_session_waits_for_prep_and_returns_the_question_count(schema
     with pytest.raises(ConflictError, match="getting this test's questions ready"):
         await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
 
-    s["test"].prep_status = VoiceTestPrepStatus.FAILED  # no questions: open, improvise
+    s["test"].prep_status = VoiceTestPrepStatus.FAILED  # no questions: never opens (V-006, AI-011)
     await db.flush()
-    out = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
-    assert out.model_dump(by_alias=True)["questionCount"] == 0
+    with pytest.raises(ConflictError, match="couldn't get this test's questions ready"):
+        await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
 
     await _question(db, s, B.REMEMBER, "Define resistance.")
     await _question(db, s, B.UNDERSTAND, "Explain why a wire heats up.")
@@ -296,7 +296,7 @@ async def test_prep_swaps_a_question_generation_could_not_reword(schema, monkeyp
         return {"questions": [{
             "dataset_question_id": c["id"], "bloom_level": c["bloom_level"],
             "reworded_text": c["text"] if c["id"] == str(stuck.id) else f"In simple words: {c['text']}",
-            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1", "h2"],
+            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1?", "h2?"],
         } for c in payload["candidates"]]}
     monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", prep)
     monkeypatch.setattr(voice_test_prep, "_pick", _pick_in_order(stuck, good))
@@ -318,7 +318,7 @@ async def test_prep_drops_a_question_no_alternative_can_replace(schema, monkeypa
         return {"questions": [{
             "dataset_question_id": c["id"], "bloom_level": c["bloom_level"],
             "reworded_text": c["text"] if c["id"] == str(stuck.id) else f"In simple words: {c['text']}",
-            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1", "h2"],
+            "spoken_text": c["text"], "expected_points": ["a", "b"], "misconceptions": ["x", "y"], "hints": ["h1?", "h2?"],
         } for c in payload["candidates"]]}
     monkeypatch.setattr(voice_test_prep.generation_client, "prep_voice_test", prep)
 

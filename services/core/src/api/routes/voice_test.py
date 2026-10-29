@@ -84,6 +84,7 @@ async def _serialize(session: AsyncSession, test: VoiceTest) -> VoiceTestOut:
         opens_at=test.scheduled_at,
         question_count=await session.scalar(
             select(func.count()).select_from(VoiceTestQuestion).where(VoiceTestQuestion.voice_test_id == test.id)),
+        prep_status=test.prep_status,
     )
 
 
@@ -272,12 +273,26 @@ async def schedule_test(
         # same as written tests); the teacher's Remind on the live screen covers it
         await session.refresh(test)
         return await _serialize(session, test)
-    chapter = await session.get(Chapter, test.chapter_id)
-    student_ids = (await session.execute(
-        select(VoiceTestTargetStudent.student_id).where(VoiceTestTargetStudent.test_id == test.id))).scalars().all()
-    await push.notify(session, student_ids, f"New voice test: {chapter.name if chapter else 'Chapter'}",
-                      "Tap to start when you're ready.", {"type": "voice_test", "testId": str(test.id)})
+    await voice_test_prep.announce(session, test)  # not yet when the questions are still being prepared (V-006)
+    return await _serialize(session, test)
+
+
+@router.post("/tests/{test_id}/prepare", summary="Try preparing the questions again after it failed")
+async def retry_prepare(
+    test_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.VOICE_TEST)),
+    session: AsyncSession = Depends(get_db_session),
+) -> VoiceTestOut:
+    """A FAILED test never reaches students (V-006) - this is the teacher's way out."""
+    test = await get_test_for_teacher(session, test_id, user)
+    if test.prep_status != VoiceTestPrepStatus.FAILED:
+        raise ConflictError("This test's questions are ready or still being prepared.")
+    test.prep_status = VoiceTestPrepStatus.PENDING
+    await session.commit()
     await session.refresh(test)
+    background_tasks.add_task(voice_test_prep.prepare_in_background, test.id, user.id)
     return await _serialize(session, test)
 
 

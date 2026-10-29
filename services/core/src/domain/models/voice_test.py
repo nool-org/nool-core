@@ -31,9 +31,9 @@ class AssignmentTargetMode(str, Enum):
 
 
 class VoiceTestPrepStatus(str, Enum):
-    """Question prep (services/voice_test_prep.py): PENDING while it runs -
-    no session may open yet; READY or FAILED (the co-learner improvises
-    from textbook_context) once done."""
+    """Question prep (services/voice_test_prep.py): PENDING while it runs,
+    READY with questions, FAILED without. Only a READY test reaches students
+    (VoiceTest.still_open) - a FAILED one waits for the teacher's retry."""
 
     PENDING = "pending"
     READY = "ready"
@@ -84,9 +84,16 @@ class VoiceTest(IdMixin, TimestampMixin, Base):
         """SQL filter: opened (a test scheduled for later stays hidden until
         then) and not past its deadline (never-scheduled rows have neither).
         clock_timestamp, not now(): now() is the transaction start, so a test
-        opened earlier in the same transaction would still read as "later"."""
-        return (cls.scheduled_at.is_(None)) | ((cls.scheduled_at <= func.clock_timestamp()) & (
-            cls.scheduled_at + func.make_interval(0, 0, 0, 0, cls.completion_window_hours) > func.now()))
+        opened earlier in the same transaction would still read as "later".
+        Also never before its questions are ready (questions_ready)."""
+        return (cls.prep_status == VoiceTestPrepStatus.READY) & ((cls.scheduled_at.is_(None)) | (
+            (cls.scheduled_at <= func.clock_timestamp())
+            & (cls.scheduled_at + func.make_interval(0, 0, 0, 0, cls.completion_window_hours) > func.now())))
+
+    @property
+    def questions_ready(self) -> bool:
+        """Students never see or start a test before prep has its questions (V-006)."""
+        return self.prep_status == VoiceTestPrepStatus.READY
 
     def opens_later(self, now: datetime) -> bool:
         return self.scheduled_at is not None and self.scheduled_at > now

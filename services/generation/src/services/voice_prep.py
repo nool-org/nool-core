@@ -32,7 +32,7 @@ import re
 from llama_index.core.workflow import Context, Event, StartEvent, StopEvent, Workflow, step
 from pydantic import BaseModel, Field, model_validator
 
-from src.services.gap_fill import SPOKEN_RULES, BloomLevel, Difficulty
+from src.services.gap_fill import BloomLevel, Difficulty
 from src.services.llm import StructuredLLM
 
 logger = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ class _Verdict(BaseModel):
     answer_to_reworded: str = Field(description="your own short answer to the reworded question")
     ok: bool
     problem: str = Field(description="empty when ok; otherwise what is wrong, specifically")
-    easier_ok: bool = Field(description="the easier version passes check 8; false when there is none")
+    easier_ok: bool = Field(description="the easier version passes check E; false when there is none")
 
 
 class _Verdicts(BaseModel):
@@ -150,15 +150,20 @@ A friendly co-learner will read it aloud to an Indian school student, in a South
 Reword the question so it works as a SPOKEN question. Keep the SAME concept, the SAME Bloom level
 and difficulty, and an answer that agrees with the given answer. Never add a part (no extra
 "give reason", no extra sub-question).
-The student hears it ONCE and answers by speaking ONCE:""" + SPOKEN_RULES + """
+The student hears it ONCE and answers by speaking ONCE:
+- It is answered by speaking: no sub-parts, no lists, no dialogue or story set-up, nothing to write, draw
+  or calculate at length.
 - Never say "write", "draw", "list" or "tabulate". Turn "write/state/list any four (or N) ..." into
   "Tell me two or three ...". Asking for fewer items is fine.
+- Never ask the student to say an equation or a formula, even with "say" or "tell": ask what is formed,
+  what changes, or why (spoken equations can't be followed or graded).
 - A long multi-step calculation becomes a reasoning ask ("How would you find ...?") or one simple step.
 - Self-contained: never say "this lens", "the given circuit", "the above" without first saying what it is.
 - Simple Indian English, as a teacher speaks in a South Indian classroom.
 - Short sentences, about 15 words or fewer each. Everyday words.
-- ONE question asking ONE thing, about 20 words in all. Never two questions joined ("... ? And how ...?"),
-  never "and also explain". If the original asks two things, ask the more important one.
+- ONE question asking ONE thing, about 20 words in all and never more than 30. Never two questions joined
+  ("... ? And how ...?"), never a chain of asks ("Define ... Give ... Also say ...", "Then explain ...").
+  If the original asks two things, ask the more important one.
 - No idioms, no slang, no American or British phrasing.
 - Keep textbook terms exactly as in NCERT/state-board books (for example potential difference, resistivity).
 - Keep a number only if the question still needs it; never change a number or add a new one.
@@ -201,10 +206,11 @@ Then ok=true only if ALL hold:
 7. No hint states the answer or any part of it (for a multi-part question, any one part's answer counts).
    Hint 1 points to the key idea; hint 2 is a smaller sub-question that leads toward the answer.
    A hint that tells the student what happens (a statement of the fact the question asks for) fails.
-9. It asks ONE thing - not two questions in one.
-`ok` is about the reworded question only. Separately, easier_ok=true only if the `easier` version
-8. asks about the same concept and topic, is simpler (it may be one Bloom level lower), meets 3-7 and 9 above,
-   and its expected_points agree with the dataset answer for what it asks.
+8. It asks ONE thing - not two questions in one, and not a chain of asks ("Define ... Give ... Also say ...").
+`ok` is about the reworded question only.
+E. Separately, easier_ok=true only if the `easier` version asks about the same concept and topic, is simpler
+   (it may be one Bloom level lower), meets 3-8 above, and its expected_points agree with the dataset answer
+   for what it asks.
 If not ok, say precisely what is wrong in `problem`."""
 
 
@@ -223,7 +229,7 @@ def _units(text: str) -> set[str]:
 
 
 # asks a spoken answer can't meet - the prompt turns these into "tell me two or three ..."
-_WRITTEN_ASK = re.compile(r"\b(?:write|draw|tabulate)\b|\bany (?:three|four|five|six)\b", re.IGNORECASE)
+_WRITTEN_ASK = re.compile(r"\b(?:write|draw|tabulate|equations?|formulae?)\b|\bany (?:three|four|five|six)\b", re.IGNORECASE)
 
 
 def _has_word(text: str, word: str) -> bool:

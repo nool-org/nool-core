@@ -91,13 +91,15 @@ async def open_session(
         test = await db.get(VoiceTest, body.test_id)
         if test.opens_later(datetime.now(timezone.utc)):
             raise ConflictError("This test hasn't opened yet.", code="NOT_OPEN_YET")
-        if await db.scalar(select(VoiceTest.id).where(VoiceTest.id == body.test_id, VoiceTest.still_open())) is None:
-            raise ConflictError("This test's deadline has passed, so it can't be taken any more.")
-        prep_status = await db.scalar(select(VoiceTest.prep_status).where(VoiceTest.id == body.test_id))
-        if prep_status == VoiceTestPrepStatus.PENDING:
+        if test.prep_status == VoiceTestPrepStatus.PENDING:
             # the app waits and tries again on its own for this code (voice-session.tsx)
             raise ConflictError("Milo is still getting this test's questions ready. Try again in a minute.",
                                 code="QUESTIONS_PREPARING")
+        if test.prep_status == VoiceTestPrepStatus.FAILED:  # never run a test without its questions (V-006, AI-011)
+            raise ConflictError("Milo couldn't get this test's questions ready. Your teacher can try again.",
+                                code="QUESTIONS_FAILED")
+        if await db.scalar(select(VoiceTest.id).where(VoiceTest.id == body.test_id, VoiceTest.still_open())) is None:
+            raise ConflictError("This test's deadline has passed, so it can't be taken any more.")
     # the app reloaded (or dropped) mid-test: carry on in the same session - colearner picks
     # up its answers and clock on the next /realtime - never a second one from zero
     ai_session = await _unfinished_session(db, app_user.id, body.test_id)
@@ -153,8 +155,8 @@ async def _colearner_config(
 ) -> tuple[dict, int]:
     """colearner's SessionConfig for this session, plus its question count.
     With the test's questions (contract C3 `questions`) the co-learner asks
-    exactly those, in order; without (prep found none) it improvises from
-    textbook_context."""
+    exactly those, in order; without, colearner refuses the call (AI-011) -
+    open_session only lets a student start a test whose questions are ready."""
     test = await db.get(VoiceTest, ai_session.test_id) if ai_session.test_id else None
     chapter = await db.get(Chapter, test.chapter_id) if test else None
     subject = await db.get(Subject, test.subject_id) if test else None

@@ -69,8 +69,8 @@ class GapFillRequest(BaseModel):
 
 
 SPOKEN_RULES = """
-- These questions are ASKED ALOUD in a voice test and answered by speaking: one single question, at most
-  35 words, no sub-parts, no lists, no dialogue or story set-up, nothing to write, draw or calculate at length.
+- These questions are ASKED ALOUD in a voice test and answered by speaking: one single question, about
+  20 words (never more than 30), no sub-parts, no lists, no dialogue or story set-up, nothing to write, draw or calculate at length.
   An EVALUATE question asks the student to judge or justify in one or two spoken sentences."""
 
 

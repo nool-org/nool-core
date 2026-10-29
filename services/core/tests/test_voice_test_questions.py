@@ -975,3 +975,30 @@ async def test_a_card_takes_the_third_place_and_the_test_stays_at_five(schema, m
     await db.execute(VoiceTestQuestion.__table__.delete().where(VoiceTestQuestion.voice_test_id == s["test"].id))
     await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
     assert len(await _questions(db, s["test"])) == 5  # no card made: the spare is asked instead
+
+
+async def test_a_sent_test_reaches_students_only_once_its_questions_are_ready(schema, monkeypatch):
+    """V-006: sent while Milo was still preparing -> hidden, no push; announced when prep is READY."""
+    from datetime import datetime, timezone
+
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER,))
+    await _question(db, s, B.REMEMBER, "Define electric current.")
+    s["test"].status, s["test"].scheduled_at = TestStatus.SCHEDULED, datetime.now(timezone.utc)
+    s["test"].prep_status = voice_test_prep.VoiceTestPrepStatus.PENDING
+    await db.flush()
+    pushed = []
+
+    async def fake_notify(session, ids, title, body, data=None):
+        pushed.append(data)
+    monkeypatch.setattr(voice_test_prep.push, "notify", fake_notify)
+    open_now = select(VoiceTest.id).where(VoiceTest.id == s["test"].id, VoiceTest.still_open())
+
+    await voice_test_prep.announce(db, s["test"])
+    assert await db.scalar(open_now) is None and pushed == []
+
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+    assert await db.scalar(open_now) == s["test"].id
+    assert pushed == [{"type": "voice_test", "testId": str(s["test"].id)}]
