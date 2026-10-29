@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.domain.models import McqTest, User, VoiceTest
 
 FLAG_BELOW = 60  # re-check score under this = not mastered yet (challenge_report's STRUGGLING_BELOW)
+MIN_ASKED = 2  # V-008: a Bloom level the re-check asked once is 'Not assessed', not a one-answer swing
 
 
 def corrected(percent: int) -> int:
@@ -21,11 +22,13 @@ def percent(correct: int, total: int) -> int:
     return round(100 * correct / total) if total else 0
 
 
-def growth_entries(kind: str, after_raw: dict[str, int], before: dict[str, int]) -> list[dict]:
-    """One entry per key measured on the MCQ test that also has a voice-test score."""
+def growth_entries(kind: str, after_raw: dict[str, int], before: dict[str, int],
+                   asked: dict[str, int] | None = None) -> list[dict]:
+    """One entry per key measured on the MCQ test that also has a voice-test score;
+    with `asked` (questions per key), only keys asked at least MIN_ASKED times."""
     out = []
     for key, raw in after_raw.items():
-        if before.get(key) is None:
+        if before.get(key) is None or (asked is not None and asked.get(key, 0) < MIN_ASKED):
             continue
         after = corrected(raw)
         out.append({"key": key, "kind": kind, "before": before[key], "afterCorrected": after,

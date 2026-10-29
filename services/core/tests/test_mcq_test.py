@@ -62,7 +62,7 @@ from src.domain.models import (
 )
 from src.services import mcq_test as service
 from src.services.generation_client import GenerationServiceUnavailableError
-from src.services.growth import corrected
+from src.services.growth import corrected, growth_entries
 
 B = BloomLevel
 LEVELS = [B.REMEMBER, B.UNDERSTAND, B.APPLY, B.ANALYZE, B.EVALUATE]
@@ -383,6 +383,13 @@ async def _attempt(db, s, *, wrong_levels=()):
 
 def test_guess_correction():
     assert [corrected(p) for p in (0, 25, 50, 75, 100)] == [0, 0, 33, 67, 100]
+
+
+def test_no_growth_for_a_level_asked_once():
+    """V-008: Remember 28% -> 0% (-28) from one wrong re-check answer; under 2 asked = Not assessed."""
+    entries = growth_entries("bloom", {"REMEMBER": 0, "UNDERSTAND": 100}, {"REMEMBER": 28, "UNDERSTAND": 0},
+                             {"REMEMBER": 1, "UNDERSTAND": 2})
+    assert [e["key"] for e in entries] == ["UNDERSTAND"]
 
 
 async def test_attempt_marks_scores_growth_and_awards_xp_once(schema, monkeypatch):

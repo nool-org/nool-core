@@ -641,7 +641,8 @@ async def submit_attempt(session: AsyncSession, mcq: McqTest, answers: dict[str,
 
     test = await session.get(VoiceTest, mcq.voice_test_id)
     before = await voice_scores(session, mcq.student_id, test)
-    growth = growth_entries("bloom", per_bloom, before.bloom) + growth_entries("concept", per_concept, before.concepts)
+    growth = (growth_entries("bloom", per_bloom, before.bloom, {k: len(v) for k, v in by_level.items()})
+              + growth_entries("concept", per_concept, before.concepts))
     xp, streaks = xp_breakdown(questions, first, speed_mode=mcq.speed_mode, lifelines=mcq.lifelines_used or [])
     gaps = [q for q in questions if q.gap_concept]
     mcq.completed_at = now
