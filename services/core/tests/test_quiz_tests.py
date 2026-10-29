@@ -16,6 +16,7 @@ from shared.errors import ConflictError, NotFoundError, ValidationError
 from src.api.routes import quiz_tests as routes
 from src.api.routes import student_tasks as task_routes
 from src.api.routes import topic_quizzes as quiz_routes
+from src.api.schemas.voice_test import RemindIn
 from src.api.schemas.quiz_tests import QuizTestCreateIn, QuizTestScheduleIn
 from src.domain.models import BloomLevel as B
 from src.domain.models import QuizTest
@@ -330,6 +331,31 @@ async def test_like_a_voice_co_learner_a_window_from_opening_and_chosen_students
     assert results.student_count == 1
     [listed] = (await routes.list_my_quiz_tests(user=s.teacher, session=db_session)).items
     assert listed.student_count == 1
+
+
+async def test_t042_remind_and_add_24h_work_on_a_written_test(db_session, monkeypatch):
+    s = await _seed(db_session, students=2)
+    for topic in (s.ohm, s.power):
+        await _teach(db_session, s, topic)
+        await _pools(db_session, topic)
+    created = await _create(db_session, s, monkeypatch, completion_window_hours=24)
+    with pytest.raises(ConflictError):  # not open yet
+        await routes.remind_quiz_test(created.id, RemindIn(), user=s.teacher, session=db_session)
+    out = await routes.publish_quiz_test(created.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
+    sent = []
+
+    async def fake_notify(session, ids, title, body, data=None):
+        sent.append(set(ids))
+
+    monkeypatch.setattr(service.push, "notify", fake_notify)
+    one = str(s.students[0].id)
+    assert (await routes.remind_quiz_test(created.id, RemindIn(student_ids=[one]), user=s.teacher,
+                                          session=db_session)).reminded == 1
+    assert (await routes.remind_quiz_test(created.id, RemindIn(), user=s.teacher,
+                                          session=db_session)).reminded == 2
+    extended = await routes.extend_quiz_test(created.id, user=s.teacher, session=db_session)
+    assert abs((extended.due_at - out.due_at).total_seconds() - 24 * 3600) < 1
+    assert extended.completion_window_hours == 48
 
 
 async def test_one_challenge_cycle_per_chapter_per_class(db_session, monkeypatch):

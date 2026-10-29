@@ -21,6 +21,7 @@ from src.api.schemas.quiz_tests import (
     QuizTestScheduleIn,
 )
 from src.api.schemas.topic_quiz import TopicQuizOut
+from src.api.schemas.voice_test import RemindIn, RemindOut
 from src.domain.models import DailyPracticeSession, QuizTest, Role, StudentProfile, User
 from src.services import quiz_tests
 
@@ -98,6 +99,29 @@ async def publish_quiz_test(
     await session.commit()
     if opened:
         await quiz_tests.notify_class(session, test)
+    return _out(test)
+
+
+@router.post("/quiz-tests/{test_id}/remind", summary="Nudge students who haven't finished")
+async def remind_quiz_test(
+    test_id: str,
+    body: RemindIn,
+    user: User = Depends(require_role(Role.TEACHER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> RemindOut:
+    test = await quiz_tests.own_test(session, user, test_id)
+    return RemindOut(reminded=await quiz_tests.remind(session, test, body.student_ids))
+
+
+@router.post("/quiz-tests/{test_id}/extend", summary="Give students 24 more hours")
+async def extend_quiz_test(
+    test_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> QuizTestOut:
+    test = await quiz_tests.own_test(session, user, test_id)
+    quiz_tests.extend(test)
+    await session.commit()
     return _out(test)
 
 

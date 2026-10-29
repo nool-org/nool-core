@@ -222,6 +222,39 @@ async def notify_class(session: AsyncSession, test: QuizTest) -> None:
                       {"type": "quiz_test", "quizTestId": str(test.id)})
 
 
+MAX_WINDOW_HOURS = 14 * 24
+
+
+async def remind(session: AsyncSession, test: QuizTest, student_ids: list[str] | None) -> int:
+    """Pushes the students who haven't finished (or just the picked ones among them); how many."""
+    if not is_open(test) or (test.due_at and test.due_at <= datetime.now(timezone.utc)):
+        raise ConflictError("This test isn't open.")
+    done = {sid for sid, a in (await attempts(session, test)).items() if a.outcome}
+    pending = {uuid.UUID(str(s)) for s in (await session.execute(select(StudentProfile.user_id).where(
+        StudentProfile.class_id == test.class_id))).scalars() if is_for(test, s)} - done
+    if student_ids is not None:
+        pending &= {uuid.UUID(s) for s in student_ids if len(s) == 36}  # a malformed id raises 422-ish below
+    if not pending:
+        raise ValidationError("Everyone you picked has already finished.")
+    left = test.due_at - datetime.now(timezone.utc) if test.due_at else None
+    hours = max(1, int(left.total_seconds() // 3600)) if left else None
+    await push.notify(session, pending, f"Reminder: {test.title}",
+                      f"Your teacher is waiting for your answers{f' - {hours} h left' if hours else ''}.",
+                      {"type": "quiz_test", "quizTestId": str(test.id)})
+    return len(pending)
+
+
+def extend(test: QuizTest) -> None:
+    """24 more hours for everyone; also reopens one that just closed. Caller commits."""
+    if test.status not in ("published", "scheduled") or test.published_at is None:
+        raise ConflictError("Open the test first.")
+    hours = (test.completion_window_hours or 0) + 24
+    if hours > MAX_WINDOW_HOURS:
+        raise ValidationError("A test can stay open for at most 14 days.")
+    test.completion_window_hours = hours
+    test.due_at = max(test.due_at or test.published_at, datetime.now(timezone.utc)) + timedelta(hours=24)
+
+
 # ------------------------------------------------------------------ students
 async def tests_for(session: AsyncSession, student: User) -> list[QuizTest]:
     profile = (await session.execute(select(StudentProfile).where(
