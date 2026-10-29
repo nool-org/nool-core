@@ -59,7 +59,7 @@ async def _class_stats(session: AsyncSession, tests) -> tuple[TeacherClassStats 
     latest = {student: mastery for student, mastery, _ in rows}
     then = {student: mastery for student, mastery, at in rows if at <= week_ago}
     average = round(mean(latest.values()))
-    stats = TeacherClassStats(average_percent=average, week_delta=average - round(mean(then.values())) if then else 0,
+    stats = TeacherClassStats(average_percent=average, week_delta=average - round(mean(then.values())) if then else None,
                               need_help=sum(m < NEED_HELP_BELOW for m in latest.values()))
 
     scores = (await session.execute(
@@ -106,7 +106,8 @@ async def get_teacher_dashboard(
                 TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.class_id == active.id)))
         stats, weakest_topic = await _class_stats(session, select(VoiceTest.id).where(*mine))
         test_result = await session.execute(
-            select(VoiceTest).where(*mine).order_by(VoiceTest.created_at.desc()).limit(1)
+            # a draft is only the headline when there is nothing else (T-025)
+            select(VoiceTest).where(*mine).order_by((VoiceTest.status == TestStatus.DRAFT), VoiceTest.created_at.desc()).limit(1)
         )
         test = test_result.scalar_one_or_none()
         if test is not None:

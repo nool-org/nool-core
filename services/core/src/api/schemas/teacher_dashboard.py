@@ -18,7 +18,7 @@ class TeacherHeadlineTest(CamelModel):
 
 class TeacherClassStats(CamelModel):
     average_percent: int  # mean of each student's latest test mastery
-    week_delta: int  # that average now minus a week ago
+    week_delta: int | None  # that average now minus a week ago; None when nothing was graded a week ago
     need_help: int  # students whose latest mastery is under 50%
 
 

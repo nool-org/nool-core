@@ -55,3 +55,22 @@ async def test_today_stats_and_weakest_topic(db_session, monkeypatch):
     assert (dash.stats.average_percent, dash.stats.week_delta, dash.stats.need_help) == (50, 10, 2)
     assert (dash.weakest_topic.percent, dash.weakest_topic.trend) == (52, [40, 90])
     assert dash.weakest_topic.name.startswith("12.1")
+
+
+async def test_headline_is_not_a_draft_and_no_week_change_without_last_weeks_results(db_session, monkeypatch):
+    db = db_session  # T-025 / T-026
+    w = await _world(db, monkeypatch)
+    await _add_created_at(db)
+    now = datetime.now(timezone.utc)
+    live, draft = (VoiceTest(class_id=w.cls.id, subject_id=w.subject.id, chapter_id=chapter, duration_minutes=10,
+                             completion_window_hours=48, target_mode=AssignmentTargetMode.WHOLE_CLASS,
+                             status=status, created_at=now - timedelta(days=days))
+                   for chapter, status, days in ((w.ch1.id, TestStatus.ACTIVE, 3), (w.ch2.id, TestStatus.DRAFT, 0)))
+    db.add_all([live, draft])
+    await db.flush()
+    db.add(StudentTestResult(test_id=live.id, student_id=w.students[0].id, mastery_percent=40, created_at=now))
+    await db.flush()
+
+    dash = await teacher_dashboard.get_teacher_dashboard(class_id=None, user=w.teacher, session=db)
+    assert dash.headline_test.id == str(live.id)  # the newer draft isn't the headline
+    assert dash.stats.week_delta is None  # nothing was graded a week ago: no "-40 this week"
