@@ -14,6 +14,7 @@ from src.domain.models import (
     BloomLevel,
     Chapter,
     DailyPracticeSession,
+    McqTest,
     QuizTest,
     StudentTestResult,
     StudentTestResultBloomScore,
@@ -59,6 +60,19 @@ async def by_subject(session: AsyncSession, student: User) -> list[dict]:
         names[sid] = sname
         results[sid].append({"label": chapter or sname, "kind": "Speak with Milo", "score_percent": round(mastery or 0),
                              "per_bloom": levels.get(rid, {}), "at": at, "test_id": str(test_id), "quiz_id": None})
+
+    # a Speak with Milo test's re-check (after its homework)
+    for mcq, sid, sname, chapter in (await session.execute(
+            select(McqTest, Subject.id, Subject.name, Chapter.name)
+            .join(VoiceTest, VoiceTest.id == McqTest.voice_test_id)
+            .join(Subject, Subject.id == VoiceTest.subject_id)
+            .outerjoin(Chapter, Chapter.id == VoiceTest.chapter_id)
+            .where(McqTest.student_id == student.id, McqTest.completed_at.is_not(None)))).all():
+        names[sid] = sname
+        per_bloom = {e["key"]: e["afterCorrected"] for e in (mcq.result or {}).get("growth") or []
+                     if e.get("kind") == "bloom"}
+        results[sid].append({"label": chapter or sname, "kind": "Re-check", "score_percent": mcq.score_percent or 0,
+                             "per_bloom": per_bloom, "at": mcq.completed_at, "test_id": None, "quiz_id": None})
 
     finished = (await session.execute(
         select(DailyPracticeSession, Subject.id, Subject.name, Topic.name, QuizTest)

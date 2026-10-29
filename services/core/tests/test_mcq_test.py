@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import inspect, select, text
+from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.schema import CreateTable
 
@@ -415,6 +415,20 @@ async def test_attempt_marks_scores_growth_and_awards_xp_once(schema, monkeypatc
     with pytest.raises(ConflictError):
         await routes.submit_my_mcq_attempt(item.id, McqAttemptIn(answers=[]), user=s["student"], session=db)
     assert (await _open(db, s)).status == "completed"
+
+
+async def test_no_growth_for_a_level_the_voice_result_did_not_assess(schema, monkeypatch):
+    """T-004: Results said Evaluate "Not assessed", Class growth showed Evaluate "4% before" (the mastery fill-in)."""
+    db = schema
+    s = await _seed(db, taken_hours_ago=49)
+    mine = select(StudentTestResult.id).where(StudentTestResult.student_id == s["student"].id).scalar_subquery()
+    await db.execute(delete(StudentTestResultBloomScore).where(
+        StudentTestResultBloomScore.student_test_result_id == mine, StudentTestResultBloomScore.bloom_level == B.EVALUATE))
+    await _full_bank(db, s)
+    _no_generation(monkeypatch)
+    _, _, out = await _attempt(db, s)
+    assert "EVALUATE" in out.per_bloom  # asked on the re-check ...
+    assert "EVALUATE" not in {g.key for g in out.growth if g.kind == "bloom"}  # ... but no 'before' to grow from
 
 
 async def test_attempt_before_opening_and_on_someone_elses_test(schema, monkeypatch):

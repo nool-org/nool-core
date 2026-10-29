@@ -9,6 +9,8 @@ test_analytics.py.
 
 import uuid
 
+from sqlalchemy import select
+
 from src.api.routes import progress
 from src.domain.models import (
     AssignmentTargetMode,
@@ -120,3 +122,25 @@ async def test_progress_lists_each_finished_test_with_its_chapter_and_score(db_s
     assert sorted(t.score_percent for t in result.subject_tests) == [30, 64]
     assert all(t.label == "Chapter 1" and t.test_id for t in result.subject_tests)
     assert all(t.test_type.startswith("Chat with Milo · ") for t in result.subject_tests)
+
+
+async def test_a_finished_speak_with_milo_recheck_is_listed_in_results(db_session):
+    """S-002: the homework re-check (an MCQ test) never reached Me > Results."""
+    from datetime import datetime, timezone
+
+    from src.domain.models import McqTest
+    from src.services import student_progress
+
+    school = await _seed_school(db_session)
+    student = await _seed_student(db_session, school.id)
+    await _seed_result(db_session, school.id, student.id, mastery_percent=40, bloom_scores={BloomLevel.APPLY: 40})
+    test = (await db_session.execute(select(StudentTestResult).where(
+        StudentTestResult.student_id == student.id))).scalar_one()
+    now = datetime.now(timezone.utc)
+    db_session.add(McqTest(student_id=student.id, voice_test_id=test.test_id, unlocks_at=now, completed_at=now,
+                           score_percent=60, result={"growth": [{"key": "APPLY", "kind": "bloom", "afterCorrected": 47}]}))
+    await db_session.flush()
+
+    [subject] = await student_progress.by_subject(db_session, student)
+
+    assert [(r["kind"], r["score_percent"]) for r in subject["results"]] == [("Re-check", 60), ("Speak with Milo", 40)]

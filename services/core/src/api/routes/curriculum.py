@@ -25,14 +25,19 @@ router = APIRouter(prefix="/api/v1", tags=["curriculum"])
 
 async def _ensure_subject_open_to(session: AsyncSession, user: User, subject_id) -> None:
     """The curriculum tree of a subject is readable by a school only once a
-    Super Admin enabled that subject for it - and by a teacher only for a
-    subject they teach there."""
+    Super Admin enabled that subject for it - by a teacher only for a
+    subject they teach there, and by a student only for one taught in
+    their class (Learn's "not taught yet" syllabus)."""
     query = select(SchoolCurriculum.id).where(
         SchoolCurriculum.school_id == user.school_id, SchoolCurriculum.subject_id == subject_id,
         SchoolCurriculum.enabled.is_(True))
     if user.role == Role.TEACHER:
         query = query.where(select(TeacherClassAssignment.id).where(
             TeacherClassAssignment.teacher_id == user.id, TeacherClassAssignment.subject_id == subject_id).exists())
+    if user.role == Role.STUDENT:
+        query = query.where(select(TeacherClassAssignment.id).join(
+            StudentProfile, StudentProfile.class_id == TeacherClassAssignment.class_id).where(
+            StudentProfile.user_id == user.id, TeacherClassAssignment.subject_id == subject_id).exists())
     if subject_id is None or (await session.execute(query.limit(1))).first() is None:
         raise NotFoundError("That subject isn't available to you.")
 
@@ -138,7 +143,7 @@ async def teacher_branches(session: AsyncSession, teacher_id, subject_id) -> set
 async def list_chapters(
     subject_id: str,
     grade: int | None = None,
-    user: User = Depends(require_role(Role.TEACHER, Role.SCHOOL_ADMIN)),
+    user: User = Depends(require_role(Role.TEACHER, Role.SCHOOL_ADMIN, Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[ChapterOut]:
     """`grade` is optional so existing callers keep working unfiltered -
