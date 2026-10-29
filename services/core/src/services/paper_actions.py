@@ -39,8 +39,10 @@ from src.domain.models import (
     Chapter,
     DatasetQuestion,
     QuestionPaper,
+    QuestionPaperChapter,
     QuestionPaperSection,
     QuestionPaperStatus,
+    QuestionPaperValidation,
     QuestionType,
     Topic,
 )
@@ -102,7 +104,37 @@ async def create_version(
     )
     session.add(version)
     await session.flush()
+    await refresh_validation(session, paper)
     return version
+
+
+async def refresh_validation(session: AsyncSession, paper: QuestionPaper) -> None:
+    """Recomputes the paper's stored marks-accounted / quality / duplicates /
+    coverage from its questions as they are now, so the review tiles and the
+    finalized header follow every edit (T-039). Runs with each new version."""
+    validation = await session.get(QuestionPaperValidation, paper.id)
+    if validation is None:
+        return
+    questions = await load_questions(session, paper.id)
+    sections = (await session.execute(
+        select(QuestionPaperSection).where(QuestionPaperSection.paper_id == paper.id))).scalars().all()
+    wanted = set((await session.execute(
+        select(QuestionPaperChapter.chapter_id).where(QuestionPaperChapter.paper_id == paper.id))).scalars().all())
+    total, slots = len(questions), sum(s.question_count for s in sections)
+    texts = [q.text.strip().lower() for q in questions]
+    duplicates = len(texts) - len(set(texts))
+    marks = sum(q.marks for q in questions)
+    if wanted:
+        validation.coverage_percent = round(100 * len(wanted & {q.chapter_id for q in questions}) / len(wanted))
+    validation.marks_accounted_for = marks
+    if slots:  # no blueprint sections: generation's own numbers stand
+        quality = min(max(0, 100 - duplicates * 20), validation.coverage_percent) if total else 0
+        validation.duplicate_count = duplicates
+        validation.quality_percent = min(quality, round(100 * total / slots)) if total else 0
+    issues = [i for i in validation.issues or [] if "add up to" not in i]
+    if paper.total_marks and total and marks != paper.total_marks:
+        issues.append(f"The questions add up to {marks} of the paper's {paper.total_marks} marks.")
+    validation.issues = issues
 
 
 # ---------------------------------------------------------------- validation

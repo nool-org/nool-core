@@ -59,7 +59,9 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestQuestion,
 )
-from src.domain.models.question_paper import PaperDifficultyLevel, QuestionPaperQuestion, QuestionPaperVersion
+from src.domain.models.question_paper import (
+    PaperDifficultyLevel, QuestionPaperQuestion, QuestionPaperValidation, QuestionPaperVersion,
+)
 from src.services import paper_actions
 from src.services.paper_repeats import normalize
 from src.services.paper_rules import estimate_minutes
@@ -416,6 +418,17 @@ async def test_actions_apply_replace_add_edit_remove_reorder_with_sources_and_ve
     versions = (await paper_versions.list_versions(paper.id, user=s["teacher"], session=db)).items
     assert [(v.number, v.origin, v.created_by) for v in versions] == [
         (3, "manual", str(s["teacher"].id)), (2, "chat", str(s["teacher"].id)), (1, "generate", str(s["teacher"].id))]
+
+async def test_t039_stored_marks_accounted_follow_a_copilot_edit(schema, monkeypatch):
+    db = schema
+    s = await _seed(db)
+    paper, _ = await _generated_paper(db, monkeypatch, s)
+    q1, *_ = await _questions(db, paper.id)
+    out = await _act(db, s, paper.id, [{"op": "edit", "questionId": q1.id, "changes": {"marks": 5}}], origin="chat")
+    row = await db.get(QuestionPaperValidation, paper.id)
+    await db.refresh(row)
+    assert row.marks_accounted_for == out.rules_check.total_marks.actual
+    assert not any("add up to" in i for i in row.issues) or row.marks_accounted_for != paper.total_marks
 
 
 @pytest.mark.parametrize("make_op, error", [
