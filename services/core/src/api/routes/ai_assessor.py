@@ -50,8 +50,9 @@ router = APIRouter(prefix="/api/v1", tags=["ai-assessor"])
 logger = get_logger(__name__)
 
 VOICE_TEST_GOAL_KEY = "goal-finish-voice-test"
-# colearner hangs a call up by 8 min + 3 min warm-up + grace; past this an unfinished call was abandoned
-ABANDONED_AFTER_SECONDS = 15 * 60
+# colearner hangs a call up by its longest legitimate run - 3 min warm-up + 8 min test + 10 min of
+# pauses + 20 s grace = 21.3 min (see RESUME_WINDOW_SECONDS); past this an unfinished call was abandoned
+ABANDONED_AFTER_SECONDS = 23 * 60
 # A reload reopens an unfinished session this long after it was opened (_unfinished_session):
 # the longest legitimate session - 3 min warm-up + 8 min test + 10 min of pauses (colearner's
 # READY_ALLOWANCE_SECONDS, MAX_CALL_SECONDS, MAX_PAUSE_SECONDS) + its 20 s grace = 21.3 min - plus slack.
@@ -60,6 +61,8 @@ ABANDONED_AFTER_SECONDS = 15 * 60
 # A session with a record never reopens, whatever its age.
 RESUME_WINDOW_SECONDS = 25 * 60
 _background: set[asyncio.Task] = set()
+# session id -> its latest call: a call a reload replaced (resumed in a new one) isn't watched any more
+_watched_call: dict[uuid.UUID, str] = {}
 
 
 @router.post("/ai-assessor/sessions", status_code=201, summary="Open a session")
@@ -371,8 +374,13 @@ def _watch_for_abandon(session_id: uuid.UUID, call_id: str, token: str) -> None:
     already has its record, so this does nothing.
     ponytail: in-process timer, lost on a Core restart; a sweep over sessions
     without a record (call_id stored) if that ever matters."""
+    _watched_call[session_id] = call_id
+
     async def run() -> None:
         await asyncio.sleep(ABANDONED_AFTER_SECONDS)
+        if _watched_call.get(session_id) != call_id:  # resumed in a newer call - its own watcher has it
+            return
+        _watched_call.pop(session_id, None)
         try:
             async with get_session() as db:
                 if await db.get(AiAssessorSessionRecord, session_id) is not None:
