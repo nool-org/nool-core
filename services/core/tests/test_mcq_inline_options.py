@@ -25,3 +25,11 @@ def test_relabel_moves_option_letters_with_the_shuffle():
     order = [3, 2, 0, 1]  # new position k holds old option order[k]
     assert relabel("Option (A) is correct; options B and (d) are not. In (b), option a student", order) == \
         "Option (C) is correct; options D and (a) are not. In (b), option a student"
+
+
+def test_c015_unlabelled_repeats_of_the_options_and_choose_the_correct_option_go():
+    stem = ("Which way does the needle turn?\nChoose the correct option:\ntowards the south\ntowards the north\n"
+            "vertically downwards\nvertically upwards")
+    options = ["towards the north", "towards the south", "vertically upwards", "vertically downwards"]
+    assert strip_inline_options(stem, options) == "Which way does the needle turn?"
+    assert strip_inline_options("Choose the correct option:\nWhat is 2+2?") == "What is 2+2?"

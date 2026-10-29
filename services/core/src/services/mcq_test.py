@@ -92,14 +92,18 @@ def status(mcq: McqTest) -> str:
 _INLINE_OPTION = re.compile(r"^\s*\(?[a-dA-D][.)]\s+\S")
 
 
+_INSTRUCTION = re.compile(r"^\s*(choose|select|pick) the (correct|right|best) (option|answer)s?\s*[:.]?\s*$", re.I)
+
+
 def strip_inline_options(text: str, options: list[str] | None = None) -> str:
-    """Bank questions sometimes carry their choices in the stem ("a. -20 cm").
-    The options are shown as buttons, so drop those trailing lines. Given the
-    options, only lines that are options (and blank lines between them) - a
-    stem's own lettered list ("A. Riya adds water...") stays."""
-    lines = text.rstrip().split("\n")
+    """Bank questions sometimes carry their choices in the stem ("a. -20 cm", or the same
+    choices unlabelled and reordered - C-015) and a "Choose the correct option:" line.
+    The options are shown as buttons, so drop those. Given the options, only lines that are
+    options (and blank lines between them) - a stem's own lettered list ("A. Riya adds
+    water...") stays."""
+    lines = [line for line in text.rstrip().split("\n") if not _INSTRUCTION.match(line)]
     opts = {unlabel(o).lower() for o in options or []}
-    while lines and (_INLINE_OPTION.match(lines[-1]) or (opts and not lines[-1].strip())):
+    while lines and (_INLINE_OPTION.match(lines[-1]) or (opts and (not lines[-1].strip() or unlabel(lines[-1]).lower() in opts))):
         if opts and lines[-1].strip() and unlabel(lines[-1]).lower() not in opts:
             break
         lines.pop()
