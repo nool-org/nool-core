@@ -86,6 +86,22 @@ def sentences(text: str) -> set[str]:
             if len(key := re.sub(r"\W+", "", _PART.sub("", part).lower())) >= 30}
 
 
+_STOP = frozenset("what which that this with from when does about following these those their there into have been "
+                  "will would should could because while where than then them they your".split())
+
+
+def words_of(text: str) -> frozenset[str]:
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 3 and w not in _STOP)
+
+
+def near_duplicate(text: str, seen: list[frozenset[str]]) -> bool:
+    """True when most of the stem's content words are in one already picked (C-012: three differently
+    worded "what does silver chloride do in sunlight" questions in one quiz). ponytail: word overlap,
+    not meaning - two questions on one idea with no shared words still pass."""
+    mine = words_of(text)
+    return any(len(mine & other) >= 4 and len(mine & other) >= 0.7 * min(len(mine), len(other)) for other in seen)
+
+
 _PART = re.compile(r"^\s*\(?(?:[a-hA-H]|[ivx]{1,4}|\d{1,2})[.)]\s*")  # "(b) " / "ii. " / "3) " before a sub-question
 
 
@@ -244,11 +260,13 @@ async def select_questions(
     used: set[str] = set()
     used_concepts: set[str] = set()
     used_sentences: set[str] = set()  # one sub-question shared by two bank questions only once
+    used_words: list[frozenset[str]] = []  # C-014: nor two questions worded alike
     for slot in slots:
         target = _DIFFICULTY_ORDER.index(slot.difficulty)
         best_key, best_rank = None, None
         for key, q in candidates.items():
-            if key in used or q.bloom_level != slot.bloom_level or sentences(q.text) & used_sentences:
+            if (key in used or q.bloom_level != slot.bloom_level or sentences(q.text) & used_sentences
+                    or near_duplicate(q.text, used_words)):
                 continue
             distance = abs(_DIFFICULTY_ORDER.index(q.difficulty) - target) if q.difficulty else 1
             scope = scope_rank(q)
@@ -277,6 +295,7 @@ async def select_questions(
         chosen = candidates[best_key]
         used_concepts |= {c.lower() for c in chosen.concepts or []}
         used_sentences |= sentences(chosen.text)
+        used_words.append(words_of(chosen.text))
         selection.picked.append((slot, chosen))
         selection.by_slot.append(chosen)
     return selection

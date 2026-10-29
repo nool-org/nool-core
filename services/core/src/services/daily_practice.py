@@ -59,7 +59,7 @@ from src.services import ai_context, answer_checks, generation_client, question_
 from src.services.homework_builder import _sections
 from src.services.mcq_test import (award_points, correct_index, explanation_of, shuffle_options, strip_inline_options,
                                    unlabel)
-from src.services.question_selector import text_only_filter
+from src.services.question_selector import near_duplicate, text_only_filter, words_of  # noqa: F401 (near_duplicate, words_of: C-012 callers)
 
 logger = logging.getLogger(__name__)
 
@@ -364,22 +364,6 @@ async def _prepare_voice(session: AsyncSession, questions: list[PracticeQuestion
 def same_question(text: str) -> str:
     """A key that's equal for the same question worded with other spacing or punctuation."""
     return re.sub(r"\W+", "", text.lower())[:80]
-
-
-_STOP = frozenset("what which that this with from when does about following these those their there into have been "
-                  "will would should could because while where than then them they your".split())
-
-
-def words_of(text: str) -> frozenset[str]:
-    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 3 and w not in _STOP)
-
-
-def near_duplicate(text: str, seen: list[frozenset[str]]) -> bool:
-    """True when most of the stem's content words are in one already picked (C-012: three differently
-    worded "what does silver chloride do in sunlight" questions in one quiz). ponytail: word overlap,
-    not meaning - two questions on one idea with no shared words still pass."""
-    mine = words_of(text)
-    return any(len(mine & other) >= 4 and len(mine & other) >= 0.7 * min(len(mine), len(other)) for other in seen)
 
 
 async def _fill(session: AsyncSession, student: User, school_class: SchoolClass, slots: list[Slot],

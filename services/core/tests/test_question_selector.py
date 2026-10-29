@@ -155,3 +155,25 @@ async def test_untrustworthy_keys_and_a_repeated_sub_question_stay_out(db_sessio
         slots=[Slot(B.UNDERSTAND, D.MEDIUM)] * 5, text_only=True, seed=1))
     assert "note" not in picked and "clash" not in picked and "relettered" in picked
     assert len({"dry-1", "dry-2"} & set(picked)) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_questions_worded_alike_are_not_both_picked(db_session):
+    """C-014: 'direction of these lines inside the body of the magnet' twice in one homework."""
+    s = await _seed(db_session)
+    user_id = (await db_session.execute(select(DatasetQuestion.created_by).limit(1))).scalar_one()
+
+    def q(uid, text):
+        return DatasetQuestion(dataset_id=s["imp"].id, chapter_id=s["chapter"].id, topic_id=s["topic"].id,
+                               bloom_level=B.UNDERSTAND, difficulty=D.MEDIUM, created_by=user_id, external_uid=uid,
+                               question_type=QuestionType.SHORT_ANSWER, text=text, answer="a")
+    db_session.add_all([
+        q("m1", "What is the direction of the magnetic field lines inside the body of the magnet?"),
+        q("m2", "State the direction of magnetic field lines measured inside the body of the magnet."),
+        q("m3", "Why does a compass needle deflect near a current carrying wire?"),
+    ])
+    await db_session.flush()
+    picked = _uids(await select_questions(
+        db_session, dataset_ids=[s["imp"].id], chapter_id=s["chapter"].id, topic_id=s["topic"].id,
+        slots=[Slot(B.UNDERSTAND, D.MEDIUM)] * 3, text_only=True, seed=1))
+    assert len({"m1", "m2"} & set(picked)) == 1 and "m3" in picked

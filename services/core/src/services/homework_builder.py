@@ -35,7 +35,8 @@ from src.domain.models.curriculum import Subtopic
 from src.domain.models.homework import Homework
 from src.repositories.dataset_access import visible_datasets
 from src.services import gap_packs, generation_client, homework_content_resolver
-from src.services.question_selector import Slot, plan_slots, select_questions, sentences, text_only_filter
+from src.services.question_selector import (
+    Slot, near_duplicate, plan_slots, select_questions, sentences, text_only_filter, words_of)
 
 logger = logging.getLogger(__name__)
 
@@ -361,16 +362,18 @@ async def _bank_relaxed_fill(session, *, test, topic_id, dataset_ids, open_slots
              # same topic first, then the rest of the chapter
              .order_by((DatasetQuestion.topic_id == topic_id).desc().nulls_last(), DatasetQuestion.id))
     used_sentences = {s for d in drafts.values() for s in sentences(d.text)}
+    used_words = [words_of(d.text) for d in drafts.values()]
     free = iter(open_slots)
     slot = next(free, None)
     for q in (await session.execute(query)).scalars():
         if slot is None:
             break
         uid = question_uid(q)
-        if uid in used_uids or sentences(q.text) & used_sentences:
+        if uid in used_uids or sentences(q.text) & used_sentences or near_duplicate(q.text, used_words):
             continue
         used_uids.add(uid)
         used_sentences |= sentences(q.text)
+        used_words.append(words_of(q.text))
         drafts[slot] = _from_bank(q)
         slot = next(free, None)
 
