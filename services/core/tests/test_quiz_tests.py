@@ -24,6 +24,9 @@ from src.services import subject_rules
 from tests.test_topic_quiz import R, U, _answer, _pools, _seed, _stub_analysis, _teach
 
 
+real_formats = subject_rules.challenge_formats
+
+
 @pytest.fixture(autouse=True)
 def _any_format_outside_maths(monkeypatch):
     """The challenge mechanics are tested on the seed's Science chapter with
@@ -215,16 +218,19 @@ async def test_preparing_never_sticks_on_a_hang_an_error_or_a_restart(db_session
     assert service.status_of(test) == "preparing"
 
 
-async def test_a_maths_challenge_is_fix_milos_homework_only(db_session, monkeypatch):
-    """The other formats are for check-ins."""
+async def test_a_maths_challenge_is_fix_milo_or_who_is_right(db_session, monkeypatch):
+    """T-019: Who is right? joins Fix Milo's homework; MCQs and Build your own stay check-ins."""
+    assert subject_rules.challenge_formats("Mathematics") == ("fix_steps", "who_is_right")
+    assert real_formats("Science") == ("voice", "fix_steps")
     from src.domain.models import Chapter, Subject
 
     s = await _seed(db_session)
     subject = await db_session.get(Subject, (await db_session.get(Chapter, s.electricity.id)).subject_id)
     subject.name = "Mathematics"
     await db_session.flush()
-    with pytest.raises(ValidationError, match="mcq"):
-        await _create(db_session, s, monkeypatch, mix={"mcq": 2, "fix_steps": 1})
+    for other in ("mcq", "make_your_own"):
+        with pytest.raises(ValidationError, match=other):
+            await _create(db_session, s, monkeypatch, mix={other: 2, "fix_steps": 1})
 
 
 async def test_a_one_type_challenge_keeps_its_type_and_skips_repeats(db_session, monkeypatch):
