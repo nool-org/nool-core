@@ -202,9 +202,11 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
     """PaperNeedsFix's "Let Milo write the missing ones": a short paper keeps
     its questions; kg writes just the empty slots, with no bank pass."""
     from shared.errors import ConflictError, ForbiddenError, NotFoundError
+    from src.domain.models import QuestionPaper
 
     teacher, seeded = await _seed_paper_ready_to_generate(db_session)
     short = {"n": 4}  # the first run comes back 6 short of 10
+    (await db_session.get(QuestionPaper, uuid.UUID(seeded["paper_id"]))).total_marks = 10  # 10 slots of 1
     asked = []
 
     async def fake_generate_paper_questions(**kwargs):
@@ -219,6 +221,11 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
                         fake_generate_paper_questions)
     out = await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
     assert any("6 of the blueprint's 10" in i for i in out.validation.issues)
+    # T-028: a short paper isn't "100% quality", says what its marks add up to, and can't be finalized
+    assert out.validation.quality_percent < 100 and out.validation.marks_accounted_for == 4
+    assert any("add up to 4 of the paper's 10" in i for i in out.validation.issues)
+    with pytest.raises(ConflictError):
+        await question_paper.finalize_paper(seeded["paper_id"], user=teacher, session=db_session)
     first = [q.text for q in (await question_paper.list_paper_questions(
         seeded["paper_id"], user=teacher, session=db_session)).items]
 

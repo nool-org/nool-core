@@ -854,6 +854,9 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
     total = len(keep) + len(questions)
     quality_percent = max(0, 100 - duplicate_count * 20) if total else 0
     quality_percent = min(quality_percent, coverage_percent) if total else 0
+    marks_total = sum(row.marks for _, row in placed)  # what the questions really add up to (T-028)
+    if slots and total:
+        quality_percent = min(quality_percent, round(100 * total / len(slots)))
 
     issues: list[str] = []
     if total < len(slots) and total:
@@ -864,6 +867,8 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
             if chapter_refs
             else "No chapters/topics with knowledge-graph content are selected on this paper."
         )
+    if paper.total_marks and total and marks_total != paper.total_marks:
+        issues.append(f"The questions add up to {marks_total} of the paper's {paper.total_marks} marks.")
     if duplicate_count:
         issues.append(f"{duplicate_count} duplicate question(s) were generated.")
     if requested_chapter_numbers and coverage_percent < 100:
@@ -873,7 +878,7 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         validation = QuestionPaperValidation(paper_id=paper.id)
         session.add(validation)
     validation.coverage_percent = coverage_percent
-    validation.marks_accounted_for = sum(_assign_marks(paper, sections, total)[:total])
+    validation.marks_accounted_for = marks_total
     validation.duplicate_count = duplicate_count
     validation.quality_percent = quality_percent
     validation.issues = issues
@@ -1015,6 +1020,11 @@ async def finalize_paper(
     paper = await _get_paper_to_edit(session, paper_id, user)
     if paper.status != QuestionPaperStatus.REVIEW:
         raise ConflictError("Only a paper in review can be finalized.")
+    marks = (await session.execute(select(func.coalesce(func.sum(QuestionPaperQuestion.marks), 0))
+                                   .where(QuestionPaperQuestion.paper_id == paper.id))).scalar_one()
+    if paper.total_marks and marks != paper.total_marks:  # T-028: the header must be true
+        raise ConflictError(f"The questions add up to {marks} of the paper's {paper.total_marks} marks - "
+                            "let Milo write the missing ones, or change the blueprint, before finalizing.")
     paper.status = QuestionPaperStatus.FINALIZED
     await session.commit()
     await session.refresh(paper)
