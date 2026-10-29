@@ -5,7 +5,7 @@ They are replaced, balanced and in plain Unicode, wherever the stem was copied
 is no longer there changes nothing.
 
 Revision ID: b4c3e5a7b9d1
-Revises: b4b2d4f6a8c0
+Revises: f4d6e8a0b2c3
 """
 from typing import Sequence, Union
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = 'b4c3e5a7b9d1'
-down_revision: Union[str, None] = 'b4b2d4f6a8c0'
+down_revision: Union[str, None] = 'f4d6e8a0b2c3'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
