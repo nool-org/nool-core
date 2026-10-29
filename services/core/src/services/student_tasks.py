@@ -14,9 +14,10 @@ Homework finished early earns a bonus (early_bonus_xp), worked out from
 when it was set, its window and when it was done.
 """
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.routes.assigned_test import taken_test_ids
@@ -24,8 +25,11 @@ from src.domain.models import (
     Feature,
     School,
     Chapter,
+    AiAssessorSession,
+    DailyPracticeItem,
     DailyPracticeSession,
     Homework,
+    HomeworkQuestion,
     HomeworkTargetStudent,
     McqTest,
     StudentHomeworkProgress,
@@ -36,6 +40,7 @@ from src.domain.models import (
     VoiceTest,
     VoiceTestTargetStudent,
 )
+from src.domain.models.homework import HomeworkAnswer
 from src.repositories.subscription_repository import get_active_plan
 from src.services import daily_practice, mcq_test, quiz_tests, topic_quiz
 from src.services.feature_entitlements import effective_enabled_features
@@ -58,7 +63,7 @@ def due_at(hw: Homework) -> datetime | None:
 
 def _step(kind: str, label: str, status: str, **extra) -> dict:
     return {"kind": kind, "label": label, "status": status, "due_at": None, "target_id": None,
-            "note": None, **extra}
+            "note": None, "progress": None, **extra}
 
 
 def _homework_step(hw: Homework | None, progress: StudentHomeworkProgress | None, *, waiting: bool,
@@ -233,6 +238,48 @@ async def _quiz_test_tasks(session: AsyncSession, student: User, now: datetime) 
     return out
 
 
+async def _mark_progress(session: AsyncSession, student: User, tasks: list[dict]) -> None:
+    """S-020: a step the student has started but not finished says how far they got
+    ("Question 4 of 8") so Today can offer Resume. Counts only, never an answer or a key.
+    A voice test has no number (the live call can't be rejoined: it restarts)."""
+    for task in tasks:
+        for step in task["steps"]:
+            if step["status"] != "current" or not step["target_id"]:
+                continue
+            tid, kind, progress = uuid.UUID(step["target_id"]), step["kind"], None
+            if kind in ("quiz", "recheck", "test", "test_recheck"):
+                column = DailyPracticeSession.topic_id if kind in ("quiz", "recheck") else DailyPracticeSession.quiz_test_id
+                attempt = 1 if kind in ("quiz", "test") else 2
+                started = (await session.execute(select(DailyPracticeSession.id).where(
+                    DailyPracticeSession.student_id == student.id, column == tid,
+                    DailyPracticeSession.attempt == attempt, DailyPracticeSession.outcome.is_(None)))).scalar_one_or_none()
+                if started is not None:
+                    total, done = (await session.execute(select(
+                        func.count(), func.count(DailyPracticeItem.answered_at)).where(
+                        DailyPracticeItem.session_id == started))).one()
+                    if total and done:
+                        progress = f"Question {min(done + 1, total)} of {total}"
+            elif kind == "homework":
+                total = (await session.execute(select(func.count()).where(HomeworkQuestion.homework_id == tid))).scalar_one()
+                done = (await session.execute(select(func.count()).select_from(HomeworkAnswer).join(
+                    HomeworkQuestion, HomeworkQuestion.id == HomeworkAnswer.homework_question_id).where(
+                    HomeworkQuestion.homework_id == tid, HomeworkAnswer.student_id == student.id))).scalar_one()
+                if total and done:
+                    progress = f"Question {min(done + 1, total)} of {total}"
+            elif kind == "mcq_check":
+                mcq = await session.get(McqTest, tid)
+                if mcq is not None and mcq.completed_at is None:
+                    questions = await mcq_test.questions_of(session, mcq.id)
+                    done = len(await mcq_test.answers_of(session, mcq))
+                    if questions and done:
+                        progress = f"Question {min(done + 1, len(questions))} of {len(questions)}"
+            elif kind == "voice_test":
+                if (await session.execute(select(AiAssessorSession.id).where(
+                        AiAssessorSession.student_id == student.id, AiAssessorSession.test_id == tid).limit(1))).first():
+                    progress = "Started - continue from the next question"
+            step["progress"] = progress
+
+
 async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
     """Open tasks first (the soonest deadline first, then the newest), then
     every finished one, newest first - only of the modules the school has on. All of
@@ -279,5 +326,6 @@ async def tasks_for(session: AsyncSession, student: User) -> list[dict]:
     done = sorted((t for t in tasks if t["state"] == "done"), key=lambda t: -stamp(t["sort_at"]))
     for t in open_ + done:
         t.pop("sort_at")
+    await _mark_progress(session, student, open_)
     return open_ + done
 
