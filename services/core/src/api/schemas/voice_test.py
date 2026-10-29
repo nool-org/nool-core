@@ -51,9 +51,9 @@ class CreateTestIn(CamelModel):
     chapter_id: str
     # A test checks the whole chapter; an older client's topic is stored but prep ignores it.
     topic_id: str | None = None
-    bloom_levels: list[BloomLevel]
-    duration_minutes: int
-    completion_window_hours: int
+    bloom_levels: list[BloomLevel] = Field(min_length=1)
+    duration_minutes: int = Field(ge=1, le=240)
+    completion_window_hours: int = Field(ge=1, le=720)
     target: AssignmentTarget
     # Fix Milo cards mixed into the talk - suggested for chapters with equations or calculations
     fix_cards: int = Field(default=0, ge=0, le=2)

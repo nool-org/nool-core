@@ -18,6 +18,12 @@ class PaperSection(CamelModel):
     question_types: list[str] | None = None  # None = the paper's own questionTypes
 
 
+class PaperSectionIn(PaperSection):
+    label: str = Field(min_length=1, max_length=100)
+    question_count: int = Field(ge=1, le=100)
+    marks_each: int = Field(ge=1, le=100)
+
+
 class PaperRules(CamelModel):
     allow_internal_choice: bool
     avoid_duplicate_concepts: bool
@@ -88,7 +94,7 @@ class QuestionPaperOut(CamelModel):
 
 
 class CreateQuestionPaperIn(CamelModel):
-    name: str
+    name: str = Field(min_length=1, max_length=200)
     exam_type: str
     board: str
     grade: int
@@ -100,9 +106,9 @@ class CreateQuestionPaperIn(CamelModel):
     topic_ids: list[str] | None = None
     dataset_shares: list[DatasetShare] | None = None
     question_types: list[str] | None = None
-    sections: list[PaperSection] | None = None
-    total_marks: int | None = None
-    duration_minutes: int | None = None
+    sections: list[PaperSectionIn] | None = None
+    total_marks: int | None = Field(default=None, ge=1, le=1000)
+    duration_minutes: int | None = Field(default=None, ge=1, le=600)
     bloom_distribution: list[BloomTarget] | None = None
     difficulty_distribution: list[PaperDifficultyTarget] | None = None
     custom_header_text: str | None = None

@@ -46,7 +46,7 @@ class CreateHomeworkIn(CamelModel):
 
 class AssignHomeworkIn(CamelModel):
     target: AssignmentTarget
-    completion_window_hours: int
+    completion_window_hours: int = Field(ge=1, le=720)
 
 
 class StudentHomeworkQuestionOut(CamelModel):
