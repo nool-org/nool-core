@@ -11,6 +11,7 @@ class TaskStepOut(CamelModel):
     due_at: datetime | None
     target_id: str | None  # what the step opens: topic, homework, voice test, MCQ check or written test id
     note: str | None
+    progress: str | None = None  # S-020: 'Question 4 of 8' once started, not finished (Resume)
 
 
 class TaskOut(CamelModel):

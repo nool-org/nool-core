@@ -154,3 +154,31 @@ async def test_every_finished_task_is_listed_so_the_ring_counts_up(db_session, m
     tasks = await service.tasks_for(db_session, User(id=uuid.uuid4(), school_id=None))
 
     assert len(tasks) == 12 and tasks[0]["id"] == "homework:11"
+
+
+async def test_s020_a_started_quiz_says_how_far_and_a_finished_one_does_not(db_session, monkeypatch):
+    """Resume: an unfinished attempt carries 'Question N of M' on its current step (no answers); none once finished."""
+    s = await _seed(db_session)
+    await _teach(db_session, s, s.ohm)
+    await _pools(db_session, s.ohm)
+    _stub_analysis(monkeypatch, [])
+    tid = f"topic:{s.ohm.id}"
+    assert (await _task(db_session, s.student, tid)).steps[0].progress is None  # not started
+
+    quiz = await _start(db_session, s, s.ohm)
+    assert (await _task(db_session, s.student, tid)).steps[0].progress is None  # opened, nothing answered
+    mcq = next(i for i in quiz.items if i.kind == "mcq")
+    await routes_practice_answer(db_session, s, quiz, mcq)
+    step = (await _task(db_session, s.student, tid)).steps[0]
+    assert step.status == "current" and step.progress == f"Question 2 of {len(quiz.items)}"
+
+    await _answer(db_session, s, quiz, {R, U})
+    await _finish(db_session, s, quiz)
+    assert all(st.progress is None for st in (await _task(db_session, s.student, tid)).steps)  # submitted: gone
+
+
+async def routes_practice_answer(db, s, quiz, item):
+    from src.api.routes import daily_practice as practice_routes
+    from src.api.schemas.daily_practice import PracticeMcqAnswerIn
+    await practice_routes.answer_my_daily_practice_mcq(quiz.id, item.id, PracticeMcqAnswerIn(option_index=1),
+                                                       user=s.student, session=db)
