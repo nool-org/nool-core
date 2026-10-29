@@ -158,7 +158,7 @@ async def test_a_scheduled_test_opens_at_its_time(db_session, monkeypatch):
     out = await routes.publish_quiz_test(created.id, QuizTestScheduleIn(opens_at=later), user=s.teacher,
                                          session=db_session)
     assert out.status == "scheduled" and out.opens_at == later
-    with pytest.raises(NotFoundError):
+    with pytest.raises(ConflictError, match=r"opens \d+ \w{3}, \d+:\d\d (am|pm)"):  # V-007: says when
         await routes.start_my_quiz_test(created.id, user=s.student, session=db_session)
     test = await db_session.get(QuizTest, service.uuid.UUID(created.id))
     test.published_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # time passes

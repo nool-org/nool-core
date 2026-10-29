@@ -15,6 +15,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -267,6 +268,12 @@ async def tests_for(session: AsyncSession, student: User) -> list[QuizTest]:
         .order_by(QuizTest.published_at.desc()))).scalars().all() if is_for(t, student.id)]
 
 
+async def _in_class(session: AsyncSession, student: User, test: QuizTest) -> bool:
+    class_id = (await session.execute(select(StudentProfile.class_id).where(
+        StudentProfile.user_id == student.id))).scalar_one_or_none()
+    return class_id == test.class_id and is_for(test, student.id)
+
+
 async def _attempt(session: AsyncSession, student: User, test: QuizTest, attempt: int) -> DailyPracticeSession | None:
     return (await session.execute(select(DailyPracticeSession).where(
         DailyPracticeSession.student_id == student.id, DailyPracticeSession.quiz_test_id == test.id,
@@ -306,7 +313,12 @@ async def start(session: AsyncSession, student: User, test_id: str, attempt: int
     except ValueError:
         raise NotFoundError("Test not found.") from None
     test = await session.get(QuizTest, tid)
-    if test is None or not is_open(test) or test not in await tests_for(session, student):
+    mine = test is not None and test in await tests_for(session, student)
+    if test is not None and test.status == "scheduled" and not is_open(test) and await _in_class(session, student, test):
+        opens = test.published_at.astimezone(ZoneInfo("Asia/Kolkata"))  # V-007: say when, not "not found"
+        raise ConflictError(f"This test isn't open yet. It opens {opens.day} {opens:%b}, "
+                            f"{opens.hour % 12 or 12}:{opens:%M} {'am' if opens.hour < 12 else 'pm'}.", code="NOT_OPEN_YET")
+    if test is None or not is_open(test) or not mine:
         raise NotFoundError("Test not found.")
     if attempt == 2 and await _attempt(session, student, test, 2) is None:
         if not await second_look_open(session, await _attempt(session, student, test, 1)):
