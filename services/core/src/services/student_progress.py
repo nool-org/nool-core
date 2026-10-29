@@ -72,7 +72,7 @@ async def by_subject(session: AsyncSession, student: User) -> list[dict]:
         per_bloom = {e["key"]: e["afterCorrected"] for e in (mcq.result or {}).get("growth") or []
                      if e.get("kind") == "bloom"}
         results[sid].append({"label": chapter or sname, "kind": "Re-check", "score_percent": mcq.score_percent or 0,
-                             "per_bloom": per_bloom, "at": mcq.completed_at, "test_id": None, "quiz_id": None})
+                             "per_bloom": per_bloom, "at": mcq.completed_at, "test_id": str(mcq.voice_test_id), "quiz_id": None})  # opens the test's insights
 
     finished = (await session.execute(
         select(DailyPracticeSession, Subject.id, Subject.name, Topic.name, QuizTest)

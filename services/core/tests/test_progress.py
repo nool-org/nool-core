@@ -144,3 +144,4 @@ async def test_a_finished_speak_with_milo_recheck_is_listed_in_results(db_sessio
     [subject] = await student_progress.by_subject(db_session, student)
 
     assert [(r["kind"], r["score_percent"]) for r in subject["results"]] == [("Re-check", 60), ("Speak with Milo", 40)]
+    assert subject["results"][0]["test_id"] == str(test.test_id)  # S-002: the row opens the test's insights
