@@ -407,7 +407,7 @@ def silence_call(monkeypatch):
     _short_clock(monkeypatch, 1.0)
 
 
-def test_silence_check_in_once_per_question_and_counted_in_payload(monkeypatch, silence_call):
+def test_silence_check_ins_per_question_counted_in_payload(monkeypatch, silence_call):
     async def fake_grade(session, transcript, rubric=None, client=None):
         return {"qa_transcripts": []}
 
@@ -415,8 +415,8 @@ def test_silence_check_in_once_per_question_and_counted_in_payload(monkeypatch, 
     events = [
         *_assistant("a0", "Hi Asha! Are you ready?"), *_user("u0", "Yes"), _STOPPED, _SLEEP,  # greeting: no check-in
         _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"), _STOPPED, _SLEEP,  # -> [SILENCE]
-        *_assistant("a1s", "Take your time. Want a small hint?"), _STOPPED, _SLEEP,  # already checked in: none
-        *_user("u1r", "Sorry, can you repeat?"), *_assistant("a1r", "Question 1 text?"), _STOPPED, _SLEEP,
+        *_assistant("a1s", "Take your time. Want a small hint?"), _STOPPED, _SLEEP,  # still quiet -> [SILENCE] 2
+        *_user("u1r", "Sorry, can you repeat?"), *_assistant("a1r", "Question 1 text?"), _STOPPED, _SLEEP,  # 3
         *_user("u1", "Current flows"),
         _done({"type": "function_call", "name": "ask_question", "call_id": "c2",
                "arguments": json.dumps({"question_number": 2, "easier": True})}),
@@ -425,13 +425,32 @@ def test_silence_check_in_once_per_question_and_counted_in_payload(monkeypatch, 
     ]
     ws = _SlowWS(events)
     call, _ = _run_sideband(monkeypatch, ws, _easier_config())
-    assert len(_silences(ws)) == 2
+    assert len(_silences(ws)) == 4
     assert _outputs(ws)["c2"]["say"] == "Easy question 2?"
     monkeypatch.setitem(rs._calls, call.call_id, call)
     answers = asyncio.run(rs.finish_call(call.call_id, "u1"))["answers"]
     assert [(a["version"], a["repeat_requests"], a["silences"]) for a in answers] == [
-        ("standard", 1, 1), ("easier", 0, 1), ("standard", 0, 0)]
+        ("standard", 1, 3), ("easier", 0, 1), ("standard", 0, 0)]
     assert answers[0]["first_answer"] == "Current flows"
+
+
+def test_a_silent_student_gets_a_hint_then_moves_on(monkeypatch, silence_call):
+    """V-010: one "Take your time" and then nothing for 7 minutes - now: offer, hint, move on."""
+    events = [
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"), _STOPPED, _SLEEP,
+        *_assistant("s1", "Take your time. Want a small hint?"), _STOPPED, _SLEEP,
+        *_assistant("s2", "hint 1.1"), _STOPPED, _SLEEP,
+        *_assistant("s3", "That's okay."), _STOPPED, _SLEEP,  # capped: no 4th check-in
+    ]
+    ws = _SlowWS(events)
+    call, _ = _run_sideband(monkeypatch, ws, _config(2))
+    steps = [m["response"]["instructions"].split("RIGHT NOW: ")[1] for m in ws.sent
+             if m["type"] == "response.create" and "RIGHT NOW: " in (m.get("response") or {}).get("instructions", "")]
+    assert len(_silences(ws)) == 3 and call.progress[1]["silences"] == 3
+    assert "Want a small hint?" in steps[0] and "give_hint with 1" in steps[1] and "ask_question with 2" in steps[2]
+    call.current = 2  # silent on the last question too: Milo may end the test
+    assert "end_session" in rs._silence_step(call, 2, 3) and rs._may_end(call)
 
 
 def test_no_silence_check_in_while_anyone_is_speaking(monkeypatch, silence_call):

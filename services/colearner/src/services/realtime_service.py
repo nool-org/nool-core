@@ -95,8 +95,10 @@ WRAP_UP_SECONDS = 60
 FINISH_ANSWER_SECONDS = 15
 TIME_UP_INSTRUCTIONS = ("Time is up. In one short, warm sentence say that's our time and thank the student "
                         "for their effort - don't ask anything - then call end_session.")
-# Student silent this long after Milo finished speaking a question -> one gentle check-in.
+# Student silent this long after Milo finished speaking -> a check-in, up to MAX_SILENCES per
+# question, each a step further (_silence_step): offer a hint, give one, then move on.
 SILENCE_SECONDS = 12
+MAX_SILENCES = 3
 # The app pauses the test on an interruption (phone call, app in the background) with
 # "[PAUSED]" and carries on with "[RESUMED]": the clock holds for up to this long in all.
 MAX_PAUSE_SECONDS = 10 * 60
@@ -799,12 +801,12 @@ def _cancel_silence(call: RealtimeCall) -> None:
 
 def _arm_silence(call: RealtimeCall, ws) -> None:
     """Milo's audio just finished: if the student then stays quiet for SILENCE_SECONDS,
-    nudge Milo with [SILENCE] - once per question (mirrors the [TIME_UP] injection)."""
+    nudge Milo with [SILENCE] - up to MAX_SILENCES per question (mirrors the [TIME_UP] injection)."""
     _cancel_silence(call)
     n = call.current
     questions = call.state.config.questions or []
     on_screen = 1 <= n <= len(questions) and questions[n - 1].card is not None  # tapping takes a while
-    if _awaiting_answer(call, n) and not _progress(call, n)["silences"] and not on_screen:
+    if _awaiting_answer(call, n) and _progress(call, n)["silences"] < MAX_SILENCES and not on_screen:
         call.silence_task = asyncio.create_task(_silence_after(call, ws, n))
 
 
@@ -826,18 +828,35 @@ async def _send_response(call: RealtimeCall, ws, raw: str) -> None:
 async def _silence_after(call: RealtimeCall, ws, n: int) -> None:
     await asyncio.sleep(SILENCE_SECONDS)
     call.silence_task = None
-    if not _awaiting_answer(call, n) or _progress(call, n)["silences"]:
+    if not _awaiting_answer(call, n) or _progress(call, n)["silences"] >= MAX_SILENCES:
         return
     if call.response_active:  # Milo is mid-reply - the student isn't the quiet one
         return
     _progress(call, n)["silences"] += 1
+    step = _silence_step(call, n, _progress(call, n)["silences"])
     with contextlib.suppress(Exception):  # the call may have just closed
         await ws.send(json.dumps({
             "type": "conversation.item.create",
             "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "[SILENCE]"}]},
         }))
-        await _send_response(call, ws, json.dumps({"type": "response.create",
-                                  "response": {"max_output_tokens": reply_tokens(call.state.config)}}))
+        await _send_response(call, ws, json.dumps({"type": "response.create", "response": {
+            "instructions": build_question_instructions(call.state.config) + "\n\nRIGHT NOW: " + step,
+            "max_output_tokens": reply_tokens(call.state.config)}}))
+
+
+def _silence_step(call: RealtimeCall, n: int, count: int) -> str:
+    """What Milo does on the count-th silence on question n: one sentence, never a lecture."""
+    if count == 1:
+        return 'The student has been quiet. Warmly say "Take your time. Want a small hint?" (one sentence) and wait.'
+    if count == 2:
+        return (f"The student is still quiet. Call give_hint with {n}, without speaking, "
+                "then say the nudge it returns and wait.")
+    if n < len(call.state.config.questions):
+        return (f"The student is still quiet. Kindly say \"That's okay, we'll work on this in your homework\", "
+                f"then call ask_question with {n + 1} and say what it returns.")
+    call.wrapping_up = True  # silent on the last question: ending now is allowed (_may_end)
+    return ("The student is still quiet. Kindly say \"That's okay, we'll work on this in your homework\" "
+            "and thank them, then call end_session.")
 
 
 def _tag_user_turn(call: RealtimeCall, item_id: str) -> None:
