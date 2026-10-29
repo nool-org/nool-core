@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import pytest
 from pydantic import ValidationError
@@ -584,3 +585,183 @@ def test_a_wrong_card_tap_gets_no_why_milo_goes_on():
     call.items["t3"] = {"role": "user", "text": ""}
     rs._card_answer(call, _card_tap("t3", 1, 0)[0]["item"])
     assert call.redirect is None
+
+
+class _FakeOpenAI:
+    """httpx.AsyncClient stand-in for POST /calls: hands out call_1, call_2, ..."""
+    made = 0
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, *a, **k):
+        _FakeOpenAI.made += 1
+        return type("R", (), {"status_code": 201, "text": "answer-sdp",
+                              "headers": {"Location": f"/v1/realtime/calls/call_{_FakeOpenAI.made}"}})()
+
+
+@pytest.fixture
+def openai(monkeypatch):
+    """create_call against fakes: each call's sideband plays the next scripted FakeWS."""
+    _FakeOpenAI.made = 0
+    rs._calls.clear()
+    sockets, hangups = [], []
+
+    async def fake_hangup(call_id, key):
+        hangups.append(call_id)
+
+    monkeypatch.setattr(rs.httpx, "AsyncClient", _FakeOpenAI)
+    monkeypatch.setattr(rs, "_api_key", lambda: "k")
+    monkeypatch.setattr(rs, "_hangup", fake_hangup)
+    monkeypatch.setattr(rs, "ws_connect", lambda *a, **k: sockets.pop(0))
+    yield sockets, hangups
+    rs._calls.clear()
+
+
+_FIRST_TWO = [*_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+              _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+              *_user("u1", "Current is flow of charge"),
+              _tool("ask_question", 2, "c2"), *_assistant("a2", "Question 2 text?")]
+
+
+async def _open(config, uid="stu"):
+    _, call = await rs.create_call(sdp_offer="o", config=config, owner_ref="s1", owner_uid=uid)
+    return call
+
+
+async def _stop(*calls):
+    for call in calls:
+        if call.task and not call.task.done():
+            call.task.cancel()
+        await call.ended.wait()
+
+
+def test_a_reconnect_resumes_the_same_test_with_its_answers_and_clock(monkeypatch, openai):
+    """V-001: the app reloaded on question 2 - the new call carries on from there: Q1's
+    answer kept for grading, the clock less what was used, and no second greeting.
+    Time away is held like a pause, only up to what is left of the pause allowance."""
+    sockets, hangups = openai
+    monkeypatch.setattr(rs, "MAX_PAUSE_SECONDS", 0.05)
+    second = FakeWS([])
+    sockets += [FakeWS(_FIRST_TWO), second]
+
+    async def scenario():
+        old = await _open(_config())
+        await asyncio.sleep(0.05)  # Q1 answered, Q2 asked - then the page goes away
+        await _stop(old)
+        await asyncio.sleep(0.2)  # away 0.2 s: 0.05 held (the allowance), the rest on the clock
+        new = await _open(_config())
+        await asyncio.sleep(0.05)
+        left = rs._seconds_left(new)
+        await _stop(new)
+        return old, new, left
+
+    old, new, left = asyncio.run(scenario())
+    assert hangups[0] == "call_1" and "call_1" not in rs._calls  # the old call is gone for good
+    assert new.resumed and new.state is old.state and new.current == 2
+    assert new.paused_seconds == pytest.approx(0.05)  # the allowance is used up, not reset
+    assert 0.15 < new.clock_used < 0.5  # time away past the allowance ran the clock
+    limit = rs.call_time_limit(new.state.config)
+    assert limit - 1 < left <= limit - new.clock_used
+    opening = second.sent[0]["response"]["instructions"]
+    assert "Don't greet again" in opening and "call ask_question with 2" in opening
+    answers = rs.question_answers(new)
+    assert answers[0]["first_answer"] == "Current is flow of charge"  # Q1 kept for grading
+    assert answers[1]["first_answer"] is None
+
+
+def test_another_user_cannot_resume_someone_elses_call(openai):
+    """The session id alone is not enough: only the student who started the call resumes it."""
+    sockets, hangups = openai
+    sockets += [FakeWS(_FIRST_TWO), FakeWS([])]
+
+    async def scenario():
+        victim = await _open(_config())
+        await asyncio.sleep(0.05)
+        other = await _open(_config(), uid="intruder")
+        untouched = not victim.ended.is_set() and rs._calls.get("call_1") is victim
+        await _stop(victim, other)
+        return victim, other, untouched
+
+    victim, other, untouched = asyncio.run(scenario())
+    assert untouched  # the victim's call kept running, still theirs
+    assert not other.resumed and other.state is not victim.state and other.current == 0
+
+
+def test_a_call_being_graded_is_never_resumed(monkeypatch, openai):
+    """A reload on the "checking your answers" screen: finish has started - a new call
+    starts apart, and the graded session keeps its answers and is recorded once."""
+    sockets, _ = openai
+    sockets += [FakeWS(_FIRST_TWO), FakeWS([])]
+
+    async def scenario():
+        release = asyncio.Event()
+
+        async def slow_grade(*a, **k):
+            await release.wait()
+            return {"overall": 1}
+
+        monkeypatch.setattr(rs, "grade_transcript", slow_grade)
+        old = await _open(_config())
+        await asyncio.sleep(0.05)
+        finishing = asyncio.create_task(rs.finish_call(old.call_id, "s1"))
+        await asyncio.sleep(0.05)  # grading in progress
+        new = await _open(_config())
+        release.set()
+        result = await finishing
+        await _stop(new)
+        return old, new, result
+
+    old, new, result = asyncio.run(scenario())
+    assert not new.resumed and new.state is not old.state
+    assert result["answers"][0]["first_answer"] == "Current is flow of charge"
+
+
+def test_an_improvised_test_resumes_too_never_two_calls_side_by_side(openai):
+    """No prepared questions (prep failed): the old call is still hung up and dropped."""
+    sockets, hangups = openai
+    second = FakeWS([])
+    sockets += [FakeWS([*_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes")]), second]
+    config = SessionConfig(textbook_context="Ohm's law")
+
+    async def scenario():
+        old = await _open(config)
+        await asyncio.sleep(0.05)
+        new = await _open(config)
+        await asyncio.sleep(0.05)
+        await _stop(new)
+        return old, new
+
+    old, new = asyncio.run(scenario())
+    assert new.resumed and new.state is old.state and new.spoken_turns == 1
+    assert hangups[0] == "call_1" and list(rs._calls) == ["call_2"]
+    opening = second.sent[0]["response"]["instructions"]
+    assert "Ohm's law" in opening and "carry on the test where it stopped" in opening
+
+
+def test_cost_lines_of_a_resumed_session_add_up_to_its_total(monkeypatch, openai, caplog):
+    """Each hang-up logs only its own call's share (scripts/cost_report.py sums the lines)."""
+    sockets, _ = openai
+    sockets += [FakeWS(_FIRST_TWO), FakeWS([])]
+    monkeypatch.setattr(rs, "_cost", lambda call: {"total_usd": round(sum(call.usage.values()), 6),
+                                                   "duration_seconds": 1})
+
+    async def scenario():
+        old = await _open(_config())
+        await asyncio.sleep(0.05)
+        old.usage["fake_usd"] = 0.10
+        new = await _open(_config())
+        new.usage["fake_usd"] += 0.05  # shared usage: the session's total is now 0.15
+        await asyncio.sleep(0.05)
+        await _stop(new)
+
+    with caplog.at_level(logging.INFO, logger=rs.logger.name):
+        asyncio.run(scenario())
+    logged = [r.total_usd for r in caplog.records if r.getMessage().startswith("realtime_call_cost")]
+    assert logged == [0.1, 0.05]

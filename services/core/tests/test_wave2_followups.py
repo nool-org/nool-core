@@ -9,6 +9,7 @@ inside the test's own transaction (rolled back with everything else).
 
 import importlib.util
 import logging
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -205,6 +206,34 @@ async def test_open_session_waits_for_prep_and_returns_the_question_count(schema
     await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
     out = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
     assert out.question_count == 2
+
+
+async def test_reopening_an_unfinished_test_carries_on_the_same_session(schema, monkeypatch):
+    """V-001: a reload mid-test opens the session again - it must be the same one (colearner
+    then resumes its answers and clock), not a second one from zero that mixes into the result."""
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER,))
+    student = await _targeted_student(db, s)
+    s["test"].prep_status = VoiceTestPrepStatus.FAILED
+    await db.flush()
+
+    first = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
+    again = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
+    assert not first.resumed
+    assert again.session_id == first.session_id and again.resumed
+
+    # a long but legitimate session (warm-up + test + pauses, past the 15-min abandon watcher)
+    opened = await db.get(AiAssessorSession, first.session_id)
+    opened.created_at -= timedelta(minutes=20)
+    await db.flush()
+    late = await ai_assessor.open_session(_open(s['test']), app_user=student, db=db)
+    assert late.session_id == first.session_id and late.resumed
+
+    # finished (a record exists): a later open is a new session
+    db.add(AiAssessorSessionRecord(session_id=first.session_id, report={}))
+    await db.flush()
+    after = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
+    assert after.session_id != first.session_id and not after.resumed
 
 
 # --------------------------------------------------------- pending lists

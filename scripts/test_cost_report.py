@@ -41,3 +41,19 @@ def test_date_filter_and_csv(capsys, tmp_path):
     assert out[0].startswith("feature,calls,total_usd")
     assert not any(line.startswith("daily_practice_mcq") for line in out)  # 2026-10-10 only
     assert cost_report.main([str(log), "--until", "2026-10-01"]) == 1
+
+
+def test_a_resumed_voice_session_counts_once():
+    """V-001: a reload mid-test makes a second live call of the same session; colearner logs
+    each call's own share, so the student's voice spend is the session's total, not more."""
+    line = ('colearner-1  | {"timestamp": "2026-10-12T06:%s:00+00:00", "level": "INFO", "service": "colearner", '
+            '"message": "%s"}')
+    lines = [
+        line % ("00", "realtime_call_started call_id=rtc_a owner_ref=sess-9 student=stu-c school=sch-1 feature=voice_test"),
+        line % ("04", "realtime_call_cost call_id=rtc_a duration_s=240.0 replies=8 total_usd=0.06"),
+        line % ("05", "realtime_call_started call_id=rtc_b owner_ref=sess-9 student=stu-c school=sch-1 feature=voice_test"),
+        line % ("09", "realtime_call_cost call_id=rtc_b duration_s=540.0 replies=16 total_usd=0.05"),
+    ]
+    rows = _rows(cost_report._events(lines))
+    assert rows["voice_test"]["calls"] == 2
+    assert round(rows["voice_test"]["total_usd"], 6) == 0.11  # 0.06 + 0.05: the session's 0.11 once

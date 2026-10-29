@@ -173,6 +173,11 @@ failed) - it is not the primary AI anywhere.
    points go only to the grader, never into Milo's instructions.
    After `end_session` or the time limit the model gets a 30 s grace, then
    colearner hangs up.
+   A reload or dropped connection mid-test carries on: `POST /ai-assessor/sessions`
+   returns the student's unfinished session for the test (`resumed`), and the
+   next `/realtime` call has colearner hang up the dead call and move its
+   answers, progress and used clock into the new one (`resumed`,
+   `secondsLeft`); Milo skips the greeting and goes back to the current question.
 5. **Grading** - the app calls `POST /ai-assessor/sessions/{id}/finish`;
    Core calls colearner `.../realtime/calls/{call_id}/finish`, which grades
    the server-side transcript against each question's rubric with
