@@ -34,3 +34,11 @@ def test_summary_asks_for_up_to_three_action_first_bullets_and_none_when_nothing
     out = asyncio.run(service.summary(llm, service.SummaryRequest(facts=FACTS), model="m"))
     system = llm.calls[0]["system"]
     assert out.bullets and "up to 3 bullets" in system and "return no bullets at all" in system
+
+
+def test_rules_use_the_real_tab_names_and_one_name():
+    # UI-063: the assistant points to tabs that exist (Set work, Papers, Classes) and is called Milo
+    from src.services.teacher_assistant import RULES
+
+    assert "Set work" in RULES and "Challenges" not in RULES
+    assert RULES.startswith("You are Milo")
