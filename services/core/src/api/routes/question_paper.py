@@ -241,8 +241,8 @@ async def _ensure_teaches(session: AsyncSession, user: User, subject_id, grade: 
 
 
 async def _get_paper_to_edit(session: AsyncSession, paper_id: str, user: User) -> QuestionPaper:
-    """A paper in the teacher's school that they also teach (subject + grade)
-    - reading stays school-wide, changing it doesn't."""
+    """A paper in the teacher's school that they also teach (subject + grade) -
+    reading it and changing it alike: another subject's unreleased paper isn't theirs to see (V-017)."""
     paper = await _get_paper_in_school(session, paper_id, user.school_id)
     await _ensure_teaches(session, user, paper.subject_id, paper.grade)
     return paper
@@ -319,7 +319,11 @@ async def list_papers(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[QuestionPaperOut]:
-    result = await session.execute(select(QuestionPaper).where(QuestionPaper.school_id == user.school_id))
+    taught = (select(TeacherClassAssignment.id).join(SchoolClass, SchoolClass.id == TeacherClassAssignment.class_id)
+              .where(TeacherClassAssignment.teacher_id == user.id,
+                     TeacherClassAssignment.subject_id == QuestionPaper.subject_id,
+                     SchoolClass.grade == QuestionPaper.grade, SchoolClass.school_id == user.school_id))
+    result = await session.execute(select(QuestionPaper).where(QuestionPaper.school_id == user.school_id, taught.exists()))
     items = [await _serialize(session, p) for p in result.scalars().all()]
     return ListEnvelope(items=items, total=len(items))
 
@@ -331,7 +335,7 @@ async def get_paper(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
-    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_to_edit(session, paper_id, user)
     return await _serialize(session, paper)
 
 
@@ -904,7 +908,7 @@ async def list_paper_questions(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[QuestionPaperQuestionOut]:
-    await _get_paper_in_school(session, paper_id, user.school_id)
+    await _get_paper_to_edit(session, paper_id, user)
     return await _paper_questions_out(session, paper_id)
 
 
@@ -944,7 +948,7 @@ async def get_question_candidates(
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[QuestionPaperQuestionCandidateOut]:
-    paper = await _get_paper_in_school(session, paper_id, user.school_id)
+    paper = await _get_paper_to_edit(session, paper_id, user)
     if paper.status != QuestionPaperStatus.REVIEW:
         raise ConflictError("Paper isn't in REVIEW.")
     result = await session.execute(

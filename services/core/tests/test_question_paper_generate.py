@@ -228,6 +228,12 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
     await db_session.flush()
     with pytest.raises((ForbiddenError, NotFoundError)):
         await question_paper.fill_missing(seeded["paper_id"], user=stranger, session=db_session)
+    # V-017: reading is the same - a teacher of another subject sees neither the paper nor its questions
+    with pytest.raises(ForbiddenError):
+        await question_paper.get_paper(seeded["paper_id"], user=stranger, session=db_session)
+    with pytest.raises(ForbiddenError):
+        await question_paper.list_paper_questions(seeded["paper_id"], user=stranger, session=db_session)
+    assert seeded["paper_id"] not in [p.id for p in (await question_paper.list_papers(user=stranger, session=db_session)).items]
 
     out = await question_paper.fill_missing(seeded["paper_id"], user=teacher, session=db_session)
     questions = (await question_paper.list_paper_questions(seeded["paper_id"], user=teacher, session=db_session)).items
