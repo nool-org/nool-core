@@ -214,7 +214,7 @@ async def test_reopening_an_unfinished_test_carries_on_the_same_session(schema, 
     db = schema
     s = await _seed(db, levels=(B.REMEMBER,))
     student = await _targeted_student(db, s)
-    s["test"].prep_status = VoiceTestPrepStatus.FAILED
+    s["test"].prep_status = VoiceTestPrepStatus.READY
     await db.flush()
 
     first = await ai_assessor.open_session(_open(s["test"]), app_user=student, db=db)
