@@ -33,6 +33,7 @@ class StudentAnswerOut(CamelModel):
     nudges_used: int
     score: int | None  # null = not graded
     quote: str  # the student's answer, at most 160 characters; "" when none
+    misconception: str | None = None  # the wrong idea the grader heard, if any
 
 
 class AnswerQuote(CamelModel):
