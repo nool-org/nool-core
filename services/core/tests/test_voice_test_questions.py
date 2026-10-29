@@ -531,7 +531,7 @@ FIX = {"problem": "Balance H₂ + O₂ → H₂O.", "steps": ["H₂ + O₂ → H
 def _card_row(spec=FIX):
     return {"dataset_question_id": None, "bloom_level": B.EVALUATE, "topic_id": None, "subtopic_id": None,
             "concepts": [], "original_text": spec["problem"], "reworded_text": spec["problem"],
-            "spoken_text": voice_test_prep.CARD_SAY, "expected_points": ["x"], "misconceptions": [],
+            "spoken_text": voice_test_prep.card_say(spec["problem"]), "expected_points": ["x"], "misconceptions": [],
             "hints": voice_test_prep.CARD_HINTS, "easier_version": None, "card": spec,
             "status": VoiceTestQuestionStatus.DRAFT}
 
@@ -539,7 +539,7 @@ def _card_row(spec=FIX):
 async def test_fix_milo_cards_sit_between_spoken_questions_and_reach_the_screen_without_their_answer(
         schema, monkeypatch):
     db = schema
-    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND))
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND, B.EVALUATE))  # C-003: a card only with Evaluate
     for level in (B.REMEMBER, B.UNDERSTAND):
         await _question(db, s, level, f"{level.value} question one")
     _fake_kg(monkeypatch)
@@ -558,7 +558,7 @@ async def test_fix_milo_cards_sit_between_spoken_questions_and_reach_the_screen_
     rows = await _questions(db, s["test"])
     assert [r.card is not None for r in rows] == [False, True, False]  # never the closing question
     card = rows[1]
-    assert card.spoken_text == voice_test_prep.CARD_SAY and card.bloom_level == B.EVALUATE
+    assert card.spoken_text == _card_row()["spoken_text"] and card.bloom_level == B.EVALUATE
     assert await voice_test_prep.swap_question(db, s["test"], card, s["teacher"]) is False  # a card stays
 
     _student, ai_session = await _student_session(db, s)
@@ -573,6 +573,30 @@ async def test_fix_milo_cards_sit_between_spoken_questions_and_reach_the_screen_
     assert shown == [{"number": 2, "problem": FIX["problem"], "steps": FIX["steps"],
                       "fixes": [f["text"] for f in FIX["fixes"]]}]
     assert "wrong_step" not in str(shown) and "correct" not in str(shown)
+
+
+async def test_no_card_unless_the_teacher_chose_evaluate(schema, monkeypatch):
+    """C-003: a Fix Milo card is an Evaluate question - never added over the teacher's levels."""
+    db = schema
+    s = await _seed(db, levels=(B.REMEMBER, B.UNDERSTAND))
+    for level in (B.REMEMBER, B.UNDERSTAND):
+        await _question(db, s, level, f"{level.value} question one")
+    _fake_kg(monkeypatch)
+    _fake_generation(monkeypatch)
+    s["test"].fix_cards = 1
+
+    async def cards(*args):
+        raise AssertionError("no card was asked for")
+    monkeypatch.setattr(voice_test_prep, "_cards", cards)
+
+    await voice_test_prep.prepare_test(db, s["test"], s["teacher"])
+    assert all(r.card is None for r in await _questions(db, s["test"]))
+
+
+def test_milo_reads_a_short_version_of_the_card_problem():
+    said = voice_test_prep.card_say("Balance H₂ + O₂ → H₂O. Show each step.")
+    assert said.startswith("Here's my homework problem: Balance H₂ + O₂ → H₂O. Have a look at your screen")
+    assert voice_test_prep.card_say(" ".join(["word"] * 40)).count("word") == voice_test_prep.CARD_SAY_WORDS
 
 
 async def test_cards_come_from_the_pool_or_are_written_at_once_with_a_spare_never_an_mcq(monkeypatch):
@@ -953,8 +977,8 @@ def test_every_test_plans_five_questions_easy_to_hard_with_a_warm_up():
 
 async def test_a_card_takes_the_third_place_and_the_test_stays_at_five(schema, monkeypatch):
     db = schema
-    s = await _seed(db, levels=(B.UNDERSTAND, B.APPLY, B.ANALYZE))
-    for level in (B.UNDERSTAND, B.APPLY, B.ANALYZE):
+    s = await _seed(db, levels=(B.UNDERSTAND, B.APPLY, B.EVALUATE))
+    for level in (B.UNDERSTAND, B.APPLY, B.EVALUATE):
         for topic in (s["topic"], s["other_topic"]):
             await _question(db, s, level, f"{level.value} question on {topic.name}", topic=topic)
     _fake_kg(monkeypatch)
@@ -969,7 +993,7 @@ async def test_a_card_takes_the_third_place_and_the_test_stays_at_five(schema, m
 
     rows = await _questions(db, s["test"])
     assert [r.card is not None for r in rows] == [False, False, True, False, False]
-    assert [r.bloom_level for r in rows] == [B.UNDERSTAND, B.UNDERSTAND, B.EVALUATE, B.APPLY, B.ANALYZE]
+    assert [r.bloom_level for r in rows] == [B.UNDERSTAND, B.UNDERSTAND, B.EVALUATE, B.APPLY, B.EVALUATE]
 
     async def no_card(test_id, chapter_id, class_id, wanted):
         return []

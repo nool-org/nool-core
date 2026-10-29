@@ -128,8 +128,11 @@ async def announce(session: AsyncSession, test: VoiceTest) -> None:
 
 
 async def _prepare(session: AsyncSession, test: VoiceTest, teacher: User) -> bool:
-    """True when the test has its questions. Fix Milo cards are written alongside, from the start."""
-    wanted = min(test.fix_cards or 0, MAX_CARDS)
+    """True when the test has its questions. Fix Milo cards are written alongside, from the start -
+    only when the teacher chose Evaluate (C-003): a card is an Evaluate question."""
+    chosen = (await session.execute(
+        select(VoiceTestBloomLevel.bloom_level).where(VoiceTestBloomLevel.test_id == test.id))).scalars().all()
+    wanted = min(test.fix_cards or 0, MAX_CARDS) if BloomLevel.EVALUATE in chosen else 0
     cards = asyncio.create_task(_cards(test.id, test.chapter_id, test.class_id, wanted)) if wanted else None
     try:
         return await _prepare_questions(session, test, teacher, cards)
@@ -213,7 +216,11 @@ async def _prepare_questions(session: AsyncSession, test: VoiceTest, teacher: Us
     cards = (await cards_task if cards_task else [])[:MAX_CARDS]
     if cards:  # the card takes the spare's place - in a short test it still sits before the closing question
         at = min(CARD_AT, len(rows) - 1)
-        rows[at:at + (len(rows) >= TEST_QUESTIONS)] = cards
+        full = len(rows) >= TEST_QUESTIONS
+        if full and [r["bloom_level"] for r in rows].count(rows[at]["bloom_level"]) < 2:
+            # the spare is the only question at its level: the card takes an Evaluate one instead
+            at = next((i for i, r in enumerate(rows) if r["bloom_level"] == BloomLevel.EVALUATE), at)
+        rows[at:at + full] = cards
     if len(rows) < TEST_QUESTIONS:
         logger.warning("voice_test_prep_short_test", extra={"test_id": str(test.id), "questions": len(rows)})
     for number, fields in enumerate(rows, start=1):
@@ -224,6 +231,16 @@ async def _prepare_questions(session: AsyncSession, test: VoiceTest, teacher: Us
 
 CARD_SAY = ("Have a look at your screen - that's my homework, and I slipped in one step. Tap the step I got wrong "
             "and pick the right fix. Then tell me why it was wrong.")
+CARD_SAY_WORDS = 25  # the problem, read out first - short, the full one is on screen
+
+
+def card_say(problem: str) -> str:
+    """What Milo says for a card: a short version of the problem, then where to tap (C-003)."""
+    words = re.split(r"(?<=[.?!])\s+", problem.strip(), maxsplit=1)[0].split()
+    short = " ".join(words[:CARD_SAY_WORDS]) + ("..." if len(words) > CARD_SAY_WORDS else "")
+    return f"Here's my homework problem: {short} {CARD_SAY}"
+
+
 CARD_HINTS = ["Go line by line - does each step really follow from the one before it?",
               "Check every line carefully: the numbers and units, or the atoms on each side."]
 
@@ -271,7 +288,7 @@ async def _cards(test_id: uuid.UUID, chapter_id: uuid.UUID, class_id: uuid.UUID,
         cards.append({
             "dataset_question_id": None, "bloom_level": BloomLevel.EVALUATE, "topic_id": topic_id,
             "subtopic_id": None, "concepts": [], "original_text": spec.get("problem") or text,
-            "reworded_text": spec.get("problem") or text, "spoken_text": CARD_SAY,
+            "reworded_text": spec.get("problem") or text, "spoken_text": card_say(spec.get("problem") or text),
             "expected_points": [f"Finds the wrong step: step {spec['wrong_step'] + 1} "
                                 f"(\"{spec['steps'][spec['wrong_step']]}\")",
                                 f"Picks the right fix: \"{right}\"",
