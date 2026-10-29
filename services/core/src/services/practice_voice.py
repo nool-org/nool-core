@@ -66,7 +66,8 @@ async def prepare_voice_questions(session: AsyncSession, questions: list[Practic
     }
     try:
         with ai_context.feature("practice_voice_prep"):
-            out = await generation_client.prep_voice_test(payload)
+            out = await generation_client.prep_voice_test(
+                payload, generation_client.PRACTICE_VOICE_PREP_TIMEOUT_SECONDS)
         by_id = {str(p.get("dataset_question_id")): p for p in out.get("questions") or [] if isinstance(p, dict)}
     except Exception as exc:  # unavailable, or an unusable response
         logger.warning("practice_voice_prep_failed", extra={"reason": str(exc), "questions": len(rows)})

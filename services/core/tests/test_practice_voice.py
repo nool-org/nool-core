@@ -160,8 +160,9 @@ async def test_prepare_batches_voice_rows_and_stores_spoken_text_and_rubric(monk
     mcq = _question(kind="mcq", expected_points=[])
     calls = []
 
-    async def prep(payload):
+    async def prep(payload, timeout=None):
         calls.append(payload)
+        assert timeout == generation_client.PRACTICE_VOICE_PREP_TIMEOUT_SECONDS < 60  # V-013: not the 120 s teacher-test budget
         return {"questions": [
             {"dataset_question_id": str(banked.id), "reworded_text": "Why does light bend?",
              "spoken_text": "Why does light bend when it enters water?", "expected_points": ["speed changes"],

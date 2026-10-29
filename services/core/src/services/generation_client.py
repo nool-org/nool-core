@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 # The service generates, verifies and may regenerate once - ~1 min typical.
 GAP_FILL_TIMEOUT_SECONDS = 180.0
 VOICE_TEST_PREP_TIMEOUT_SECONDS = 120.0
+EXPLAIN_TIMEOUT_SECONDS = 30.0  # best-effort extras (V-013): a student waits behind them
+PRACTICE_VOICE_PREP_TIMEOUT_SECONDS = 40.0
 ASSISTANT_TIMEOUT_SECONDS = 45.0
 TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 
@@ -48,13 +50,13 @@ async def generate_mcq(payload: dict) -> dict:
 async def explain_mcq(payload: dict) -> dict:
     """POST /v1/mcq/explain - {items: [{question_number, text, options, correct_index,
     concept}]} -> {results: [{question_number, explanation, hint}]} (null when unusable)."""
-    return await _post("/v1/mcq/explain", payload, GAP_FILL_TIMEOUT_SECONDS, "mcq_explain")
+    return await _post("/v1/mcq/explain", payload, EXPLAIN_TIMEOUT_SECONDS, "mcq_explain")
 
 
-async def prep_voice_test(payload: dict) -> dict:
+async def prep_voice_test(payload: dict, timeout: float = VOICE_TEST_PREP_TIMEOUT_SECONDS) -> dict:
     """POST /v1/voice-test/prep - {grade, subject, chapter, board, levels,
     candidates} -> {questions: [...]}, one reworded question per level."""
-    return await _post("/v1/voice-test/prep", payload, VOICE_TEST_PREP_TIMEOUT_SECONDS, "voice_prep")
+    return await _post("/v1/voice-test/prep", payload, timeout, "voice_prep")
 
 
 async def revision_cards(payload: dict) -> dict:
