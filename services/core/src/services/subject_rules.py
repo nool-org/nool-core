@@ -6,10 +6,10 @@ the server (voice tests, written tests, the topic quiz) and sent to the app
   is slow to say and hard to grade.
 - mcq, who_is_right, fix_steps, make_your_own: written question types
   (question_types.py). make_your_own's code checks are number theory, so
-  Maths only; Maths is problem-first, so it gets all three."""
+  Maths only. Maths lists only the two a teacher can set as a challenge."""
 
 FORMATS: dict[str, tuple[str, ...]] = {
-    "Mathematics": ("mcq", "who_is_right", "fix_steps", "make_your_own"),
+    "Mathematics": ("who_is_right", "fix_steps"),  # only what a teacher can set (V-016); mcq / make_your_own are check-in types
 }
 DEFAULT_FORMATS = ("mcq", "voice")
 # what a teacher sets as a challenge (the rest are for check-ins): Fix Milo's

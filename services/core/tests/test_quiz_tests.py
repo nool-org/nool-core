@@ -221,6 +221,7 @@ async def test_preparing_never_sticks_on_a_hang_an_error_or_a_restart(db_session
 async def test_a_maths_challenge_is_fix_milo_or_who_is_right(db_session, monkeypatch):
     """T-019: Who is right? joins Fix Milo's homework; MCQs and Build your own stay check-ins."""
     assert subject_rules.challenge_formats("Mathematics") == ("fix_steps", "who_is_right")
+    assert set(subject_rules.formats("Mathematics")) == set(subject_rules.challenge_formats("Mathematics"))  # V-016
     assert real_formats("Science") == ("voice", "fix_steps")
     from src.domain.models import Chapter, Subject
 
