@@ -5,7 +5,9 @@ words call is monkeypatched - no network/LLM."""
 
 import asyncio
 import importlib.util
+import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -162,7 +164,9 @@ async def _seed(db):
 
 
 async def _get(db, test, student, monkeypatch, words=None, exc=None):
-    calls = []
+    """The words are written in the background (AI-022): the first GET schedules the job, the test runs it
+    to the end with the test's session, and a second GET reads what it stored."""
+    calls, scheduled = [], []
 
     async def fake_words(facts, token):
         calls.append((facts, token))
@@ -170,9 +174,25 @@ async def _get(db, test, student, monkeypatch, words=None, exc=None):
             raise exc
         return words
 
+    @asynccontextmanager
+    async def same_session():
+        yield db
+
+    def schedule(result_id, fingerprint, facts, token):
+        scheduled.append((result_id, fingerprint, facts, token))
+        return True
+
     monkeypatch.setattr(insights, "_colearner_words", fake_words)
-    out = await insights_route.get_test_insights(test_id=str(test.id), user=student, session=db,
-                                                 authorization="Bearer tok")
+    monkeypatch.setattr(insights, "_schedule_words", schedule)
+
+    async def route():
+        return await insights_route.get_test_insights(test_id=str(test.id), user=student, session=db,
+                                                      authorization="Bearer tok")
+
+    out = await route()
+    if scheduled:
+        await insights._fill_words(*scheduled[-1], session_factory=same_session)
+        out = await route()
     return out, calls
 
 
@@ -352,3 +372,42 @@ def test_rubric_cleanup_migration_drops_marking_notes():
               "In burning it is combustion, while this oxidation is endothermic. Any two are enough."]
     cleaned = module.clean(points)
     assert cleaned == ["A.", "B.", module.RIGHT] and module.clean(cleaned) == cleaned
+
+
+async def test_the_screen_gets_template_words_at_once_and_the_model_runs_once_in_the_background(db, monkeypatch):
+    """AI-022: a GET never waits for the model; asking again while it runs doesn't start a second job."""
+    test, student = await _seed(db)
+    started, release = [], asyncio.Event()
+
+    async def fake_fill(result_id, fingerprint, facts, token, session_factory=None):
+        started.append(result_id)
+        await release.wait()  # the model is still thinking
+        insights._in_flight.discard(result_id)
+
+    monkeypatch.setattr(insights, "_fill_words", fake_fill)
+    insights._in_flight.clear()
+    insights._failed_at.clear()
+
+    async def route():
+        return await insights_route.get_test_insights(test_id=str(test.id), user=student, session=db,
+                                                      authorization="Bearer tok")
+
+    first = await route()
+    assert first.words_pending is True
+    assert first.headline == "You are strongest at Remember and can grow most at Analyze."  # the template
+    assert first.model_dump(by_alias=True)["wordsPending"] is True
+    again = await route()  # polled before the job is done
+    assert again.words_pending is True
+    release.set()
+    await asyncio.sleep(0.01)
+    assert len(started) == 1
+
+
+async def test_after_a_failed_attempt_the_template_is_final_for_a_while(db, monkeypatch):
+    test, student = await _seed(db)
+    result = (await db.execute(select(StudentTestResult).where(StudentTestResult.test_id == test.id))).scalar_one()
+    insights._in_flight.clear()
+    insights._failed_at.clear()
+    insights._failed_at[result.id] = time.monotonic()  # it just failed
+    out = await insights_route.get_test_insights(test_id=str(test.id), user=student, session=db, authorization=None)
+    assert out.words_pending is False and not insights._in_flight

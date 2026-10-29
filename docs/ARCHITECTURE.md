@@ -73,6 +73,7 @@ wave 2.
 | **Grader** (`src/services/evaluation/grader.py`) | realtime `.../finish` (and cascaded) | `gpt-5-mini`, strict JSON schema, per-question rubric; every aggregate computed in code |
 | **Cascaded** (prototype, cost/latency comparison) | dev playground only | `gpt-4o-mini-transcribe` STT, `gpt-4.1-mini` LLM, `gpt-4o-mini-tts` TTS |
 | **Homework insight** (`POST /api/v1/homework-insight`) | Core, student Homework screen | `gpt-4o-mini` (Core shows a placeholder paragraph on failure) |
+| **Test insights** (`POST /api/v1/insights`) | Core, student post-test insights screen | `gpt-5-mini`, strict JSON schema; 30 s per call. Core answers the screen at once with template words and writes the model's words in the background (see the table below) |
 
 A dev-only browser page at `/api/v1/colearner/playground` drives the
 Realtime and Cascaded pipelines without the app. It is served only when
@@ -125,6 +126,7 @@ with Structured Outputs. See `services/kg/README.md`.
 | Voice test grading | colearner, on `.../finish` | `gpt-5-mini` (rubric per question; scores computed in code) | none - the session is stored with `needs_review` and no score |
 | Homework questions | Core: question bank -> generation gap-fill -> relaxed bank -> kg -> deterministic generator | `gpt-5.1` + `gpt-5-mini` verify (generation), `gpt-5.1` (kg) | `DeterministicContentGenerator`, last resort only |
 | Homework insight | Core -> colearner | `gpt-4o-mini` | fixed placeholder paragraph |
+| Test insights (student's post-test screen: headline, key ideas, next steps, recap) | Core -> colearner `/api/v1/insights`, in the background; the screen shows template words first and asks again until `wordsPending` is false | `gpt-5-mini` (30 s; Core waits 35 s; measured 15-25 s, so never on the screen's critical path) | template words, retried at most every 2 minutes |
 | Revision cards (once per topic, shared by every student; first open or teacher regenerate, background) | Core -> generation `/v1/revision/cards` | `gpt-5-mini` | deck `failed`, retried by the next open after 10 minutes |
 | Question paper questions / replacements | Core -> kg | `gpt-5.1` | none - errors surface to the teacher |
 | Teacher Assistant chat | Core | none - keyword-matched canned replies | - |
