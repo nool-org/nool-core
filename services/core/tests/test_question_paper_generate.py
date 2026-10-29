@@ -290,3 +290,19 @@ async def test_kg_questions_land_by_slot_index_and_an_mcq_without_options_is_not
     assert [q.text for q in questions] == ["Q for slot 0?", "Filled slot 1?"] + [f"Q for slot {i}?" for i in expected[1:]]
     assert [q.order for q in questions] == list(range(1, len(slots_seen) + 1))
     assert questions[1].marks == slots_seen[1]["marks"]
+
+
+@pytest.mark.asyncio
+async def test_instructions_follow_the_blueprint_after_it_shrinks(db_session):
+    """T-028: instructions written for 3 sections must not mention Section C once it is gone."""
+    from src.domain.models import QuestionPaper, QuestionPaperSection
+
+    teacher, seeded = await _seed_paper_ready_to_generate(db_session)
+    paper = await db_session.get(QuestionPaper, uuid.UUID(seeded["paper_id"]))
+    paper.instructions = ["Section A (MCQ) consists of 6 questions of 1 mark each.",
+                          "Section C (Short Answer II) consists of 2 questions of 3 marks each."]
+    db_session.add(QuestionPaperSection(paper_id=paper.id, label="A", question_count=4, marks_each=1))
+    await db_session.flush()
+
+    out = await question_paper.get_paper(seeded["paper_id"], user=teacher, session=db_session)
+    assert out.instructions == ["Section A (MCQ) consists of 4 questions of 1 mark each."]

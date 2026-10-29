@@ -62,6 +62,7 @@ from src.repositories.usage_repository import count_question_papers
 from src.services import kg_client
 from src.services.bloom_defaults import resolve_bloom_targets
 from src.services.paper_actions import create_version, load_questions, question_out
+from src.services.paper_instructions import sync_instructions
 from src.services.paper_repeats import normalize
 from src.services.question_selector import figure_svgs
 
@@ -88,9 +89,9 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
     topics = await session.execute(
         select(QuestionPaperTopic.topic_id).where(QuestionPaperTopic.paper_id == paper.id)
     )
-    sections = await session.execute(
+    sections = list((await session.execute(
         select(QuestionPaperSection).where(QuestionPaperSection.paper_id == paper.id)
-    )
+    )).scalars().all())
     bloom_dist = await session.execute(
         select(QuestionPaperBloomDistribution).where(QuestionPaperBloomDistribution.paper_id == paper.id)
     )
@@ -125,7 +126,7 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
         sections=[
             PaperSection(label=s.label, question_count=s.question_count, marks_each=s.marks_each,
                          question_types=s.question_types)
-            for s in sections.scalars().all()
+            for s in sections
         ],
         bloom_distribution=[BloomTarget(level=d.bloom_level, value=d.value) for d in bloom_rows],
         difficulty_distribution=[PaperDifficultyTarget(level=k, value=v) for k, v in difficulty_rows.items()],
@@ -156,7 +157,7 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
         ),
         custom_header_text=paper.custom_header_text,
         logo_data_uri=paper.logo_data_uri,
-        instructions=paper.instructions,
+        instructions=sync_instructions(paper.instructions, sections),  # T-028: never stale
     )
 
 
@@ -1026,6 +1027,8 @@ async def finalize_paper(
         raise ConflictError(f"The questions add up to {marks} of the paper's {paper.total_marks} marks - "
                             "let Milo write the missing ones, or change the blueprint, before finalizing.")
     paper.status = QuestionPaperStatus.FINALIZED
+    # T-028: freeze the instructions as rendered, so they match the sections that were finalized
+    paper.instructions = (await _serialize(session, paper)).instructions
     await session.commit()
     await session.refresh(paper)
     return await _serialize(session, paper)
