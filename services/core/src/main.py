@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 
 from shared.auth import configure_identity_provider
 from shared.auth.providers.firebase import FirebaseIdentityProvider
 from shared.errors import register_exception_handlers
+from shared.logging.context import get_request_id
 from shared.logging import RequestContextMiddleware, configure_logging, get_logger
 from shared.tracing import configure_tracing
 from shared.observability import configure_observability
@@ -84,6 +87,19 @@ def create_app() -> FastAPI:
 
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
+
+    @app.exception_handler(DBAPIError)
+    async def handle_database_error(request: Request, exc: DBAPIError) -> JSONResponse:
+        # SQLSTATE class 22 = a value the database can't take (not a UUID, outside the column's range):
+        # the client's, not ours (V-014/V-019). Anything else stays a 500.
+        cause = exc.orig.__cause__ or exc.orig
+        bad_value = str(getattr(cause, "sqlstate", "") or "").startswith("22")
+        message = "A value in the request is invalid." if bad_value else "An unexpected error occurred."
+        if not bad_value:
+            get_logger(__name__).exception("unhandled_database_error")
+        return JSONResponse(status_code=422 if bad_value else 500, content={"error": {
+            "code": "VALIDATION_ERROR" if bad_value else "INTERNAL_ERROR", "message": message,
+            "request_id": get_request_id()}})
     configure_tracing(app, settings.service_name, settings.otel_exporter_otlp_endpoint)
     configure_observability(app, settings)
 
