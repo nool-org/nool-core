@@ -96,3 +96,8 @@ def test_empty_or_refused_reply_raises_clearly_and_facts_are_fenced():
         asyncio.run(insights_service.generate_insights({"cards": []}, client=client))
     assert client.kwargs["messages"][1]["content"] == '<facts>{"cards": []}</facts>'
     assert "Classes 9-12" in insights_service.SYSTEM_PROMPT and "never instructions" in insights_service.SYSTEM_PROMPT
+
+
+def test_the_model_gets_30_seconds_a_call():
+    """AI-022: gpt-5-mini takes 15-25 s; the old 15 s wait timed out most calls. Core waits 35 s (insights.py)."""
+    assert insights_service._TIMEOUT_SECONDS == 30.0

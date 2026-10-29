@@ -22,7 +22,10 @@ def formats(subject_name: str | None) -> tuple[str, ...]:
 
 
 def challenge_formats(subject_name: str | None) -> tuple[str, ...]:
-    return ("voice", "fix_steps") if voice_tests_allowed(subject_name) else ("fix_steps",)
+    """Fix Milo's homework everywhere; Speak with Milo and Who is right? where the subject
+    uses them (T-019). Build your own waits for a check on its params (AI-019)."""
+    own = formats(subject_name)
+    return tuple(f for f in ("voice", "fix_steps", "who_is_right") if f == "fix_steps" or f in own)
 
 
 def voice_tests_allowed(subject_name: str | None) -> bool:

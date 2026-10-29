@@ -20,29 +20,39 @@ from dataclasses import dataclass, field
 
 import re
 
-from sqlalchemy import and_, func, literal_column, not_, or_, select
+from sqlalchemy import and_, false, func, literal_column, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import BloomLevel, DatasetQuestion, HomeworkDifficulty, QuestionType
 from src.domain.models.question_paper import PaperDifficultyLevel
+from src.config.settings import get_settings
+from src.services.assets import asset_url
 
 
 
-def _has(path: str):
-    return DatasetQuestion.figures.op("@?")(literal_column(f"'$[*] ? (exists(@.{path}))'::jsonpath"))
+def _figure(cond: str):
+    return DatasetQuestion.figures.op("@?")(literal_column(f"'$[*] ? ({cond})'::jsonpath"))
+
+
+_SHOWN = '!(@.role == "solution")'  # on the question or an option; a worked-solution figure blocks nothing
 
 
 def text_only_filter(*, pictures: bool = False):
-    """Questions the app can show: no figure, no reference to a figure the
-    import couldn't attach, no blank MCQ option, a key that can be trusted (sound_key). `pictures`: also ones whose
-    figures are all drawn inline (an "svg" - Nool's picture questions), for
-    screens that render them; never an imported image file (a "blob")."""
-    drawn = and_(_has("svg"), not_(_has("blob")))
-    no_figure = DatasetQuestion.figures.is_(None)
+    """Questions the app can show: no figure on the question (one only in the worked
+    solution is fine), no reference to a figure the import couldn't attach, no blank MCQ
+    option, a key that can be trusted (sound_key). `pictures`: also ones with a figure the
+    screen can draw - inline SVG, or an imported image file (a "blob") on the question
+    itself when ASSET_BASE_URL serves them; never a picture per option."""
+    shown = _figure(_SHOWN)
+    if get_settings().asset_base_url:
+        drawable = not_(_figure('exists(@.blob) && @.role == "option"'))
+    else:
+        drawable = not_(_figure(f'exists(@.blob) && {_SHOWN}'))
+    pictured = and_(shown, drawable) if pictures else false()
     unattached = DatasetQuestion.text.op("~*")(r"\[image|(given|following|shown|adjacent) (figure|diagram|graph)|fig\.")
     return and_(
-        or_(no_figure, drawn) if pictures else no_figure,
-        or_(drawn, not_(unattached)) if pictures else not_(unattached),
+        or_(DatasetQuestion.figures.is_(None), not_(shown), pictured),
+        or_(pictured, not_(unattached)),
         or_(DatasetQuestion.options.is_(None),
             not_(DatasetQuestion.options.op("@?")(literal_column(
                 """'$[*] ? (@.type() == "string" && @ like_regex "^[[:space:]]*$")'::jsonpath""")))),
@@ -87,13 +97,24 @@ def figure_svg(question: DatasetQuestion | None) -> str | None:
     return None
 
 
-async def figure_svgs(session: AsyncSession, question_ids) -> dict[uuid.UUID, str]:
-    """{bank question id: its inline picture} for those of `question_ids` with one."""
+def _figure_url(question: DatasetQuestion) -> str | None:
+    """Public URL of the question's own image file (not a solution or option one)."""
+    for figure in question.figures or []:
+        if figure.get("blob") and figure.get("role") not in ("solution", "option"):
+            return asset_url(figure["blob"])
+    return None
+
+
+async def figure_svgs(session: AsyncSession, question_ids) -> dict[uuid.UUID, dict]:
+    """{bank question id: {"figure_svg": inline picture, "figure_url": image file URL}}
+    for those of `question_ids` with a picture to show - spread into the item out."""
     ids = {i for i in question_ids if i is not None}
     if not ids:
         return {}
-    rows = (await session.execute(select(DatasetQuestion).where(DatasetQuestion.id.in_(ids), _has("svg")))).scalars()
-    return {q.id: svg for q in rows if (svg := figure_svg(q))}
+    rows = (await session.execute(select(DatasetQuestion).where(
+        DatasetQuestion.id.in_(ids), DatasetQuestion.figures.is_not(None)))).scalars()
+    out = {q.id: {"figure_svg": figure_svg(q), "figure_url": _figure_url(q)} for q in rows}
+    return {k: v for k, v in out.items() if v["figure_svg"] or v["figure_url"]}
 
 
 _DIFFICULTY_ORDER = [PaperDifficultyLevel.EASY, PaperDifficultyLevel.MEDIUM, PaperDifficultyLevel.HARD]

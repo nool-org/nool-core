@@ -1,5 +1,6 @@
 """Picture questions: a drawn (inline SVG) figure reaches the screens that draw
-it; an imported image file never does, and text-only callers see neither."""
+it; an imported image file only when ASSET_BASE_URL serves it, and text-only callers
+see neither. A figure only in the worked solution blocks nothing."""
 import uuid
 
 import pytest
@@ -37,4 +38,29 @@ async def test_drawn_pictures_only_where_asked(db_session):
     assert await ids() == {plain.id}
     assert await ids(pictures=True) == {plain.id, drawn.id}
     assert image.id not in await ids(pictures=True)
-    assert await figure_svgs(db_session, [plain.id, drawn.id, image.id, None]) == {drawn.id: SVG}
+    assert await figure_svgs(db_session, [plain.id, drawn.id, image.id, None]) == {
+        drawn.id: {"figure_svg": SVG, "figure_url": None}}
+
+
+@pytest.mark.asyncio
+async def test_image_files_shown_when_served(db_session, monkeypatch):
+    s = await _seed(db_session)
+    image = await _question(db_session, s, "Look at the image.",
+                            [{"kind": "diagram", "role": "question", "blob": "a/b.png"}])
+    solved = await _question(db_session, s, "What is 2 + 2?",
+                             [{"kind": "diagram", "role": "solution", "blob": "a/s.png"}])
+    per_option = await _question(db_session, s, "Which one is a cell?",
+                                 [{"kind": "diagram", "role": "option", "option": 0, "blob": "a/o.png"}])
+
+    async def ids(**kw):
+        return set((await db_session.execute(select(DatasetQuestion.id).where(
+            DatasetQuestion.dataset_id == s.dataset.id, text_only_filter(**kw)))).scalars())
+
+    assert await ids() == {solved.id}
+    assert await ids(pictures=True) == {solved.id}
+    monkeypatch.setenv("ASSET_BASE_URL", "https://cdn.example/qa/")
+    assert await ids() == {solved.id}
+    assert await ids(pictures=True) == {solved.id, image.id}
+    assert per_option.id not in await ids(pictures=True)
+    assert await figure_svgs(db_session, [image.id, solved.id]) == {
+        image.id: {"figure_svg": None, "figure_url": "https://cdn.example/qa/a/b.png"}}

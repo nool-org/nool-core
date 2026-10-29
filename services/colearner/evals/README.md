@@ -64,3 +64,12 @@ the verdict depends on how loosely "electricity" is read, not on the grader's qu
 3. Set `grade`/`subject`/`chapter`, and `source: "real: <school>/<date>"` (no student names or ids in the text).
 4. If the test had prepped questions, add `rubric: [{question_number, key_points, misconceptions}]`.
 5. Run the gate; keep wrong answers at 30+ in total so the 1-in-30 false-pass limit stays meaningful.
+
+## Insights accuracy (AI-021)
+
+`insights_eval.py` runs about 20 post-test fact sets (built from `grader_set.json`, plus a few hand-written
+edge cases) through `insights_service` with each model (`--models`, default gpt-5-mini and gpt-4o-mini) and
+counts the recaps that break the prompt's own rules: a number said in `recap_text`, a number in the headline or
+next steps that is not in the facts, a next-step reference that names none of the facts' topics. It also
+reports latency (production waits 15 s per call) and prints sample recaps for a tone review. No gate yet.
+Same run recipe as the grader eval; the checkers are unit-tested in `tests/test_insights_eval.py`.

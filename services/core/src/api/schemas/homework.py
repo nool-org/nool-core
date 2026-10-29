@@ -59,6 +59,7 @@ class StudentHomeworkQuestionOut(CamelModel):
     text: str
     is_boss: bool = False  # auto homework's double-XP question
     figure_svg: str | None = None  # a picture question's drawing (SVG markup)
+    figure_url: str | None = None  # or its image file (ASSET_BASE_URL)
 
 
 class HomeworkQuestionOut(StudentHomeworkQuestionOut):

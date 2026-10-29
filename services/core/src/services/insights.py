@@ -8,11 +8,17 @@ words (headline, a key idea per card, next steps, spoken recap); when it is
 unreachable the same numbers go out with template words, never a 500.
 Colearner's words are stored on the result (insights_words) with the
 fingerprint of their inputs and only rewritten when that changes.
+
+The model takes 15-25 s, so the screen never waits for it (AI-022): a GET with no
+stored words answers at once with the template words (`words_pending` true) and
+writes the model's words in the background; the app asks again until they are there.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -24,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from shared.errors import NotFoundError
 
 from src.config.settings import get_settings
+from src.repositories import get_session
 from src.domain.models import (
     AiAssessorSession,
     AiAssessorSessionRecord,
@@ -43,7 +50,13 @@ from src.domain.models import (
 logger = logging.getLogger(__name__)
 
 CARD_SCORE_BELOW = 75
-_TIMEOUT_SECONDS = 30.0
+# colearner waits 30 s for the model (insights_service._TIMEOUT_SECONDS); core waits a little longer for it
+_TIMEOUT_SECONDS = 35.0
+RETRY_AFTER_FAILURE_SECONDS = 120  # after a failed attempt the template words are final for this long
+
+_in_flight: set[uuid.UUID] = set()  # results whose words are being written right now
+_failed_at: dict[uuid.UUID, float] = {}
+_tasks: set[asyncio.Task] = set()  # keeps a running task from being garbage collected
 
 
 def topic_status(percent: int) -> str:
@@ -145,6 +158,37 @@ async def _colearner_words(facts: dict, token: str | None) -> dict:
     }
 
 
+async def _fill_words(result_id: uuid.UUID, fingerprint: list, facts: dict, token: str | None,
+                      session_factory=get_session) -> None:
+    """Background: the model's words, stored on the result for the next GET."""
+    try:
+        words = await _colearner_words(facts, token)
+        async with session_factory() as session:
+            result = await session.get(StudentTestResult, result_id)
+            result.insights_words = {"fingerprint": fingerprint, "words": words,
+                                     "generated_at": datetime.now(timezone.utc).isoformat()}
+            await session.commit()
+        _failed_at.pop(result_id, None)
+    except Exception as exc:  # any failure -> the template words stay, never a 500
+        _failed_at[result_id] = time.monotonic()
+        logger.warning("insights_words_fallback", extra={"result_id": str(result_id), "reason": str(exc)[:300]})
+    finally:
+        _in_flight.discard(result_id)
+
+
+def _schedule_words(result_id: uuid.UUID, fingerprint: list, facts: dict, token: str | None) -> bool:
+    """Starts writing the words unless that is already going on or just failed. True = they may still arrive."""
+    if result_id in _in_flight:
+        return True
+    if time.monotonic() - _failed_at.get(result_id, -1e9) < RETRY_AFTER_FAILURE_SECONDS:
+        return False
+    _in_flight.add(result_id)
+    task = asyncio.get_running_loop().create_task(_fill_words(result_id, fingerprint, facts, token))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+    return True
+
+
 def _fingerprint(result: StudentTestResult, record: AiAssessorSessionRecord | None, cards: list[dict]) -> list:
     # records (keyed by session_id) have no updated_at; created_at stands in
     return [str(result.id), result.mastery_percent, str(record.session_id) if record else None,
@@ -207,7 +251,7 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
     school_class = await session.get(SchoolClass, test.class_id) if test else None
 
     fingerprint = _fingerprint(result, record, cards)
-    to_store = None  # template words aren't stored, so colearner is retried next time
+    pending = False
     stored = result.insights_words or {}
     if stored.get("fingerprint") == fingerprint:
         words = {**stored["words"], "key_ideas": {int(k): v for k, v in stored["words"]["key_ideas"].items()}}
@@ -228,12 +272,8 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
             } for c in cards],
         }
         generated_at = datetime.now(timezone.utc)
-        try:
-            words = await _colearner_words(facts, token)
-            to_store = {"fingerprint": fingerprint, "words": words, "generated_at": generated_at.isoformat()}
-        except Exception as exc:  # any failure -> template words, never a 500
-            logger.warning("insights_words_fallback", extra={"test_id": str(test_uuid), "reason": str(exc)[:300]})
-            words = template_words(per_bloom, topics, cards, chapter.name if chapter else None)
+        words = template_words(per_bloom, topics, cards, chapter.name if chapter else None)
+        pending = _schedule_words(result.id, fingerprint, facts, token)  # the screen doesn't wait for the model
 
     fallback = template_words(per_bloom, topics, cards, chapter.name if chapter else None)
     out = {
@@ -253,8 +293,6 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         "next_steps": (list(words["next_steps"]) + fallback["next_steps"])[:3],
         "recap_text": words["recap_text"],
         "generated_at": generated_at,
+        "words_pending": pending,
     }
-    if to_store:
-        result.insights_words = to_store
-        await session.commit()
     return out

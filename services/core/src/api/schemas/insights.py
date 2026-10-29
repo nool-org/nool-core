@@ -45,3 +45,5 @@ class TestInsightsOut(CamelModel):
     next_steps: list[InsightNextStep]
     recap_text: str
     generated_at: datetime
+    # true while the model's words are still being written: these are the template words, ask again shortly
+    words_pending: bool = False

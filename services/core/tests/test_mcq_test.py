@@ -62,7 +62,7 @@ from src.domain.models import (
 )
 from src.services import mcq_test as service
 from src.services.generation_client import GenerationServiceUnavailableError
-from src.services.growth import corrected
+from src.services.growth import corrected, growth_entries
 
 B = BloomLevel
 LEVELS = [B.REMEMBER, B.UNDERSTAND, B.APPLY, B.ANALYZE, B.EVALUATE]
@@ -270,7 +270,7 @@ async def test_questions_come_from_the_bank_and_never_reveal_answers(schema, mon
     assert all(q.text.split()[1] == q.concept for q in out.questions)  # bank question on the slot's concept
     wire = out.model_dump(by_alias=True)
     assert wire["answered"] == [] and wire["speedMode"] is False and wire["lifelinesLeft"] == ["fifty_fifty", "ask_milo"]
-    assert all(set(q) == {"id", "text", "options", "bloomLevel", "concept", "isBoss", "gapConcept", "figureSvg"}
+    assert all(set(q) == {"id", "text", "options", "bloomLevel", "concept", "isBoss", "gapConcept", "figureSvg", "figureUrl"}
                for q in wire["questions"])
     assert [q.is_boss for q in out.questions] == [False] * 9 + [True]
     assert all(q.gap_concept == (q.concept if q.concept != "power" else None) for q in out.questions)
@@ -383,6 +383,13 @@ async def _attempt(db, s, *, wrong_levels=()):
 
 def test_guess_correction():
     assert [corrected(p) for p in (0, 25, 50, 75, 100)] == [0, 0, 33, 67, 100]
+
+
+def test_no_growth_for_a_level_asked_once():
+    """V-008: Remember 28% -> 0% (-28) from one wrong re-check answer; under 2 asked = Not assessed."""
+    entries = growth_entries("bloom", {"REMEMBER": 0, "UNDERSTAND": 100}, {"REMEMBER": 28, "UNDERSTAND": 0},
+                             {"REMEMBER": 1, "UNDERSTAND": 2})
+    assert [e["key"] for e in entries] == ["UNDERSTAND"]
 
 
 async def test_attempt_marks_scores_growth_and_awards_xp_once(schema, monkeypatch):

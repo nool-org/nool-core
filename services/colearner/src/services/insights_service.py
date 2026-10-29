@@ -18,8 +18,8 @@ from src.config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 INSIGHTS_MODEL = "gpt-5-mini"
-# Per attempt; 2 retries stay under core's 30s wait on this call.
-_TIMEOUT_SECONDS = 15.0  # single attempt: 3 x 9 s retries made insights take ~29 s
+# One attempt: core asks in the background (insights.py) and waits 35 s, the screen doesn't wait at all.
+_TIMEOUT_SECONDS = 30.0  # single attempt (AI-022): gpt-5-mini takes 15-25 s; core waits 35 s and never blocks the screen on it
 
 _client: Optional[AsyncOpenAI] = None
 

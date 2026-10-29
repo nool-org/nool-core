@@ -112,7 +112,7 @@ async def get_my_mcq_test(
         # never the answer of an unanswered question: correct_index stays server-side
         questions=[McqQuestionOut(id=str(q.id), text=q.text, options=q.options, bloom_level=q.bloom_level.value,
                                   concept=q.concept, is_boss=q.is_boss, gap_concept=q.gap_concept,
-                                  figure_svg=svgs.get(q.source_question_id))
+                                  **svgs.get(q.source_question_id, {}))
                    for q in questions],
         speed_mode=mcq.speed_mode,
         lifelines_left=[k for k in mcq_test.LIFELINES if k not in (mcq.lifelines_used or [])],

@@ -338,7 +338,7 @@ async def _questions_out(session: AsyncSession, homework_id: str) -> ListEnvelop
             text=q.text,
             answer=q.answer,
             is_boss=q.is_boss,
-            figure_svg=svgs.get(q.source_question_id),
+            **svgs.get(q.source_question_id, {}),
         )
         for q in rows
     ]
