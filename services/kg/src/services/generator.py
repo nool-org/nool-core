@@ -10,6 +10,7 @@ context plus a request shape into grounded questions.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from functools import lru_cache
 
@@ -17,6 +18,8 @@ from openai import AsyncOpenAI
 
 from shared import llm_gateway
 from src.services import cost
+
+logger = logging.getLogger(__name__)
 
 # KG_MODEL swaps the paper/context writer (e.g. gpt-5-mini) once its eval holds up
 MODEL = os.environ.get("KG_MODEL") or "gpt-5.1"
@@ -53,10 +56,12 @@ GENERATED_QUESTIONS_SCHEMA = {
                     "chapter_number": {"type": "integer"},
                     "topic": {"type": "string"},
                     "source_refs": {"type": "array", "items": {"type": "string"}},
+                    "slot_index": {"type": ["integer", "null"]},
+                    "options": {"type": ["array", "null"], "items": {"type": "string"}},
                 },
                 "required": [
                     "text", "answer", "bloom_level", "difficulty", "question_type",
-                    "chapter_number", "topic", "source_refs",
+                    "chapter_number", "topic", "source_refs", "slot_index", "options",
                 ],
                 "additionalProperties": False,
             },
@@ -86,7 +91,40 @@ topic.
 Every question must be self-contained text a student can answer from the
 printed paper alone: never refer to a figure, diagram, table, activity or
 page "in your textbook" (no "Fig. 2.3", "the circuit shown", "the table
-above"). If the idea needs a diagram, describe the setup in words instead."""
+above"). If the idea needs a diagram, describe the setup in words instead.
+
+- options: for mcq exactly 4 options (without "(a)" labels), and `answer` is
+  one of them word for word; the options go only here, never in `text`.
+  null for every other question_type.
+- slot_index: in slot mode, the slot_index of the slot this question fills;
+  null otherwise.
+- If the given topics cannot support a slot's Bloom level or type without
+  outside facts, write the closest question the content does support at that
+  level and add "level_stretched" to source_refs."""
+
+VERIFY_MODEL = os.environ.get("KG_VERIFY_MODEL") or "gpt-5-mini"
+
+VERIFY_SCHEMA = {
+    "type": "object",
+    "properties": {"verdicts": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"index": {"type": "integer"}, "ok": {"type": "boolean"}, "problem": {"type": "string"}},
+        "required": ["index", "ok", "problem"],
+        "additionalProperties": False,
+    }}},
+    "required": ["verdicts"],
+    "additionalProperties": False,
+}
+
+VERIFY_SYSTEM = """You are a strict {board} Class {grade} {subject} chief examiner checking questions
+before they are printed. For each question, solve it yourself first, then compare with its `answer`.
+ok=true only if ALL hold:
+1. A student can answer it from the printed text alone (no figure or textbook reference).
+2. It has exactly one correct answer, and `answer` is that answer. For mcq, exactly one of `options`
+   is correct and `answer` is that option. For assertion-reason, decide separately whether A is true,
+   whether R is true, and whether R explains A, then pick the option.
+3. Numbers and facts are right (recompute every calculation).
+If not ok, say precisely what is wrong in `problem`; otherwise leave it empty."""
 
 
 # ponytail: the 20-30% bank share is prompt-enforced, not checked after the
@@ -135,7 +173,7 @@ def _build_user_message(
             "must match its slot's bloom_level, difficulty and question_type, and its length and depth "
             "must suit its marks (1 mark = one quick fact or MCQ; 5 marks = a multi-step answer). "
             "A slot that names a chapter must be answered from that chapter only (set chapter_number to it).",
-            json.dumps(slots),
+            json.dumps([{"slot_index": i, **slot} for i, slot in enumerate(slots)]),
             "\nAvailable topics/subtopics (grounding context):",
             json.dumps(concept_context, indent=2),
             *([BANK_STYLE_GUIDANCE, json.dumps(reference_questions, indent=2)] if reference_questions else []),
@@ -257,4 +295,36 @@ async def generate_questions(
     message = response.choices[0].message
     if message.refusal or message.content is None:
         raise RuntimeError(f"Model refused or returned no content: {message.refusal}")
-    return json.loads(message.content)["questions"]
+    questions = json.loads(message.content)["questions"]
+    return await _verified(api_key, questions, board=board, grade=grade, subject=subject)
+
+
+async def _verified(api_key: str, questions: list[dict], *, board: str, grade: int, subject: str) -> list[dict]:
+    """Drops every question whose answer a second model, solving it on its
+    own, doesn't agree with (C-009: three wrong MCQ keys reached papers)."""
+    if not questions:
+        return questions
+    items = [{"index": i, **{k: q.get(k) for k in ("text", "options", "answer", "question_type")}}
+             for i, q in enumerate(questions)]
+    try:
+        response = await _get_client(api_key).chat.completions.create(
+            model=VERIFY_MODEL,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            **llm_gateway.call_kwargs("chat"),
+            messages=[
+                {"role": "system", "content": VERIFY_SYSTEM.format(board=board, grade=grade, subject=subject)},
+                {"role": "user", "content": json.dumps(items, ensure_ascii=False)},
+            ],
+            response_format={"type": "json_schema", "json_schema": {
+                "name": "question_verdicts", "schema": VERIFY_SCHEMA, "strict": True}},
+        )
+        cost.log_chat_usage(VERIFY_MODEL, getattr(response, "usage", None))
+        verdicts = json.loads(response.choices[0].message.content)["verdicts"]
+    except Exception as exc:
+        # ponytail: a verifier outage keeps the batch (the answer-key step verifies again); drop instead if keys still slip
+        logger.warning("kg_verify_failed", extra={"error": type(exc).__name__})
+        return questions
+    bad = {v["index"]: v["problem"] for v in verdicts if not v["ok"]}
+    for i, why in bad.items():
+        logger.info("kg_question_dropped", extra={"index": i, "problem": why})
+    return [q for i, q in enumerate(questions) if i not in bad]

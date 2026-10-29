@@ -24,7 +24,7 @@ from src.api.schemas.paper_copilot import (
     AfterSummary, EditOp, ExplainOut, NewQuestion, PaperChatIn, PaperChatMessageOut, PaperChatOut, PaperOp,
     Proposal, QuestionSummary, ReorderOp, ReplaceOp,
 )
-from src.services import paper_actions, paper_rules
+from src.services import paper_actions, paper_parallel, paper_rules
 from src.domain.models import (
     BloomLevel, Chapter, Dataset, DatasetQuestion, DatasetType, QuestionPaper, QuestionPaperChapter,
     QuestionPaperDatasetShare, QuestionPaperQuestion, QuestionPaperSection, QuestionPaperStatus, QuestionPaperTopic,
@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 MAX_AUDIO_BYTES = 5 * 1024 * 1024
 HISTORY_LIMIT = 20
 BANK_LIMIT = 30
+TEXTBOOK_CHARS = 6000  # per chapter, for the copilot writer
 FRIENDLY_FAILURE = "Sorry, I couldn't work that out just now. Please try again, or say it a little differently."
 QUICK_ACTION_LABELS = {
     "harder": "Make it harder", "easier": "Make it easier", "more_application": "More application questions",
@@ -255,6 +256,17 @@ async def _context(session: AsyncSession, paper: QuestionPaper):
     return questions, chapters, sections
 
 
+async def _textbook(session: AsyncSession, chapters: dict[str, str]) -> dict[str, str]:
+    """Chapter id -> its textbook text (capped), so the copilot's writer only
+    uses facts from the book (AI-015)."""
+    out = {}
+    for chapter_id in chapters:
+        _, sections = await paper_parallel._sections(session, [uuid.UUID(chapter_id)])
+        if text := "\n\n".join(f"## {s['title']}\n{s['text']}" for s in sections)[:TEXTBOOK_CHARS]:
+            out[chapter_id] = text
+    return out
+
+
 async def chat(session: AsyncSession, paper: QuestionPaper, user: User, body: PaperChatIn) -> PaperChatOut:
     if paper.status == QuestionPaperStatus.FINALIZED:
         raise ConflictError("This paper is finalized and can't be changed.")
@@ -299,6 +311,7 @@ async def chat(session: AsyncSession, paper: QuestionPaper, user: User, body: Pa
         "rules_issues": [i.get("message", "") for i in (rules or {}).get("issues", [])][:50],
         "bank_candidates": [_candidate_json(c) for c in candidates],
         "history": [{"role": m.role, "text": m.text[:4000]} for m in history],
+        "textbook": await _textbook(session, chapters),
     }
     try:
         plan = await paper_copilot_client.plan(payload)

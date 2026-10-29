@@ -60,6 +60,8 @@ class GeneratedQuestionOut(BaseModel):
     chapter_number: int
     topic: str
     source_refs: list[str]
+    slot_index: int | None = None
+    options: list[str] | None = None
 
 
 class GenerateQuestionsOut(BaseModel):
