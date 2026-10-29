@@ -721,3 +721,27 @@ def test_near_identical_stems_are_one_question_but_other_topics_are_not():
     assert not service.near_duplicate("Balance the equation for the burning of magnesium ribbon in air.", seen)
     assert not service.near_duplicate("Which gas is released when zinc reacts with dilute sulphuric acid?", seen)
     assert not service.near_duplicate("Define a combination reaction.", [])
+
+
+async def test_a_generated_question_worded_like_a_pool_pick_is_not_added(db_session, monkeypatch):
+    """C-016: only pool picks were checked, so generated fill-ins repeated the same idea."""
+    s = await _seed(db_session)
+    [first] = await _pool(db_session, s.mirrors, 1)
+    first.text = "What happens when white silver chloride is placed in a china dish and left in sunlight for some time?"
+    [twin] = await _pool(db_session, s.mirrors, 1, origin_override="generated")
+    twin.text = "What happens to white silver chloride when it is kept in a china dish under sunlight for some time?"
+    await db_session.flush()
+
+    async def generate(session, school_class, chapter_id, slots, seed):
+        return {n: twin for n in range(len(slots))}
+
+    monkeypatch.setattr(service, "_generate", generate)
+    slots = [service.Slot(s.mirrors, "mcq", B.UNDERSTAND), service.Slot(s.mirrors, "mcq", B.UNDERSTAND)]
+    real = service._from_pool
+
+    async def only_first(session, topic, kind, level, exclude, *a):
+        return None if twin.id in exclude else await real(session, topic, kind, level, exclude, *a)
+
+    monkeypatch.setattr(service, "_from_pool", only_first)
+    chosen = await service._fill(db_session, s.student, s.cls, slots, service.today_ist(), "seed")
+    assert [q.id for _, q in chosen] == [first.id]

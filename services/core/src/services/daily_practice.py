@@ -396,6 +396,15 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
             exclude.add(q.id)
         return None
 
+    def fresh(q: PracticeQuestion) -> bool:
+        """C-016: a generated or last-resort question is held to the same no-repeat rule as a pool pick."""
+        if same_question(q.text) in seen_texts or near_duplicate(q.text, seen_words):
+            exclude.add(q.id)
+            return False
+        seen_texts.add(same_question(q.text))
+        seen_words.append(words_of(q.text))
+        return True
+
     topics = list(dict.fromkeys(slot.topic for slot in slots))
     for i, slot in enumerate(slots):
         # a who_is_right/make_your_own/fix_steps slot waits for generation before it settles for an MCQ
@@ -422,20 +431,22 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
     special = [i for i in range(len(slots))
                if write_special and i not in picked and slots[i].kind in question_types.KINDS]
     for i, q in (await _generate_special(session, school_class, slots, special)).items():
-        picked[i] = q
-        exclude.add(q.id)
+        if fresh(q):
+            picked[i] = q
+            exclude.add(q.id)
     open_slots = [i for i in range(len(slots)) if i not in picked]
     for chapter_id in dict.fromkeys(slots[i].topic.chapter_id for i in open_slots):
         mine = [i for i in open_slots if slots[i].topic.chapter_id == chapter_id]
         for n, q in (await _generate(session, school_class, chapter_id,
                                      [replace(slots[i], kind="mcq") for i in mine], seed)).items():
-            slots[mine[n]] = replace(slots[mine[n]], kind="mcq")
-            picked[mine[n]] = q
-            exclude.add(q.id)
+            if fresh(q):
+                slots[mine[n]] = replace(slots[mine[n]], kind="mcq")
+                picked[mine[n]] = q
+                exclude.add(q.id)
     if exact_level:  # generation couldn't help: any level beats no question
         for i in [i for i in range(len(slots)) if i not in picked]:
             q = await _from_pool(session, slots[i].topic, "mcq", slots[i].bloom_level, exclude)
-            if q is not None:
+            if q is not None and fresh(q):
                 slots[i] = replace(slots[i], kind="mcq")
                 picked[i] = q
                 exclude.add(q.id)
