@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +8,7 @@ from src.api.schemas.teacher_dashboard import (
     TeacherDashboardOut,
     TeacherHeadlineTest,
 )
-from src.domain.models import Chapter, Role, SchoolClass, TeacherClassAssignment, TestStatus, User, VoiceTest
+from src.domain.models import Chapter, Role, SchoolClass, TeacherClassAssignment, User, VoiceTest
 from src.repositories.roster_repository import student_count
 
 router = APIRouter(prefix="/api/v1", tags=["teacher-dashboard"])
@@ -21,21 +19,8 @@ async def _class_option(session: AsyncSession, school_class: SchoolClass) -> Tea
     return TeacherDashboardClassOption(
         id=str(school_class.id),
         label=f"Class {school_class.grade} · {school_class.section}",
-        meta=f"{count} student{'' if count == 1 else 's'}",
+        meta=f"{count} students",
     )
-
-
-def _window_status(test: VoiceTest) -> TestStatus:
-    """A sent Test stays SCHEDULED for its whole window; read live / closed from
-    the window (same rule as nool-apps' ApiTestService.withWindowStatus)."""
-    if test.status not in (TestStatus.SCHEDULED, TestStatus.ACTIVE):
-        return test.status
-    now = datetime.now(timezone.utc)
-    if test.due_at is not None and test.due_at <= now:
-        return TestStatus.COMPLETED
-    if test.scheduled_at is not None and test.scheduled_at > now:
-        return TestStatus.SCHEDULED
-    return TestStatus.ACTIVE
 
 
 @router.get("/teacher/dashboard")
@@ -70,14 +55,12 @@ async def get_teacher_dashboard(
         test = test_result.scalar_one_or_none()
         if test is not None:
             chapter = await session.get(Chapter, test.chapter_id)
-            status = _window_status(test)
-            label = {TestStatus.ACTIVE: "Live", TestStatus.COMPLETED: "Closed"}.get(
-                status, status.value.replace('_', ' ').capitalize())
             headline_test = TeacherHeadlineTest(
                 id=str(test.id),
                 title=chapter.name if chapter else "Chat with Milo",
-                meta=f"{label} · {test.completed_count}/{test.assigned_count} complete",
-                status=status,
+                meta=f"{test.status.value.replace('_', ' ').capitalize()} · "
+                     f"{test.completed_count}/{test.assigned_count} complete",
+                status=test.status,
             )
 
     return TeacherDashboardOut(
