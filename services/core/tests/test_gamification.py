@@ -124,20 +124,22 @@ async def test_award_session_xp_accumulates_and_marks_goal_complete(db_session):
     school = await _seed_school(db_session)
     student = await _seed_student(db_session, school.id)
 
-    body = gamification.AwardSessionXpIn(xp_earned=50, completed_goal_id="goal-finish-voice-test")
+    body = gamification.AwardSessionXpIn(completed_goal_id="goal-open-app")
     result = await gamification.award_session_xp(body=body, user=student, session=db_session)
+    again = await gamification.award_session_xp(body=body, user=student, session=db_session)
 
-    assert result.xp == 50
-    assert result.level == 1
+    assert result.xp == 10 and again.xp == 10  # the goal's own reward, once a day
+    open_app = next(g for g in result.daily_goals if g.id == "goal-open-app")
+    assert open_app.completed is True
     finish_voice_test = next(g for g in result.daily_goals if g.id == "goal-finish-voice-test")
-    assert finish_voice_test.completed is True
+    assert finish_voice_test.completed is False
 
 
 async def test_award_session_xp_rolls_a_level_over(db_session):
     school = await _seed_school(db_session)
     student = await _seed_student(db_session, school.id)
 
-    # the client-reported award is capped at SESSION_XP (anti-minting), so
+    # the client can no longer award XP, so
     # roll-over is exercised through apply_xp, which server-side awards use
     state = await gamification.apply_xp(db_session, student.id, 520)
 
@@ -145,15 +147,17 @@ async def test_award_session_xp_rolls_a_level_over(db_session):
     assert state.xp == 20
 
 
-async def test_award_session_xp_caps_the_client_reported_amount(db_session):
+async def test_award_session_xp_ignores_the_clients_amount(db_session):
     school = await _seed_school(db_session)
     student = await _seed_student(db_session, school.id)
 
-    body = gamification.AwardSessionXpIn(xp_earned=520)
+    body = gamification.AwardSessionXpIn.model_validate({"xpEarned": 520, "completedGoalId": "goal-finish-voice-test"})
     result = await gamification.award_session_xp(body=body, user=student, session=db_session)
+    await gamification.award_session_xp(body=gamification.AwardSessionXpIn.model_validate({"xpEarned": -100}),
+                                        user=student, session=db_session)
 
-    assert result.level == 1
-    assert result.xp == gamification.SESSION_XP
+    assert result.level == 1 and result.xp == 0
+    assert next(g for g in result.daily_goals if g.id == "goal-finish-voice-test").completed is False
 
 
 async def test_achievements_unlock_from_real_rows(db_session):

@@ -211,8 +211,11 @@ async def award_session_xp(
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> StudentGamificationOut:
-    # Voice-test XP is awarded server-side at completion (ai_assessor.py's
-    # _record_completion); this client-reported award is capped so it can't
-    # be used to mint XP.
-    state = await apply_xp(session, user.id, min(body.xp_earned, SESSION_XP), body.completed_goal_id)
+    # XP is the server's to give (V-021): the client names a goal it reached, never an amount. Only
+    # opening the app is a client-side event; the others are marked where they happen (ai_assessor).
+    reward = 0
+    if body.completed_goal_id == "goal-open-app" and body.completed_goal_id not in await _completed_goal_keys_today(
+            session, user.id):
+        reward = next(g["xp_reward"] for g in DAILY_GOAL_CATALOG if g["key"] == body.completed_goal_id)
+    state = await apply_xp(session, user.id, reward, body.completed_goal_id if reward else None)
     return await _gamification_out(session, user, state)

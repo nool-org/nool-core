@@ -48,5 +48,5 @@ class StudentGamificationOut(CamelModel):
 
 
 class AwardSessionXpIn(CamelModel):
-    xp_earned: int
+    # no amount: the server decides (an old client's xpEarned is ignored)
     completed_goal_id: str | None = None
