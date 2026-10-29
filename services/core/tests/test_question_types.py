@@ -79,3 +79,18 @@ def test_shuffle_moves_the_answer_but_keeps_it_right():
         first_fix.add(fix["fixes"][0]["correct"])
     assert sides == {0, 1} and first_reason == {True, False} and first_fix == {True, False}
     assert qt.shuffle("who_is_right", WHO, "x") == qt.shuffle("who_is_right", WHO, "x")  # same seed, same order
+
+
+def test_t044_explanation_must_name_the_friend_marked_right():
+    bad = {**WHO, "correct": 0, "explanation": "Bolt is right because 6ⁿ has no 5, so Zip is wrong."}
+    with pytest.raises(qt.SpecError, match="wrong friend"):
+        qt.validate("who_is_right", bad)
+    qt.validate("who_is_right", {**WHO, "correct": 0, "explanation": "Zip is correct; Bolt ignores the 5."})
+
+
+def test_t044_shuffle_keeps_explanation_in_step_with_the_swapped_answer():
+    spec = {**WHO, "explanation": "Bolt is right because 6ⁿ has no 5. Zip ignores that."}  # correct=1 -> Bolt
+    for seed in map(str, range(20)):
+        out = qt.shuffle("who_is_right", spec, seed)
+        assert not qt.names_wrong_friend(out)
+        assert f"{qt.CAST[out['correct']]} is right" in out["explanation"]

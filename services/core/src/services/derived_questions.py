@@ -94,7 +94,7 @@ async def derive(session: AsyncSession, chapter_id: uuid.UUID, grade: int = 10, 
                 spec = question_types.shuffle(kind, g["spec"], str(source.id))
                 session.add(PracticeQuestion(
                     chapter_id=chapter_id, topic_id=topic_id, bloom_level=LEVEL[kind], kind=kind, text=g["text"],
-                    spec=spec, options=None, correct_index=None, explanation=g["spec"].get("explanation") or None,
+                    spec=spec, options=None, correct_index=None, explanation=spec.get("explanation") or None,
                     expected_points=[], misconceptions=[], source_question_id=source.id, origin="bank", used_count=0))
                 made[kind] += 1
             await session.flush()

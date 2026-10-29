@@ -15,11 +15,25 @@ Two-part answers score 100 / 50 (right pick, wrong reason or fix) / 0.
 """
 
 import random
+import re
 
 from src.services import answer_checks
 
 KINDS = ("who_is_right", "make_your_own", "fix_steps")
 CAST = ("Zip", "Bolt")  # who_is_right's two characters (the app draws them); Milo asks
+
+
+_SAYS_RIGHT = re.compile(r"\b(Zip|Bolt)\b(?:'s)?\s+(?:is|was|are)\s+(?:right|correct)\b")
+
+
+def swap_cast(text: str) -> str:
+    """Zip <-> Bolt in a text (the explanation was written for the other orientation)."""
+    return re.sub(r"\b(Zip|Bolt)\b", lambda m: CAST[1 - CAST.index(m.group(1))], text or "")
+
+
+def names_wrong_friend(spec: dict) -> bool:
+    """True when who_is_right's explanation says the friend who is NOT marked right is right (T-044)."""
+    return any(m.group(1) != CAST[spec["correct"]] for m in _SAYS_RIGHT.finditer(spec.get("explanation") or ""))
 
 
 class SpecError(ValueError):
@@ -37,6 +51,8 @@ def validate(kind: str, spec: dict) -> None:
                 raise SpecError("correct must be 0 or 1")
             if not 3 <= len(reasons) <= 4 or sum(bool(r.get("correct")) for r in reasons) != 1:
                 raise SpecError("3-4 reasons, exactly one correct")
+            if names_wrong_friend(spec):
+                raise SpecError("explanation names the wrong friend")
         elif kind == "fix_steps":
             steps, fixes = spec["steps"], spec["fixes"]
             if not 3 <= len(steps) <= 7 or not 0 <= spec["wrong_step"] < len(steps):
@@ -71,6 +87,7 @@ def shuffle(kind: str, spec: dict, seed: str) -> dict:
         if rng.random() < 0.5:  # swap what they say, keep who speaks first
             claims[0]["says"], claims[1]["says"] = claims[1]["says"], claims[0]["says"]
             out["correct"] = 1 - spec["correct"]
+            out["explanation"] = swap_cast(spec.get("explanation"))  # it names who was right before the swap
         out["claims"] = claims
         out["reasons"] = rng.sample(list(spec["reasons"]), len(spec["reasons"]))
     elif kind == "fix_steps":
