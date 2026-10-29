@@ -1,6 +1,7 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import ForeignKey, Integer, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, UniqueConstraint, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -21,6 +22,10 @@ class StudentTestResult(IdMixin, Base):
     # written from (services/insights.py). Deferred so code that never
     # touches it doesn't select or insert it.
     insights_words: Mapped[dict | None] = mapped_column(JSONB, nullable=True, deferred=True)
+    # When the result came in (T-011's "+N this week"). Deferred, and not read back on
+    # insert (eager_defaults off), so only the code that wants it touches it.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), deferred=True)
+    __mapper_args__ = {"eager_defaults": False}
 
 
 class StudentTestResultBloomScore(Base):
