@@ -710,3 +710,14 @@ async def test_a_switched_off_bank_retires_what_the_pool_made_from_it(db_session
     await db_session.execute(update(SchoolDataset).where(SchoolDataset.dataset_id == s.dataset.id).values(enabled=False))
     assert (await pick(set())).id == written.id  # off: what came from it is skipped
     assert await pick({written.id}) is None
+
+
+def test_near_identical_stems_are_one_question_but_other_topics_are_not():
+    # C-012: three silver-chloride-in-sunlight stems in one topic quiz
+    first = "What happens when white silver chloride is placed in a china dish and left in sunlight for some time?"
+    again = "What happens to white silver chloride when it is kept in a china dish under sunlight for some time?"
+    seen = [service.words_of(first)]
+    assert service.near_duplicate(again, seen)
+    assert not service.near_duplicate("Balance the equation for the burning of magnesium ribbon in air.", seen)
+    assert not service.near_duplicate("Which gas is released when zinc reacts with dilute sulphuric acid?", seen)
+    assert not service.near_duplicate("Define a combination reaction.", [])

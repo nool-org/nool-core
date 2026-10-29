@@ -366,6 +366,22 @@ def same_question(text: str) -> str:
     return re.sub(r"\W+", "", text.lower())[:80]
 
 
+_STOP = frozenset("what which that this with from when does about following these those their there into have been "
+                  "will would should could because while where than then them they your".split())
+
+
+def words_of(text: str) -> frozenset[str]:
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 3 and w not in _STOP)
+
+
+def near_duplicate(text: str, seen: list[frozenset[str]]) -> bool:
+    """True when most of the stem's content words are in one already picked (C-012: three differently
+    worded "what does silver chloride do in sunlight" questions in one quiz). ponytail: word overlap,
+    not meaning - two questions on one idea with no shared words still pass."""
+    mine = words_of(text)
+    return any(len(mine & other) >= 4 and len(mine & other) >= 0.7 * min(len(mine), len(other)) for other in seen)
+
+
 async def _fill(session: AsyncSession, student: User, school_class: SchoolClass, slots: list[Slot],
                 today: date, seed: str, exact_level: bool = False,
                 write_special: bool = True) -> list[tuple[Slot, PracticeQuestion]]:
@@ -385,12 +401,13 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
         for kind in ("mcq", "voice"):
             await _import_bank(session, dataset_ids, topic, kind)
     seen_texts: set[str] = set()
+    seen_words: list[frozenset[str]] = []
 
     async def pool(topic: Topic, kind: str, level: BloomLevel, exact: bool) -> PracticeQuestion | None:
         # the same question twice (one board question in two years' papers) only once
-        for _ in range(5):
+        for _ in range(10):
             q = await _from_pool(session, topic, kind, level, exclude, exact)
-            if q is None or same_question(q.text) not in seen_texts:
+            if q is None or (same_question(q.text) not in seen_texts and not near_duplicate(q.text, seen_words)):
                 return q
             exclude.add(q.id)
         return None
@@ -413,6 +430,7 @@ async def _fill(session: AsyncSession, student: User, school_class: SchoolClass,
                         break
             if q is not None:
                 seen_texts.add(same_question(q.text))
+                seen_words.append(words_of(q.text))
                 slots[i] = replace(slot, kind=kind)
                 picked[i] = q
                 exclude.add(q.id)
