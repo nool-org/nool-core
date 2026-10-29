@@ -339,7 +339,7 @@ async def test_one_challenge_cycle_per_chapter_per_class(db_session, monkeypatch
     _stub_analysis(monkeypatch, [])
     monkeypatch.setattr(service.push, "notify", lambda *a, **k: _noop())
     first = await _create(db_session, s, monkeypatch)
-    second = await _create(db_session, s, monkeypatch)  # a second draft is fine - nothing is open yet
+    second = await _create(db_session, s, monkeypatch, mix={"mcq": 3})  # a second draft is fine - nothing is open yet
 
     await routes.publish_quiz_test(first.id, QuizTestScheduleIn(), user=s.teacher, session=db_session)
     with pytest.raises(ConflictError):  # the chapter's cycle is running - not another
@@ -388,3 +388,11 @@ async def test_the_teachers_report_says_whats_in_and_out_and_what_to_do(db_sessi
     with pytest.raises(NotFoundError):
         await report_routes.get_challenge_report(test_id=None, quiz_test_id=created.id, user=stranger,
                                                  session=db_session)
+
+
+async def test_the_same_quiz_twice_in_a_row_is_created_once(db_session, monkeypatch):
+    s = await _seed(db_session, students=1)  # V-015: a double tap
+    await _create(db_session, s, monkeypatch)
+    with pytest.raises(ConflictError):
+        await _create(db_session, s, monkeypatch)
+    await _create(db_session, s, monkeypatch, mix={"mcq": 5})  # a different quiz is fine

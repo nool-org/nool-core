@@ -16,7 +16,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,6 +86,14 @@ async def create(session: AsyncSession, teacher: User, class_id: str, chapter_id
     if unfit:
         raise ValidationError(f"{subject.name} doesn't use: {', '.join(unfit)}.")
     await challenge_rules.ensure_one_per_chapter(session, class_uuid, chapter.id, "fix_steps")
+    # a double tap (V-015): one request at a time per teacher + class, and the same quiz twice within a minute is one
+    await session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(f"quiz:{teacher.id}:{class_uuid}", 0))))
+    wanted = ([str(t.id) for t in topics], {k: int(v) for k, v in mix.items() if int(v) > 0})
+    recent = (await session.execute(select(QuizTest.topic_ids, QuizTest.mix).where(
+        QuizTest.created_by == teacher.id, QuizTest.class_id == class_uuid, QuizTest.chapter_id == chapter.id,
+        QuizTest.created_at > func.now() - timedelta(minutes=1)))).all()
+    if any((list(t), dict(m)) == wanted for t, m in recent):
+        raise ConflictError("You just set this up - open it from the list instead of creating it again.")
     test = QuizTest(id=uuid.uuid4(), class_id=class_uuid, subject_id=chapter.subject_id, chapter_id=chapter.id,
                     # a default name a teacher can tell apart from last week's: "Real Numbers test · 13 Oct"
                     title=(title or "").strip() or f"{daily_practice.tidy(chapter.name)} challenge · "
