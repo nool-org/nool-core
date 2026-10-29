@@ -26,6 +26,7 @@ from src.services.chained_service import (
 )
 from src.services.cost_service import USD_TO_INR_RATE
 from src.services.session_store import SessionState
+from shared.transcripts import echoes_prompt
 
 STT_MODEL = "gpt-4o-mini-transcribe"
 LLM_MODEL = "gpt-4.1-mini"
@@ -42,7 +43,7 @@ ENDPOINTING_S = 0.3  # streaming STT: transcript final ~this long after speech e
 
 SHORT_TURNS = """
 
-SPOKEN TURN RULES: every reply is at most 2 short sentences (acknowledge + next question), except when the student asks for an explanation."""
+SPOKEN TURN RULES: every reply is at most 2 short sentences (acknowledge + next question). Never explain or give the answer, even if asked."""
 
 
 def _wav_seconds(wav: bytes) -> float:
@@ -111,15 +112,14 @@ async def _hear(session: SessionState, audio: bytes) -> tuple[str, float]:
     f = io.BytesIO(wav)
     f.name = "answer.wav"
     t0 = time.time()
-    tr = await openai_client.audio.transcriptions.create(
-        model=STT_MODEL, file=f, language="en",
-        prompt=f"A school student answering a {session.config.subject} question about {session.config.chapter_name}.",
-    )
+    prompt = f"{session.config.subject}; {session.config.chapter_name}"  # vocabulary: an echo is easy to spot
+    tr = await openai_client.audio.transcriptions.create(model=STT_MODEL, file=f, language="en", prompt=prompt)
     cost = seconds / 60 * STT_PER_MIN
     session.cascaded["stt_usd"] += cost
     session.cascaded["stt_seconds"] += seconds
     _add(session, cost)
-    return tr.text.strip(), time.time() - t0
+    text = "" if echoes_prompt(tr.text, prompt) else tr.text.strip()  # its own prompt back = heard nothing
+    return text, time.time() - t0
 
 
 def cost_report(session: SessionState) -> dict:
@@ -167,9 +167,12 @@ async def process_cascaded_turn(
             transcript, timing["stt_s"] = await _hear(session, user_audio_bytes)
         else:
             transcript = (user_text or "").strip()
-        transcript = transcript or "(Inaudible audio response)"
-        session.turns.append({"role": "user", "content": transcript})
-        session.openai_messages.append({"role": "user", "content": transcript})
+        if transcript:
+            session.turns.append({"role": "user", "content": transcript})
+            session.openai_messages.append({"role": "user", "content": transcript})
+        else:  # never a turn in the student's name - it would be graded as their answer
+            session.openai_messages.append({"role": "system", "content": (
+                "The student's audio was empty or unclear. Ask them, in one short sentence, to say it again.")})
 
     answered = sum(1 for t in session.turns if t["role"] == "user") >= config.num_questions + 1
     out_of_time = time_limit_reached or (datetime.now() - session.created_at).total_seconds() >= config.session_max_time_seconds
