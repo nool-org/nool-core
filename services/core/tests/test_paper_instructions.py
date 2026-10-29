@@ -25,3 +25,9 @@ def test_section_lines_follow_the_current_sections():
 
 def test_no_instructions_stay_none():
     assert sync_instructions(None, []) is None
+
+
+def test_t034_instruction_written_for_6_follows_a_blueprint_edited_to_7():
+    """T-034: Section A was bumped 6 -> 7 before the first generate; the printed line says 7."""
+    after = sync_instructions(["Section A has 6 questions of 1 mark each."], [S(question_count=7, marks_each=1)])
+    assert after == ["Section A has 7 questions of 1 mark each."]
