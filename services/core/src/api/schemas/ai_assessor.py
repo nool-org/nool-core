@@ -42,6 +42,7 @@ class RealtimeAnswerOut(CamelModel):
     # the live call carried on the session's earlier answers and clock (False: it starts over)
     resumed: bool = False
     seconds_left: int | None = None  # resumed only: test time left on the clock
+    hints_used: int | None = None  # resumed only: nudges already given
 
 
 class FinishSessionIn(CamelModel):

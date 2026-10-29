@@ -364,7 +364,7 @@ async def realtime_offer(
     )
     _watch_for_abandon(ai_session.id, answer["call_id"], _bearer(authorization))
     return RealtimeAnswerOut(sdp=answer["sdp"], call_id=answer["call_id"], resumed=bool(answer.get("resumed")),
-                             seconds_left=answer.get("seconds_left"))
+                             seconds_left=answer.get("seconds_left"), hints_used=answer.get("hints_used"))
 
 
 def _watch_for_abandon(session_id: uuid.UUID, call_id: str, token: str) -> None:

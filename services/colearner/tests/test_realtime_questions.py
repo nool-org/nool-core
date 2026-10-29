@@ -826,3 +826,19 @@ def test_a_client_session_update_is_put_back(monkeypatch, short_call):
     updates = [m for m in ws.sent if m["type"] == "session.update"]
     assert len(updates) == 1 and updates[0]["session"]["instructions"] == rs.build_session(config)["instructions"]
     assert {"type": "conversation.item.delete", "item_id": "s1"} in ws.sent and "s1" not in call.items
+
+
+def test_a_resumed_call_tells_the_app_the_hints_already_used(monkeypatch):
+    """V-012: the app's hints counter went back to 0 after a reload."""
+    from src.api.routes import realtime as route
+
+    call = rs.RealtimeCall(call_id="c2", owner_ref="s1", state=rs.session_store.create_session(_config(2)),
+                           resumed=True)
+    call.progress = {1: {"hints_used": 2}, 2: {"hints_used": 1}}
+
+    async def create_call(**kwargs):
+        return "answer-sdp", call
+    monkeypatch.setattr(route.realtime_service, "create_call", create_call)
+    user = type("U", (), {"uid": "stu"})()
+    out = asyncio.run(route.create_call(CreateCallIn(sdp="v=0", config=_config(2), owner_ref="s1"), user, {}))
+    assert out.resumed and out.hints_used == 3
