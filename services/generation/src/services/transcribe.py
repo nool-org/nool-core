@@ -8,6 +8,7 @@ import binascii
 from openai import AsyncOpenAI
 
 from shared import llm_gateway
+from shared.transcripts import echoes_prompt
 from pydantic import BaseModel, Field
 
 from src.config.settings import get_settings
@@ -56,7 +57,8 @@ class OpenAITranscriber:
             **llm_gateway.call_kwargs("audio"),
         )
         log_transcription_usage(MODEL, getattr(result, "usage", None))
-        return result.text
+        # its own prompt back = it heard nothing (silence, noise): callers treat "" as no answer
+        return "" if echoes_prompt(result.text, prompt) else result.text
 
 
 def get_transcriber() -> OpenAITranscriber | None:

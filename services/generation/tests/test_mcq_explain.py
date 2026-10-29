@@ -60,3 +60,20 @@ def test_transcriber_forces_english_only_when_asked():
     asyncio.run(t(audio=b"x", filename="a.m4a", prompt="", language="auto"))
     assert calls[0]["language"] == "en" and "language" not in calls[1]
     assert TranscribeRequest(audio_base64="eA==").language == "en"
+
+
+def test_transcriber_drops_an_echo_of_its_own_prompt():
+    """AI-001: on silence gpt-4o-mini-transcribe can return its prompt - that is no answer."""
+    from src.services.transcribe import OpenAITranscriber
+
+    texts = iter(["Science; Electricity, Ohm's law", "Current is the flow of charge"])
+
+    class FakeTranscriptions:
+        async def create(self, **kw):
+            return type("R", (), {"text": next(texts)})()
+
+    t = OpenAITranscriber.__new__(OpenAITranscriber)
+    t.client = type("C", (), {"audio": type("A", (), {"transcriptions": FakeTranscriptions()})()})()
+    prompt = "Science; Electricity, Ohm's law"
+    assert asyncio.run(t(audio=b"x", filename="a.m4a", prompt=prompt)) == ""
+    assert asyncio.run(t(audio=b"x", filename="a.m4a", prompt=prompt)) == "Current is the flow of charge"

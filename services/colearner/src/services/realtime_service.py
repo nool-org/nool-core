@@ -42,6 +42,7 @@ from src.services.chained_service import build_chained_system_prompt
 from src.services.evaluation import grade_transcript
 from src.services.cost_service import add_realtime_usage, add_transcription_usage, realtime_cost_report
 from src.services.session_store import SessionState, session_store
+from shared.transcripts import echoes_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,11 @@ HOW THE SESSION GOES (this is a real-time spoken call):
 """
 
 
+def transcribe_prompt(config: SessionConfig) -> str:
+    """Vocabulary, not a sentence: the transcriber can echo its prompt on silence (see echoes_prompt)."""
+    return f"{config.subject}; {config.chapter_name}"
+
+
 def build_session(config: SessionConfig) -> dict:
     if config.questions:
         instructions = build_question_instructions(config)
@@ -331,8 +337,7 @@ def build_session(config: SessionConfig) -> dict:
                 "transcription": {
                     "model": TRANSCRIBE_MODEL,
                     "language": "en",
-                    "prompt": f"A school student in India answering {config.subject} questions about "
-                              f"{config.chapter_name}, sometimes mixing in Tamil, Hindi or other Indian-language words.",
+                    "prompt": transcribe_prompt(config),
                 },
                 # far_field: students use phones on speakerphone.
                 "noise_reduction": {"type": "far_field"},
@@ -574,6 +579,8 @@ async def _handle_event(call: RealtimeCall, ws, event: dict) -> None:
     elif kind == "conversation.item.input_audio_transcription.completed":
         entry = call.items.setdefault(event["item_id"], {"role": "user", "text": ""})
         entry["text"] = (event.get("transcript") or "").strip()
+        if echoes_prompt(entry["text"], transcribe_prompt(call.state.config)):
+            entry["text"] = ""  # the transcriber's own prompt, not the student - noise
         if not entry["text"] and call.item_kind.get(event["item_id"]) == "answer":
             _not_an_answer(call, event["item_id"])
         elif call.item_kind.get(event["item_id"]) in ("answer", "follow_up") and _repeat_request(entry["text"]):

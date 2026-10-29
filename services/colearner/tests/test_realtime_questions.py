@@ -266,6 +266,21 @@ def test_repeat_request_and_noise_are_not_answers(monkeypatch, short_call):
     assert call.progress[1]["first_item"] == "u1" and call.item_kind["u1"] == "answer"
 
 
+def test_transcript_echoing_the_prompt_is_noise_not_an_answer(monkeypatch, short_call):
+    """AI-001 / T-006: on silence the transcriber returned its own prompt, stored as the answer."""
+    config = _config(2)
+    echo = rs.transcribe_prompt(config) + "."
+    events = [
+        *_assistant("a0", "Hi! Are you ready?"), *_user("u0", "Yes"),
+        _tool("ask_question", 1, "c1"), *_assistant("a1", "Question 1 text?"),
+        *_user("u1echo", echo),
+    ]
+    call, _ = _run_sideband(monkeypatch, FakeWS(events), config)
+    assert call.item_kind["u1echo"] == "noise"
+    assert rs.question_answers(call)[0]["first_answer"] is None
+    assert echo not in rs._transcript_text(rs.transcript_turns(call))
+
+
 def test_late_repeat_transcript_hands_the_answer_to_the_next_turn():
     call = rs.RealtimeCall(call_id="c", owner_ref="o", state=rs.session_store.create_session(_config(2)))
     call.current = 1

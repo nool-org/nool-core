@@ -156,5 +156,5 @@ async def _vocabulary(session: AsyncSession, question: PracticeQuestion) -> str:
     topic = await session.get(Topic, question.topic_id) if question.topic_id else None
     subject = await session.get(Subject, chapter.subject_id) if chapter else None
     about = ", ".join(w for w in [chapter.name if chapter else None, topic.name if topic else None] if w)
-    return (f"A school student in India speaking about {subject.name if subject else 'a school subject'}"
-            + (f": {about}" if about else "") + ", sometimes mixing in Tamil, Hindi or other Indian-language words.")[:900]
+    # vocabulary, not a sentence: on silence the transcriber can echo it (generation drops echoes)
+    return "; ".join(w for w in [subject.name if subject else None, about] if w)[:900]

@@ -97,7 +97,7 @@ async def test_answer_is_transcribed_graded_and_stored_without_the_audio(flow):
                    "xp_awarded": 15}
     assert flow.recorded == [80] and session.commits == 1
     prompt = flow.transcribed[0][2]
-    assert flow.transcribed[0][1] == "audio/m4a" and "Science: Light" in prompt
+    assert flow.transcribed[0][1] == "audio/m4a" and "Science; Light" in prompt
     # never the question: the generative transcriber then "hears" a written answer to it
     assert "light bend in water" not in prompt
     assert flow.transcribed[0][3] == "auto"  # mixed-language answers aren't forced into English
