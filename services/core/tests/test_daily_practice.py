@@ -745,3 +745,12 @@ async def test_a_generated_question_worded_like_a_pool_pick_is_not_added(db_sess
     monkeypatch.setattr(service, "_from_pool", only_first)
     chosen = await service._fill(db_session, s.student, s.cls, slots, service.today_ist(), "seed")
     assert [q.id for _, q in chosen] == [first.id]
+
+
+def test_c016_only_real_repeats_are_near_duplicates():
+    """Stems that share boilerplate or differ in a number are different questions."""
+    seen = [service.words_of("Which of the following is a metal that reacts with cold water?")]
+    assert not service.near_duplicate("Which of the following is a non-metal that is a good conductor?", seen)
+    assert not service.near_duplicate("Find the value of x if 3x + 5 = 20.", [service.words_of("Find the value of x if 2x + 7 = 15.")])
+    assert not service.near_duplicate("UNDERSTAND catalog question 2 on electric current?",
+                                      [service.words_of("UNDERSTAND catalog question 1 on electric current?")])

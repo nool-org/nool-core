@@ -87,19 +87,29 @@ def sentences(text: str) -> set[str]:
 
 
 _STOP = frozenset("what which that this with from when does about following these those their there into have been "
-                  "will would should could because while where than then them they your".split())
+                  "will would should could because while where than then them they your question catalog choose "
+                  "correct option options answer find value given state write explain".split())
 
 
 def words_of(text: str) -> frozenset[str]:
-    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 3 and w not in _STOP)
+    """Content words of a stem: long non-stopwords, and every number (so 'question 1' and 'question 2' differ)."""
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower())
+                     if w.isdigit() or (len(w) > 3 and w not in _STOP))
 
 
 def near_duplicate(text: str, seen: list[frozenset[str]]) -> bool:
-    """True when most of the stem's content words are in one already picked (C-012: three differently
-    worded "what does silver chloride do in sunlight" questions in one quiz). ponytail: word overlap,
-    not meaning - two questions on one idea with no shared words still pass."""
+    """True when a stem is the same question as one already picked: at least 5 shared content words,
+    at least 80% of the shorter stem's, and the same numbers (C-012: three differently worded
+    "what does silver chloride do in sunlight" questions in one quiz; two questions that only share
+    'Which of the following' or 'Find the value of x' are not). ponytail: word overlap, not meaning."""
     mine = words_of(text)
-    return any(len(mine & other) >= 4 and len(mine & other) >= 0.7 * min(len(mine), len(other)) for other in seen)
+    nums = {w for w in mine if w.isdigit()}
+    for other in seen:
+        shared = len(mine & other)
+        if (shared >= 5 and shared >= 0.8 * min(len(mine), len(other))
+                and nums == {w for w in other if w.isdigit()}):
+            return True
+    return False
 
 
 _PART = re.compile(r"^\s*\(?(?:[a-hA-H]|[ivx]{1,4}|\d{1,2})[.)]\s*")  # "(b) " / "ii. " / "3) " before a sub-question

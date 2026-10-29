@@ -175,5 +175,5 @@ async def test_two_questions_worded_alike_are_not_both_picked(db_session):
     await db_session.flush()
     picked = _uids(await select_questions(
         db_session, dataset_ids=[s["imp"].id], chapter_id=s["chapter"].id, topic_id=s["topic"].id,
-        slots=[Slot(B.UNDERSTAND, D.MEDIUM)] * 3, text_only=True, seed=1))
+        slots=[Slot(B.UNDERSTAND, D.MEDIUM)] * 2, text_only=True, seed=1))
     assert len({"m1", "m2"} & set(picked)) == 1 and "m3" in picked

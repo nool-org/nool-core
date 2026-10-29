@@ -365,17 +365,22 @@ async def _bank_relaxed_fill(session, *, test, topic_id, dataset_ids, open_slots
     used_words = [words_of(d.text) for d in drafts.values()]
     free = iter(open_slots)
     slot = next(free, None)
-    for q in (await session.execute(query)).scalars():
-        if slot is None:
-            break
-        uid = question_uid(q)
-        if uid in used_uids or sentences(q.text) & used_sentences or near_duplicate(q.text, used_words):
-            continue
-        used_uids.add(uid)
-        used_sentences |= sentences(q.text)
-        used_words.append(words_of(q.text))
-        drafts[slot] = _from_bank(q)
-        slot = next(free, None)
+    candidates = list((await session.execute(query)).scalars())
+    # C-014: questions worded like a picked one go last, but always fill the slots before any generation
+    for allow_alike in (False, True):
+        for q in candidates:
+            if slot is None:
+                break
+            uid = question_uid(q)
+            if uid in used_uids or sentences(q.text) & used_sentences:
+                continue
+            if not allow_alike and near_duplicate(q.text, used_words):
+                continue
+            used_uids.add(uid)
+            used_sentences |= sentences(q.text)
+            used_words.append(words_of(q.text))
+            drafts[slot] = _from_bank(q)
+            slot = next(free, None)
 
 
 async def _legacy_fill(session, *, test, slots, open_slots, drafts, fallback_dataset_id) -> None:
