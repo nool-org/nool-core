@@ -323,7 +323,7 @@ async def get_my_homework_questions(
             dataset_id=str(q.dataset_id),
             text=q.text,
             is_boss=q.is_boss,
-            figure_svg=svgs.get(q.source_question_id),
+            **svgs.get(q.source_question_id, {}),
         )
         for q in rows
     ]

@@ -61,7 +61,7 @@ def _item_out(item, question, topic_name, svgs: dict | None = None) -> PracticeI
         # never the answer of an unanswered question: correct_index stays server-side
         options=question.options if item.kind == "mcq" else None,
         spec=question_types.public(item.kind, question.spec or {}) if item.kind in question_types.KINDS else None,
-        figure_svg=(svgs or {}).get(question.source_question_id),
+        **(svgs or {}).get(question.source_question_id, {}),
         answered=item.answered_at is not None, result=result)
 
 

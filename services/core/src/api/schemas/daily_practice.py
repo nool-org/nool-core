@@ -48,6 +48,7 @@ class PracticeItemOut(CamelModel):
     options: list[str] | None
     spec: dict | None = None  # the special kinds' question parts - never which choice is right
     figure_svg: str | None = None  # a picture question's drawing (SVG markup)
+    figure_url: str | None = None  # or its image file (ASSET_BASE_URL)
     answered: bool
     result: McqResultOut | VoiceResultOut | SpecialResultOut | None
 

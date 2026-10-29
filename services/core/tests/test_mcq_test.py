@@ -270,7 +270,7 @@ async def test_questions_come_from_the_bank_and_never_reveal_answers(schema, mon
     assert all(q.text.split()[1] == q.concept for q in out.questions)  # bank question on the slot's concept
     wire = out.model_dump(by_alias=True)
     assert wire["answered"] == [] and wire["speedMode"] is False and wire["lifelinesLeft"] == ["fifty_fifty", "ask_milo"]
-    assert all(set(q) == {"id", "text", "options", "bloomLevel", "concept", "isBoss", "gapConcept", "figureSvg"}
+    assert all(set(q) == {"id", "text", "options", "bloomLevel", "concept", "isBoss", "gapConcept", "figureSvg", "figureUrl"}
                for q in wire["questions"])
     assert [q.is_boss for q in out.questions] == [False] * 9 + [True]
     assert all(q.gap_concept == (q.concept if q.concept != "power" else None) for q in out.questions)

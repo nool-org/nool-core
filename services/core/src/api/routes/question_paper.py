@@ -893,7 +893,7 @@ def _enum_or_none(enum, value):
 async def _paper_questions_out(session: AsyncSession, paper_id: str) -> ListEnvelope[QuestionPaperQuestionOut]:
     questions = await load_questions(session, paper_id)
     svgs = await figure_svgs(session, [q.dataset_question_id for q in questions])
-    items = [question_out(q).model_copy(update={"figure_svg": svgs.get(q.dataset_question_id)}) for q in questions]
+    items = [question_out(q).model_copy(update=svgs.get(q.dataset_question_id, {})) for q in questions]
     return ListEnvelope(items=items, total=len(items))
 
 
