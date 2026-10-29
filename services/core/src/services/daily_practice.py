@@ -313,8 +313,9 @@ async def _generate_special(session: AsyncSession, school_class: SchoolClass, sl
             n = g.get("slot_index", -1)
             if not 0 <= n < len(mine) or mine[n] in made or g.get("kind") != slots[mine[n]].kind:
                 continue
+            spec = g.get("spec") or {}
             try:
-                question_types.validate(g["kind"], g.get("spec") or {})
+                question_types.validate(g["kind"], spec)
             except question_types.SpecError as exc:
                 logger.warning("special_question_rejected", extra={"kind": g["kind"], "reason": str(exc)})
                 continue
