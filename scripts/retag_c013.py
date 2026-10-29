@@ -18,8 +18,9 @@ async def main(args: list[str]) -> None:
     from sqlalchemy import delete, func, select, update
 
     from src.config.settings import get_settings
-    from src.domain.models import (Chapter, DatasetQuestion, Homework, HomeworkAnswer, HomeworkQuestion,
-                                   PracticeQuestion, Topic)
+    from src.domain.models import (Chapter, DatasetQuestion, Homework, HomeworkQuestion, PracticeQuestion,
+                                   Topic)
+    from src.domain.models.homework import HomeworkAnswer
     from src.repositories import get_session
     from src.repositories.database import init_engine
 
