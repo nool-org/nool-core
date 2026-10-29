@@ -335,8 +335,8 @@ def build_session(config: SessionConfig) -> dict:
         "audio": {
             "input": {
                 "transcription": {
+                    # no "language": forcing "en" garbled mixed Tamil/Hindi-English answers (as daily practice)
                     "model": TRANSCRIBE_MODEL,
-                    "language": "en",
                     "prompt": transcribe_prompt(config),
                 },
                 # far_field: students use phones on speakerphone.

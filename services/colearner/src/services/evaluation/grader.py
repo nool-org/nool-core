@@ -96,6 +96,7 @@ Rules:
 - A correct but shallow answer is substantively correct with a moderate score; a correct, well-reasoned answer scores high.
 - These are spoken answers: judge meaning, not wording, grammar or exact terms - a correct idea in everyday words counts.
 - Students may mix English with Tamil, Hindi, Telugu, Kannada, Malayalam or another language (Tanglish, Hinglish): judge the meaning regardless of the language mix, never mark it down.
+- A transcript may contain Tamil, Hindi or other scripts: judge its meaning and quote it as written in student_response.
 - Every student turn tagged with the same [Qn] is one answer: a reply to the Co-Learner's follow-up ("Can you tell me why?", "How would you explain that to a friend?") or after a hint is judged together with the first reply. Ignore turns marked (repeat request) or (noise).
 - Partial credit, against the question's expected key points (or the textbook answer if no rubric): all key points stated correctly = 85-100; about half of them correct = 50-60 (partial, is_substantively_correct true only if the core idea is right); a little relevant but mostly missing = 20-40; none, off-topic or "I don't know" = 0-15. A confidently wrong central claim stays under 40 whatever else is covered.
 - Do NOT include the opening readiness exchange (e.g. "Are you ready to begin?") or closing small talk.
@@ -276,6 +277,7 @@ Rules:
 - A claim that breaks a basic principle (e.g. energy being created or used up) is a misconception, even if worded casually - point "add" at fixing it.
 - This is a spoken answer: judge meaning, not wording, grammar or exact terms - a correct idea in everyday words counts.
 - Students may mix English with Tamil, Hindi, Telugu, Kannada, Malayalam or another language (Tanglish, Hinglish): judge the meaning regardless of the language mix, never mark it down.
+- The answer may contain Tamil, Hindi or other scripts: judge its meaning.
 - Partial credit, against the expected key points (or the textbook answer if none are given): all key points stated correctly = 85-100; about half of them correct = 50-60; a little relevant but mostly missing = 20-40; none, off-topic or "I don't know" = 0-15. A confidently wrong central claim stays under 40 whatever else is covered.
 - If known misconceptions are given and the answer states one, score it under 40."""
 

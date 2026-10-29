@@ -99,6 +99,7 @@ def test_instructions_never_carry_the_answers():
 def test_speakerphone_audio_config():
     audio_in = rs.build_session(_config())["audio"]["input"]
     assert audio_in["noise_reduction"] == {"type": "far_field"}
+    assert "language" not in audio_in["transcription"]  # AI-012: auto-detect, mixed Tamil/Hindi-English
     # speakerphone echo of Milo's own voice must never cut him off - only "Tap to interrupt" does
     assert audio_in["turn_detection"] == {"type": "semantic_vad", "eagerness": "medium",
                                           "interrupt_response": False, "create_response": True}
