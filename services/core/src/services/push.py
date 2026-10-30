@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.logging import get_logger
 from src.config.settings import get_settings
-from src.domain.models.device import UserDevice
+from src.domain.models.device import UserDevice, UserNotificationPref
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 _BATCH = 100  # Expo's per-request message limit
@@ -29,13 +29,26 @@ async def _post(messages: list[dict]) -> dict:
         return response.json()
 
 
-async def send_push(session: AsyncSession, user_ids, title: str, body: str, data: dict | None = None) -> int:
-    """Sends one notification to every registered device of `user_ids`.
+async def _switched_off(session: AsyncSession, user_ids, kind: str) -> set:
+    col = getattr(UserNotificationPref, kind)
+    return set((await session.execute(
+        select(UserNotificationPref.user_id).where(UserNotificationPref.user_id.in_(list(user_ids)), col.is_(False))
+    )).scalars().all())
+
+
+async def send_push(session: AsyncSession, user_ids, title: str, body: str, data: dict | None = None,
+                    kind: str | None = None) -> int:
+    """Sends one notification to every registered device of `user_ids`, except users who switched
+    the alert `kind` (a UserNotificationPref column) off.
     Returns the number of messages handed to Expo (0 when disabled).
     Never raises on delivery problems - a push is best-effort. Tokens Expo
     reports as DeviceNotRegistered are deleted; caller commits."""
     if not push_enabled() or not user_ids:
         return 0
+    if kind:
+        user_ids = [u for u in user_ids if u not in await _switched_off(session, user_ids, kind)]
+        if not user_ids:
+            return 0
     tokens = list((await session.execute(
         select(UserDevice.expo_push_token).where(UserDevice.user_id.in_(list(user_ids)))
     )).scalars().all())
@@ -57,7 +70,8 @@ async def send_push(session: AsyncSession, user_ids, title: str, body: str, data
     return sent
 
 
-async def notify(session: AsyncSession, user_ids, title: str, body: str, data: dict | None = None) -> None:
+async def notify(session: AsyncSession, user_ids, title: str, body: str, data: dict | None = None,
+                 kind: str | None = None) -> None:
     """send_push for a trigger, called after the trigger's own commit: commits
     the pruned tokens, and logs instead of raising - a push never fails the
     request that caused it.
@@ -65,7 +79,7 @@ async def notify(session: AsyncSession, user_ids, title: str, body: str, data: d
     batch); move to a background task if that bites."""
     try:
         async with session.begin_nested():  # a failure rolls back only this, not the caller's loaded objects
-            await send_push(session, user_ids, title, body, data)
+            await send_push(session, user_ids, title, body, data, kind)
         await session.commit()
     except Exception as exc:
         logger.warning("push_notify_failed", extra={"error": str(exc), "title": title})

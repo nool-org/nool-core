@@ -31,7 +31,7 @@ class QuizStartIn(CamelModel):
 
 
 class QuizAnalysisOut(CamelModel):
-    score_percent: int
+    score_percent: int | None  # None: nothing was answered
     per_bloom: dict[str, int]
     previous_per_bloom: dict[str, int] | None
     lagging: list[str]

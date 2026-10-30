@@ -5,14 +5,14 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import Field
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_current_app_user, get_db_session
 from src.api.schemas.common import CamelModel
 from src.domain.models import User
-from src.domain.models.device import UserDevice
+from src.domain.models.device import UserDevice, UserNotificationPref
 
 router = APIRouter(prefix="/api/v1", tags=["devices"])
 
@@ -57,3 +57,31 @@ async def unregister_device(
     )
     await session.commit()
     return Response(status_code=204)
+
+
+class NotificationPrefs(CamelModel):
+    results_ready: bool = True
+    answers_to_review: bool = True
+    daily_summary: bool = True
+
+
+@router.get("/me/notification-prefs", summary="My per-alert push switches (all on until changed)")
+async def get_notification_prefs(
+    user: User = Depends(get_current_app_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> NotificationPrefs:
+    row = (await session.execute(select(UserNotificationPref).where(UserNotificationPref.user_id == user.id))).scalar_one_or_none()
+    return NotificationPrefs.model_validate(row, from_attributes=True) if row else NotificationPrefs()
+
+
+@router.put("/me/notification-prefs", summary="Set my per-alert push switches")
+async def put_notification_prefs(
+    body: NotificationPrefs,
+    user: User = Depends(get_current_app_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> NotificationPrefs:
+    values = body.model_dump()
+    await session.execute(insert(UserNotificationPref).values(user_id=user.id, **values).on_conflict_do_update(
+        index_elements=[UserNotificationPref.user_id], set_=values))
+    await session.commit()
+    return body

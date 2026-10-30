@@ -22,6 +22,8 @@ from src.api.schemas.daily_practice import (
     PracticeItemOut,
     PracticeMcqAnswerIn,
     PracticeMcqAnswerOut,
+    PracticeLineIn,
+    PracticeLineOut,
     PracticeResponseIn,
     PracticeResponseOut,
     SpecialResultOut,
@@ -119,6 +121,23 @@ async def answer_my_practice_response(
     await daily_practice.answer_special(session, item, question, body.response)
     await session.commit()
     return PracticeResponseOut(result=_special_result(item, question), xp_awarded=item.xp_awarded or 0)
+
+
+@router.post("/me/daily-practice/{session_id}/items/{item_id}/line")
+async def check_my_fix_line(
+    session_id: str,
+    item_id: str,
+    body: PracticeLineIn,
+    user: User = Depends(require_role(Role.STUDENT)),
+    session: AsyncSession = Depends(get_db_session),
+) -> PracticeLineOut:
+    """Fix Milo, first tap: is the circled line the slip? (see daily_practice.check_line)"""
+    _, item, question = await daily_practice.load_item_for_student(session, session_id, item_id, user)
+    found = await daily_practice.check_line(session, item, question, body.step)
+    await session.commit()
+    if found is None:
+        return PracticeLineOut(result=_special_result(item, question), xp_awarded=item.xp_awarded or 0)
+    return PracticeLineOut(found=found, try_again=not found)
 
 
 @router.post("/me/daily-practice/{session_id}/complete")

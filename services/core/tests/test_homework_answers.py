@@ -358,7 +358,7 @@ async def test_questions_endpoint_flags_the_boss(schema):
     hw, _, _ = await _homework_with_questions(db, s)
     items = (await student_homework.get_my_homework_questions(str(hw.id), user=s["student"], session=db)).items
     assert [q.model_dump(by_alias=True)["isBoss"] for q in items] == [False, True]
-    assert not any("answer" in q.model_dump(by_alias=True) for q in items)  # students never get answers
+    assert [q.answer for q in items] == ["a1", "a2"]  # UI-043: 'Show the answer' needs the model answer
 
 
 async def test_teacher_questions_list_flags_the_boss(schema):

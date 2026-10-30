@@ -24,15 +24,17 @@ def percent(correct: int, total: int) -> int:
 
 def growth_entries(kind: str, after_raw: dict[str, int], before: dict[str, int],
                    asked: dict[str, int] | None = None) -> list[dict]:
-    """One entry per key measured on the MCQ test that also has a voice-test score;
-    with `asked` (questions per key), only keys asked at least MIN_ASKED times."""
+    """One entry per key measured on the MCQ test; with `asked` (questions per key), only keys asked
+    at least MIN_ASKED times. A Bloom level the voice test never scored is kept with before/delta None
+    ('Not assessed' for the student); a concept without a voice score is left out."""
     out = []
     for key, raw in after_raw.items():
-        if before.get(key) is None or (asked is not None and asked.get(key, 0) < MIN_ASKED):
+        b = before.get(key)
+        if (b is None and kind != "bloom") or (asked is not None and asked.get(key, 0) < MIN_ASKED):
             continue
         after = corrected(raw)
-        out.append({"key": key, "kind": kind, "before": before[key], "afterCorrected": after,
-                    "delta": after - before[key]})
+        out.append({"key": key, "kind": kind, "before": b, "afterCorrected": after,
+                    "delta": None if b is None else after - b})
     return out
 
 
@@ -65,6 +67,7 @@ async def class_growth(session: AsyncSession, test: VoiceTest) -> dict:
                          "delta": result["after"] - result["before"] if result.get("before") is not None else None,
                          "flagged": result.get("after") is not None and result["after"] < FLAG_BELOW})
         entries.extend(result.get("growth") or [])
+    entries = [e for e in entries if e["before"] is not None]  # class view: only levels with a voice score
     bloom = _averaged([e for e in entries if e["kind"] == "bloom"])
     concepts = _averaged([e for e in entries if e["kind"] == "concept"])
     return {

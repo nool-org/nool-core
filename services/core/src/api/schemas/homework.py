@@ -50,21 +50,21 @@ class AssignHomeworkIn(CamelModel):
 
 
 class StudentHomeworkQuestionOut(CamelModel):
-    """Student-facing: never carries the answer (students write their own)."""
+    """Student-facing. Carries the model answer for 'Show the answer' (the student writes first, then checks)."""
     id: str
     homework_id: str
     order: int
     bloom_level: BloomLevel
     dataset_id: str
     text: str
+    answer: str
     is_boss: bool = False  # auto homework's double-XP question
     figure_svg: str | None = None  # a picture question's drawing (SVG markup)
     figure_url: str | None = None  # or its image file (ASSET_BASE_URL)
 
 
 class HomeworkQuestionOut(StudentHomeworkQuestionOut):
-    """Teacher-facing: includes the model answer."""
-    answer: str
+    """Teacher-facing (same fields since the student sees the answer too)."""
 
 
 class HomeworkAnswerIn(CamelModel):

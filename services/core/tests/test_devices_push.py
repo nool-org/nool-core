@@ -19,7 +19,7 @@ from sqlalchemy.schema import CreateTable
 
 from src.api.routes import devices
 from src.domain.models import Role, User, UserStatus
-from src.domain.models.device import UserDevice
+from src.domain.models.device import UserDevice, UserNotificationPref
 from src.services import push
 
 REVISION = "e5f1c7a2d9b3"
@@ -204,3 +204,27 @@ async def test_send_push_swallows_expo_errors(schema, monkeypatch):
         raise httpx.ConnectError("no network")
     monkeypatch.setattr(push, "_post", down)
     assert await push.send_push(db, [user.id], "a", "b") == 0
+
+
+# ------------------------------------------------- per-alert preferences (T-049)
+async def test_notification_prefs_default_on_and_push_respects_them(schema, monkeypatch):
+    db = schema
+    await _ddl(db, lambda c: inspect(c).has_table("user_notification_prefs") or
+               c.execute(CreateTable(UserNotificationPref.__table__, include_foreign_key_constraints=[])))
+    on, off = await _user(db, Role.TEACHER), await _user(db, Role.TEACHER)
+    for u in (on, off):
+        db.add(UserDevice(user_id=u.id, expo_push_token=_token(), platform="ios"))
+    await db.flush()
+    assert (await devices.get_notification_prefs(user=on, session=db)).daily_summary is True
+    saved = await devices.put_notification_prefs(devices.NotificationPrefs(daily_summary=False), user=off, session=db)
+    assert (saved.results_ready, saved.daily_summary) == (True, False)
+    assert (await devices.get_notification_prefs(user=off, session=db)).daily_summary is False
+    monkeypatch.setenv("EXPO_PUSH_ENABLED", "true")
+    sent = []
+
+    async def fake(messages):
+        sent.extend(messages)
+        return {"data": [{"status": "ok"} for _ in messages]}
+    monkeypatch.setattr(push, "_post", fake)
+    assert await push.send_push(db, [on.id, off.id], "t", "b", kind="daily_summary") == 1  # only the one still on
+    assert await push.send_push(db, [on.id, off.id], "t", "b", kind="results_ready") == 2

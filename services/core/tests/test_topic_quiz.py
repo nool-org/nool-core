@@ -12,7 +12,7 @@ from sqlalchemy import select
 from shared.errors import ConflictError, NotFoundError
 from src.api.routes import daily_practice as practice_routes
 from src.api.routes import topic_quizzes as routes
-from src.api.schemas.daily_practice import PracticeMcqAnswerIn
+from src.api.schemas.daily_practice import PracticeLineIn, PracticeMcqAnswerIn
 from src.api.schemas.topic_quiz import QuizStartIn
 from src.domain.models import (
     AssignmentTargetMode,
@@ -395,6 +395,7 @@ async def test_a_spoken_answer_counts_at_its_level_and_feeds_the_analysis(db_ses
     a = (await _finish(db_session, s, quiz)).analysis  # the other spoken answer is skipped
 
     assert a.per_bloom[U] == 67 and a.lagging == [U] and a.outcome == "homework"  # 2 MCQs right, spoken 30
+    assert a.score_percent == 89  # UI-048: 8 right of 9 answered; the skipped spoken question is not a miss (8/10 = 80)
     [missed] = calls[0]["missed"]
     assert missed["question"].startswith("(answered aloud)") and missed["chosen"] == "current goes up I think"
 
@@ -457,6 +458,11 @@ async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, m
     await _answer(db_session, s, quiz, {R, U, A, AN})  # the dropped make_your_own fell back to an Analyze MCQ
     fix = next(i for i in quiz.items if i.kind == "fix_steps")
     right_reason = next(i for i, r in enumerate(stored.spec["reasons"]) if r["correct"])  # shuffled when stored
+    # S-019: Fix Milo's first tap only says whether the circled line is the slip - never which one it is
+    line = lambda n: practice_routes.check_my_fix_line(quiz.id, fix.id, PracticeLineIn(step=n), user=s.student, session=db_session)
+    wrong = await line(0)
+    assert (wrong.found, wrong.try_again, wrong.result) == (False, True, None)
+    assert (await line(2)).found is True  # FIX's slip is line 3; nothing is stored yet
     for item, response in ((who, {"pick": stored.spec["correct"], "reason": right_reason}), (fix, {"step": 0, "fix": 0})):
         out = await practice_routes.answer_my_practice_response(quiz.id, item.id, PracticeResponseIn(response=response),
                                                                  user=s.student, session=db_session)
@@ -465,6 +471,7 @@ async def test_a_maths_quiz_runs_its_own_question_types_end_to_end(db_session, m
     again = await practice_routes.answer_my_practice_response(quiz.id, fix.id, PracticeResponseIn(
         response={"step": 2, "fix": 0}), user=s.student, session=db_session)
     assert again.result.score == 0  # the first answer counts
+    assert (await line(1)).result.score == 0  # a check after it just returns the stored result
 
     a = (await _finish(db_session, s, quiz)).analysis
     assert a.per_bloom["ANALYZE"] == 100 and a.per_bloom["EVALUATE"] == 0 and "EVALUATE" in a.lagging

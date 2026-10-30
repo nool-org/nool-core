@@ -47,3 +47,5 @@ class TestInsightsOut(CamelModel):
     generated_at: datetime
     # true while the model's words are still being written: these are the template words, ask again shortly
     words_pending: bool = False
+    # the words could not be written (failed, or not ready after GIVE_UP_SECONDS): the app says the recap isn't available
+    words_failed: bool = False

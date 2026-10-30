@@ -778,6 +778,30 @@ async def answer_special(session: AsyncSession, item: DailyPracticeItem, questio
     await record_item_result(session, item, score=graded["score"], correct=graded["correct"])
 
 
+LINE_TRIES = 2  # Fix Milo: a wrong circled line gets one gentle retry, the second wrong one is scored 0
+
+
+async def check_line(session: AsyncSession, item: DailyPracticeItem, question: PracticeQuestion, step: int) -> bool | None:
+    """Fix Milo step 1 (S-019): True = the circled line is the slip (nothing stored: the fix and the
+    score come with the second tap); False = wrong, try again, and None = wrong again, the item is
+    now answered with score 0 (answer_special). Never says which line is the slip."""
+    if item.kind != "fix_steps":
+        raise ValidationError("This question is answered another way.")
+    await session.execute(select(DailyPracticeItem).where(DailyPracticeItem.id == item.id).with_for_update()
+                          .execution_options(populate_existing=True))
+    if item.answered_at is not None:
+        return None
+    if step == (question.spec or {}).get("wrong_step"):
+        return True
+    tries = int((item.response or {}).get("tries", 0)) + 1
+    if tries >= LINE_TRIES:
+        await answer_special(session, item, question, {"step": step, "fix": 0})
+        return None
+    item.response = {"tries": tries}
+    await session.flush()
+    return False
+
+
 def explanation(question: PracticeQuestion) -> str:
     return explanation_of(question.options, question.correct_index, question.explanation)
 
