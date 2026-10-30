@@ -1091,6 +1091,10 @@ async def update_paper_question(
     return await _paper_questions_out(session, paper_id)
 
 
+def is_choice_question(question) -> bool:
+    return bool(question.options) or str(getattr(question.question_type, "value", question.question_type)) == "MCQ"
+
+
 @router.get("/question-papers/{paper_id}/questions/{question_id}/candidates", summary="Shuffle picker")
 async def get_question_candidates(
     paper_id: str,
@@ -1109,7 +1113,9 @@ async def get_question_candidates(
 
     chapter_refs, topic_names = await _resolve_kg_scope(session, paper)
     candidates: list[dict] = []
-    if chapter_refs:
+    # C-017: an AI alternative is text only; on an MCQ it would sit above the old choices and key.
+    # An MCQ is shuffled only with whole bank questions (_diagram_candidates), which bring their own options.
+    if chapter_refs and not is_choice_question(question):
         subject_name, board, grade = await _paper_kg_identity(session, paper)
         candidates = await kg_client.generate_replacement_candidates(
             subject=subject_name,
