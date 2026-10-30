@@ -411,3 +411,24 @@ async def test_after_a_failed_attempt_the_template_is_final_for_a_while(db, monk
     insights._failed_at[result.id] = time.monotonic()  # it just failed
     out = await insights_route.get_test_insights(test_id=str(test.id), user=student, session=db, authorization=None)
     assert out.words_pending is False and not insights._in_flight
+
+
+async def test_words_not_ready_after_three_minutes_are_reported_failed_not_pending(db, monkeypatch):
+    """UI-046: 'Milo is still writing' must not stay forever; after GIVE_UP_SECONDS it is words_failed."""
+    test, student = await _seed(db)
+    result = (await db.execute(select(StudentTestResult).where(StudentTestResult.test_id == test.id))).scalar_one()
+
+    async def fake_fill(result_id, fingerprint, facts, token, session_factory=None):
+        pass
+
+    monkeypatch.setattr(insights, "_fill_words", fake_fill)
+    insights._in_flight.clear()
+    insights._failed_at.clear()
+    insights._started_at.clear()
+    insights._in_flight.add(result.id)  # the job is (still) running
+    insights._started_at[result.id] = time.monotonic() - insights.GIVE_UP_SECONDS - 1
+    out = await insights_route.get_test_insights(test_id=str(test.id), user=student, session=db, authorization=None)
+    assert (out.words_pending, out.words_failed) == (False, True)
+    insights._started_at[result.id] = time.monotonic()
+    out = await insights_route.get_test_insights(test_id=str(test.id), user=student, session=db, authorization=None)
+    assert (out.words_pending, out.words_failed) == (True, False)

@@ -435,7 +435,10 @@ async def test_no_growth_for_a_level_the_voice_result_did_not_assess(schema, mon
     _no_generation(monkeypatch)
     _, _, out = await _attempt(db, s)
     assert "EVALUATE" in out.per_bloom  # asked on the re-check ...
-    assert "EVALUATE" not in {g.key for g in out.growth if g.kind == "bloom"}  # ... but no 'before' to grow from
+    ev = next(g for g in out.growth if g.key == "EVALUATE" and g.kind == "bloom")  # S-012: shown, not hidden ...
+    assert (ev.before, ev.delta) == (None, None)  # ... as 'Not assessed': no 'before' to grow from
+    cls = await routes.get_test_growth(str(s["test"].id), user=s["teacher"], session=db)
+    assert "EVALUATE" not in {b.level for b in cls.per_bloom}  # class view still skips it
 
 
 async def test_attempt_before_opening_and_on_someone_elses_test(schema, monkeypatch):

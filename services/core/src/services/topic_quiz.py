@@ -391,7 +391,8 @@ async def finish(session: AsyncSession, quiz: DailyPracticeSession) -> dict:
             label = test.title
         topic = await session.get(Topic, topic_id)
         quiz.per_bloom = scores
-        quiz.score_percent = round(100 * sum(bool(i.correct) for i, _, _ in items) / len(items))
+        # right / answered: a skipped spoken question is not in `items`; none answered = no percentage (UI-048)
+        quiz.score_percent = round(100 * sum(bool(i.correct) for i, _, _ in items) / len(items)) if items else None
         quiz.analysis = {**await _analysis(session, quiz, topic, scores, lagging, items, label),
                          "focus_topic_id": str(topic.id)}
         quiz.outcome = outcome_of(quiz.attempt, lagging)

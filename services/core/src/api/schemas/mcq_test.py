@@ -117,9 +117,9 @@ class RankChangeOut(CamelModel):
 class GrowthOut(CamelModel):
     key: str
     kind: Literal["bloom", "concept"]
-    before: int
+    before: int | None  # None: the voice test never scored this level ("Not assessed")
     after_corrected: int
-    delta: int
+    delta: int | None
 
 
 class McqAttemptOut(CamelModel):

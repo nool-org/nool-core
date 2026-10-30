@@ -395,6 +395,7 @@ async def test_a_spoken_answer_counts_at_its_level_and_feeds_the_analysis(db_ses
     a = (await _finish(db_session, s, quiz)).analysis  # the other spoken answer is skipped
 
     assert a.per_bloom[U] == 67 and a.lagging == [U] and a.outcome == "homework"  # 2 MCQs right, spoken 30
+    assert a.score_percent == 89  # UI-048: 8 right of 9 answered; the skipped spoken question is not a miss (8/10 = 80)
     [missed] = calls[0]["missed"]
     assert missed["question"].startswith("(answered aloud)") and missed["chosen"] == "current goes up I think"
 

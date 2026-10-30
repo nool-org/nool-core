@@ -303,8 +303,8 @@ async def get_my_homework_questions(
     user: User = Depends(require_role(Role.STUDENT)),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListEnvelope[StudentHomeworkQuestionOut]:
-    """The offline-capable Q&A set - the client caches this on-device. No
-    answers: the student writes their own."""
+    """The offline-capable Q&A set - the client caches this on-device. Carries the
+    model answer for 'Show the answer' (B24: the student writes first, then checks)."""
     await _progress_in(session, homework_id, user.id)
     result = await session.execute(
         select(HomeworkQuestion)
@@ -322,6 +322,7 @@ async def get_my_homework_questions(
             bloom_level=q.bloom_level,
             dataset_id=str(q.dataset_id),
             text=q.text,
+            answer=q.answer,
             is_boss=q.is_boss,
             **svgs.get(q.source_question_id, {}),
         )

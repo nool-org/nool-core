@@ -56,6 +56,8 @@ RETRY_AFTER_FAILURE_SECONDS = 120  # after a failed attempt the template words a
 
 _in_flight: set[uuid.UUID] = set()  # results whose words are being written right now
 _failed_at: dict[uuid.UUID, float] = {}
+_started_at: dict[uuid.UUID, float] = {}  # when the words job first started (kept until the words arrive)
+GIVE_UP_SECONDS = 180  # UI-046: no words after this long = "Milo's recap isn't available for this one"
 _tasks: set[asyncio.Task] = set()  # keeps a running task from being garbage collected
 
 
@@ -169,6 +171,7 @@ async def _fill_words(result_id: uuid.UUID, fingerprint: list, facts: dict, toke
                                      "generated_at": datetime.now(timezone.utc).isoformat()}
             await session.commit()
         _failed_at.pop(result_id, None)
+        _started_at.pop(result_id, None)
     except Exception as exc:  # any failure -> the template words stay, never a 500
         _failed_at[result_id] = time.monotonic()
         logger.warning("insights_words_fallback", extra={"result_id": str(result_id), "reason": str(exc)[:300]})
@@ -183,6 +186,7 @@ def _schedule_words(result_id: uuid.UUID, fingerprint: list, facts: dict, token:
     if time.monotonic() - _failed_at.get(result_id, -1e9) < RETRY_AFTER_FAILURE_SECONDS:
         return False
     _in_flight.add(result_id)
+    _started_at.setdefault(result_id, time.monotonic())
     task = asyncio.get_running_loop().create_task(_fill_words(result_id, fingerprint, facts, token))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
@@ -251,7 +255,7 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
     school_class = await session.get(SchoolClass, test.class_id) if test else None
 
     fingerprint = _fingerprint(result, record, cards)
-    pending = False
+    pending = failed = False
     stored = result.insights_words or {}
     if stored.get("fingerprint") == fingerprint:
         words = {**stored["words"], "key_ideas": {int(k): v for k, v in stored["words"]["key_ideas"].items()}}
@@ -274,6 +278,9 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         generated_at = datetime.now(timezone.utc)
         words = template_words(per_bloom, topics, cards, chapter.name if chapter else None)
         pending = _schedule_words(result.id, fingerprint, facts, token)  # the screen doesn't wait for the model
+        started = _started_at.get(result.id)
+        failed = result.id in _failed_at or (started is not None and time.monotonic() - started > GIVE_UP_SECONDS)
+        pending = pending and not failed  # a retry may still land later, but the screen stops saying "writing"
 
     fallback = template_words(per_bloom, topics, cards, chapter.name if chapter else None)
     out = {
@@ -294,5 +301,6 @@ async def build_test_insights(session: AsyncSession, *, test_id: str, student_id
         "recap_text": words["recap_text"],
         "generated_at": generated_at,
         "words_pending": pending,
+        "words_failed": failed,
     }
     return out
