@@ -346,3 +346,33 @@ async def test_set_b_uses_the_given_name_and_needs_questions(schema, monkeypatch
     out = await parallel_routes.create_parallel(str(s["paper"].id), CreateParallelIn(name="Retest"),
                                                 user=s["teacher"], session=db)
     assert out.name == "Retest"
+
+
+# ---- T-062: a key must not name a different option than the question's stored answer
+async def test_a_key_that_names_another_option_than_the_questions_answer_is_not_stored(schema, monkeypatch):
+    db = schema
+    s = await _seed(db)
+    options = ["Greater with water", "Greater with kerosene", "Same in both", "Less with kerosene"]
+    right, wrong = s["questions"]
+    for q, answer in ((right, "(b)"), (wrong, "Greater with kerosene")):
+        q.question_type, q.options, q.answer = QuestionType.MCQ, options, answer
+
+    def key(items):
+        items[0]["answer"] = "Greater with kerosene, since n(kerosene) > n(water)"  # agrees with (b)
+        items[1]["answer"] = "Greater with water, because water has the higher index"  # contradicts the stored answer
+        return items
+    _fake_key(monkeypatch, [], key)
+
+    out = await key_routes.generate_answer_key(str(s["paper"].id), user=s["teacher"], session=db)
+
+    assert [i.question_id for i in out.items] == [str(right.id)]
+    assert out.conflict_question_ids == [str(wrong.id)]
+
+
+def test_mcq_index_reads_letters_and_option_text_but_not_a_leading_article():
+    from src.services.paper_answer_key import key_contradicts, mcq_index
+
+    options = ["A force of 5 N", "Greater with water", "Greater with kerosene", "Same"]
+    assert [mcq_index(a, options) for a in ("(c)", "c.", "Greater with kerosene because n is higher", "A force of 5 N")] == [2, 2, 2, 0]
+    assert mcq_index("Something else", options) is None
+    assert key_contradicts("(b)", "Greater with kerosene", options) and not key_contradicts("(c)", "Greater with kerosene", options)

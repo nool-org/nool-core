@@ -724,7 +724,8 @@ def _mcq_ok(q: dict) -> bool:
     if (q.get("question_type") or "").upper() != "MCQ":
         return True
     options = q.get("options") or []
-    return len(options) == 4 and all(str(o).strip() for o in options)
+    # four real, different options (T-062: "(a) Greater with water" and "(d) Greater with water" in one question)
+    return len(options) == 4 and all(str(o).strip() for o in options) and len({str(o).strip().lower() for o in options}) == 4
 
 
 def _question_type(value: str | None) -> QuestionType | None:
