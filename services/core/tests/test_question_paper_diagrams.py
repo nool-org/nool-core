@@ -93,7 +93,7 @@ async def test_swap_offers_figure_questions_and_swapping_one_in_brings_its_figur
     target = next(q for q in await _questions(db_session, teacher, seeded) if q.source == "ai")
     candidates = (await question_paper.get_question_candidates(
         seeded["paper_id"], target.id, user=teacher, session=db_session)).items
-    assert [c.text for c in candidates if not c.dataset_question_id] == ["A plain alternative?"]  # figure ref dropped
+    assert [c.text for c in candidates if not c.dataset_question_id] == []  # C-017: an MCQ is shuffled only with whole bank questions
     picture = [c for c in candidates if c.figure_svg]
     assert picture and all(c.dataset_question_id and c.options for c in picture)
 
