@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from src.domain.models import BloomLevel, PaperDifficultyLevel, QuestionPaper, QuestionPaperValidation, QuestionType
+from src.domain.models import Topic, BloomLevel, PaperDifficultyLevel, QuestionPaper, QuestionPaperValidation, QuestionType
 from src.domain.models.question_paper import QuestionPaperQuestion
 from src.services.paper_rules import rules_check
 from src.services.question_selector import _separate_labels, _smooth_curves, concept_full, crowded, over_marked
@@ -55,6 +55,7 @@ def test_graph_pieces_become_one_smooth_curve_and_overlapping_labels_move_apart(
 async def test_rules_check_reports_repeated_concept_over_marked_no_hard_and_missing_figures(db_session):
     teacher, seeded = await _seed_paper_ready_to_generate(db_session)
     paper = await db_session.get(QuestionPaper, uuid.UUID(seeded["paper_id"]))
+    db_session.add(Topic(chapter_id=seeded["chapter_id"], name="Soap and detergents")) # B28: soap is a topic word
     for order, text in enumerate([*SOAP, *OTHER], start=1):
         db_session.add(QuestionPaperQuestion(
             paper_id=paper.id, order=order, marks=3 if order == 1 else 1, text=text, question_type=QuestionType.SHORT_ANSWER,

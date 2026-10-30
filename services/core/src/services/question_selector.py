@@ -214,7 +214,7 @@ def crowded(texts: list[str], total: int | None = None, universe=(), terms=None)
     `universe` (the other questions on offer) shows how common a word is. `terms` (B28): when given, only a word in it
     (the chapters' topic words) counts as an idea. ponytail: word overlap."""
     sets = [_concepts(t) for t in texts]
-    wide = [*sets, *map(_concepts, universe)]
+    wide = [_concepts(u) for u in universe] or sets  # the whole offering when known (not the half-built paper)
     n = max(total or 0, len(texts))
     if n < 8:
         return {}

@@ -211,7 +211,7 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
 
     async def fake_generate_paper_questions(**kwargs):
         asked.append(len(kwargs["slots"]))
-        n = {1: short["n"], 2: 0, 3: 0}.get(len(asked), len(kwargs["slots"]))  # 3: B26's last ask, also empty
+        n = {1: short["n"], 2: 0, 3: 0, 4: 0}.get(len(asked), len(kwargs["slots"]))  # 3: B26 last ask, 4: B28 last-resort ask, also empty
         return [{"text": f"AI question {len(asked)}.{i}?", "answer": "x", "bloom_level": s["bloom_level"],
                  "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": "",
                  "options": ["a", "b", "c", "x"]}
@@ -313,8 +313,8 @@ async def test_b28_concept_cap_is_enforced_by_asking_kg_again_and_a_paper_of_ten
 
     async def fake(**kwargs):
         calls.append(len(kwargs["slots"]))
-        # first call: every question is about mirrors; the later ones are varied
-        return [{"text": (f"Explain mirror image {i} number {i * 7}?" if len(calls) == 1 else f"Explain {topics[i % 10]} case {i * 7}?"),
+        # first call: 4 of 10 are about mirrors (a 3rd and 4th break the cap); the later ones are varied
+        return [{"text": (f"Explain mirror image {i} number {i * 7}?" if len(calls) == 1 and i < 4 else f"Explain {topics[i % 10]} case {i * 7}?"),
                  "answer": f"ans{i}", "bloom_level": "UNDERSTAND", "difficulty": "EASY", "question_type": "mcq",
                  "chapter_number": 3, "topic": "", "options": [f"a{i}", f"b{i}", f"c{i}", f"d{i}"]}
                 for i, s in enumerate(kwargs["slots"])]
