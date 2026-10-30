@@ -27,7 +27,9 @@ from src.repositories.dataset_access import visible_datasets
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import paper_answer_key_client as client
-from src.services.question_selector import UNSEEN_TEXT_REF, figure_svgs, has_figure, text_only_filter, unfit_for_paper
+from src.services.question_selector import (
+    UNSEEN_TEXT_REF, figure_svgs, has_figure, same_question, text_only_filter, unfit_for_paper,
+)
 
 SIMILARITY_LIMIT = 0.85
 BANK_CANDIDATES = 20
@@ -86,15 +88,23 @@ async def _scope_chapter_ids(session: AsyncSession, paper: QuestionPaper) -> lis
     return list(chapters)
 
 
-async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=None) -> DatasetQuestion | None:
-    """`figures`: True only questions with a picture, False only ones without, None either."""
+async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=None, relax: int = 0,
+                     related=()) -> DatasetQuestion | None:
+    """`figures`: True only questions with a picture, False only ones without, None either.
+    `relax` (T-028, a paper must never come out short): 1 also drops the difficulty, 2 the Bloom level,
+    3 the marks, the chapter (any chapter of the paper) and the near-duplicate check (an exact repeat still never).
+    `related`: (text, options, answer) of the paper's other questions - a bank question about the same thing with the
+    same answer is skipped (T-070)."""
     chapter = getattr(q, "chapter_id", None)
-    conds = [DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.bloom_level == q.bloom_level,
-             text_only_filter(pictures=True), or_(DatasetQuestion.marks == q.marks, DatasetQuestion.marks.is_(None)),
-             DatasetQuestion.chapter_id == chapter if chapter else DatasetQuestion.chapter_id.in_(chapter_ids)]
+    conds = [DatasetQuestion.dataset_id.in_(dataset_ids), text_only_filter(pictures=True),
+             DatasetQuestion.chapter_id == chapter if chapter and relax < 3 else DatasetQuestion.chapter_id.in_(chapter_ids)]
+    if relax < 2:
+        conds.append(DatasetQuestion.bloom_level == q.bloom_level)
+    if relax < 3:
+        conds.append(or_(DatasetQuestion.marks == q.marks, DatasetQuestion.marks.is_(None)))
     if (qtype := _enum(QuestionType, getattr(q, "question_type", None))) is not None:
         conds.append(DatasetQuestion.question_type == qtype)
-    if (difficulty := _enum(PaperDifficultyLevel, getattr(q, "difficulty", None))) is not None:
+    if relax < 1 and (difficulty := _enum(PaperDifficultyLevel, getattr(q, "difficulty", None))) is not None:
         conds.append(DatasetQuestion.difficulty == difficulty)
     conds.append(~DatasetQuestion.text.op("~*")(UNSEEN_TEXT_REF))  # "as described in the text" can't go on a paper
     if figures is not None:
@@ -105,7 +115,8 @@ async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=Non
     order = [o for o in (same_topic, func.random()) if o is not None]
     rows = (await session.execute(select(DatasetQuestion).where(*conds)
                                   .order_by(*order).limit(BANK_CANDIDATES))).scalars().all()
-    return next((d for d in rows if not too_similar(d.text, taken)), None)
+    return next((d for d in rows if (_norm(d.text) not in map(_norm, taken) if relax >= 3 else (
+        not too_similar(d.text, taken) and not any(same_question((d.text, d.options, d.answer), r) for r in related)))), None)
 
 
 async def _sections(session, chapter_ids) -> tuple[str, list[dict]]:

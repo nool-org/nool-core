@@ -151,3 +151,64 @@ def test_t070_harder_difficulty_goes_to_the_bigger_questions():
     got = [(s["marks"], s["difficulty"]) for s in slots]
     assert all(s["difficulty"] != "EASY" for s in slots if s["marks"] >= 4), got
     assert got.count((5, "EASY")) == got.count((4, "EASY")) == 0
+
+
+@pytest.mark.asyncio
+async def test_t028_a_short_pool_still_gives_a_whole_paper_and_marks(db_session, monkeypatch):
+    """B26: live papers came back 9/12, 8/12, 10/12 - kg's questions were refused by the picky checks and the bank
+    held no question of the slot's exact Bloom level/difficulty/marks. Now the slots fill from the bank loosening one
+    requirement at a time, and Milo's refused questions are the last resort."""
+    teacher, seeded = await _seed(db_session, monkeypatch)
+    from sqlalchemy import delete
+    await db_session.execute(delete(DatasetQuestion).where(DatasetQuestion.dataset_id.is_not(None)))
+    bank = (await db_session.execute(__import__("sqlalchemy").select(Dataset).where(Dataset.name == "PYQ"))).scalar_one()
+    for n in range(30):  # one corner of the grid only, and 5-mark ones
+        db_session.add(DatasetQuestion(dataset_id=bank.id, chapter_id=seeded["chapter_id"], bloom_level=BloomLevel.REMEMBER,
+                                       difficulty=PaperDifficultyLevel.HARD, question_type=QuestionType.MCQ, marks=5,
+                                       options=["a", "b", "c", "d"], answer="a", created_by=teacher.id,
+                                       text=f"Bank question number {n} about unique topic{n} " + "x" * n + "?"))
+    await db_session.flush()
+
+    async def refused_kg(**kwargs):  # every question leans on a figure the paper does not have
+        return [{"text": f"As shown in the figure below, find x {i}?", "answer": "x", "bloom_level": s["bloom_level"],
+                 "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": "",
+                 "options": ["a", "b", "c", "x"], "slot_index": i} for i, s in enumerate(kwargs["slots"])]
+
+    monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions", refused_kg)
+    out = await question_paper.generate_paper(seeded["paper_id"], GeneratePaperIn(diagram_questions=0),
+                                              user=teacher, session=db_session)
+    questions = await _questions(db_session, teacher, seeded)
+    assert len(questions) == 10 and len({q.text for q in questions}) == 10
+    assert out.validation.marks_accounted_for == sum(q.marks for q in questions) == 10
+    assert not any("couldn't be filled" in i for i in out.validation.issues)
+
+
+def test_t028_two_parts_and_a_closing_question_mark_are_two_parts():
+    from src.services.question_selector import asks_too_much_for_marks
+
+    assert not asks_too_much_for_marks("State how R changes when (i) l is doubled and (ii) A is halved?", 2)
+    assert not asks_too_much_for_marks("Name two (a) metals and (b) non-metals that react with water?", 2)
+    assert asks_too_much_for_marks("Explain (a) one? (b) two? (c) three?", 2)
+
+
+@pytest.mark.asyncio
+async def test_c020_figure_questions_are_found_even_when_no_slot_matches_their_level_and_difficulty(db_session, monkeypatch):
+    """B26: live papers got 0 figure questions. The picture questions are few, so the exact Bloom/difficulty of a slot
+    is relaxed for them (the swap list too); a school whose banks hold none is told so."""
+    from sqlalchemy import delete, select
+
+    teacher, seeded = await _seed(db_session, monkeypatch)
+    bank = (await db_session.execute(select(Dataset).where(Dataset.name == "PYQ"))).scalar_one()
+    await db_session.execute(delete(DatasetQuestion).where(DatasetQuestion.dataset_id == bank.id, DatasetQuestion.figures.is_not(None)))
+    for n in range(6):  # pictures only at HARD / CREATE, which the default blueprint has no slot for
+        db_session.add(DatasetQuestion(figures=[{"svg": SVG, "role": "question"}], dataset_id=bank.id, chapter_id=seeded["chapter_id"],
+                                       bloom_level=BloomLevel.CREATE, difficulty=PaperDifficultyLevel.HARD,
+                                       question_type=QuestionType.MCQ, options=[f"a{n}", f"b{n}", f"c{n}", f"d{n}"], answer=f"a{n}",
+                                       created_by=teacher.id, text=f"{['Mitochondria', 'Neurons', 'Prisms', 'Magnets', 'Lenses', 'Valves'][n]} appear in the sketch: what labels them?"))
+    await db_session.flush()
+    await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
+    assert len([q for q in await _questions(db_session, teacher, seeded) if q.figure_svg]) == 2
+
+    await db_session.execute(delete(DatasetQuestion).where(DatasetQuestion.dataset_id == bank.id, DatasetQuestion.figures.is_not(None)))
+    out = await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
+    assert any("No question with a figure" in i for i in out.validation.issues)

@@ -53,6 +53,7 @@ from src.domain.models.question_paper import (
     QuestionSource,
 )
 from src.services.paper_rules import rules_check
+from src.services.question_selector import duplicates_of
 
 MCQ_OPTION_COUNT = 4
 _SNAPSHOT_FIELDS = ("bloom_level", "marks", "text", "question_type", "difficulty", "chapter_id", "topic_id",
@@ -121,8 +122,7 @@ async def refresh_validation(session: AsyncSession, paper: QuestionPaper) -> Non
     wanted = set((await session.execute(
         select(QuestionPaperChapter.chapter_id).where(QuestionPaperChapter.paper_id == paper.id))).scalars().all())
     total, slots = len(questions), sum(s.question_count for s in sections)
-    texts = [q.text.strip().lower() for q in questions]
-    duplicates = len(texts) - len(set(texts))
+    duplicates = len(duplicates_of([(q.text, q.options, q.answer) for q in questions]))
     marks = sum(q.marks for q in questions)
     if wanted:
         validation.coverage_percent = round(100 * len(wanted & {q.chapter_id for q in questions}) / len(wanted))

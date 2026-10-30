@@ -50,12 +50,13 @@ def references_missing_figure(text: str | None) -> bool:
 # T-070: "as described in the text", "mentioned in the chapter" - the student only has the printed paper
 UNSEEN_TEXT_REF = (r"(described|mentioned|discussed|stated|given|explained|shown|studied)"
                    r" (in|by) (the|this|your) (text|textbook|chapter|lesson|passage|section|unit|activity)")
-_PARTS = re.compile(r"\(\s*(?:[a-e]|i{1,3}|iv)\s*\)|\?", re.I)
+_ENUMERATORS = re.compile(r"\(\s*(?:[a-e]|i{1,3}|iv)\s*\)", re.I)
 
 
 def asks_too_much_for_marks(text: str | None, marks: int) -> bool:
     """T-070: a 1-3 mark question with more parts than marks allow ("a 2-mark question with about 6 answers")."""
-    parts = len(_PARTS.findall(text or ""))
+    # T-028: "(i) ... and (ii) ...?" is two parts, not three: the "?" closes the parts already counted, so take the larger count
+    parts = max(len(_ENUMERATORS.findall(text or "")), (text or "").count("?"))
     return marks <= 3 and parts > max(2, marks)
 
 
@@ -150,6 +151,42 @@ def near_duplicate(text: str, seen: list[frozenset[str]]) -> bool:
                 and nums == {w for w in other if w.isdigit()}):
             return True
     return False
+
+
+def _answer_key(answer: str | None) -> str:
+    key = re.sub(r"\W+", " ", str(answer or "").lower()).strip()
+    return key if 0 < len(key) <= 60 else ""  # a paragraph answer is not an identity
+
+
+def same_question(a: tuple, b: tuple) -> bool:
+    """T-070: two (text, options, answer) are the same question for a paper when the stems are near-identical, or
+    they have the same short answer and share the stem's concept words ("kilowatt hour" asked twice, worded two ways),
+    or they offer the same options about the same thing. ponytail: word overlap, not meaning."""
+    (ta, oa, aa), (tb, ob, ab) = a, b
+    if re.sub(r"\W+", "", ta.lower()) == re.sub(r"\W+", "", tb.lower()) or near_duplicate(ta, [words_of(tb)]):
+        return True
+    wa, wb = words_of(ta), words_of(tb)
+    shared = {w for w in wa & wb if not w.isdigit()}
+    if (key := _answer_key(aa)) and key == _answer_key(ab) and len(shared) >= 3 and len(shared) >= 0.3 * len(wa | wb):
+        return True
+    options = lambda o: {re.sub(r"\W+", " ", str(x).lower()).strip() for x in o or []}  # noqa: E731
+    return len(options(oa) & options(ob)) >= 3 and len(shared) >= 2
+
+
+def duplicates_of(items: list[tuple]) -> dict[int, int]:
+    """{index of a question: index of the earlier question it repeats} for a paper's (text, options, answer) list."""
+    return {j: next(i for i in range(j) if same_question(items[i], items[j]))
+            for j in range(len(items)) if any(same_question(items[i], items[j]) for i in range(j))}
+
+
+_RECALL_STEM = re.compile(r"^\s*(which|what|name|state|define|identify|write|the)\b", re.I)
+_REASONING = re.compile(r"\b(because|why|justify|best|most (appropriate|suitable|likely)|compare|evaluate|assess|predict|"
+                        r"design|suggest|would|should|if|conclude|infer|reason|scenario)\b", re.I)
+
+
+def plain_recall(text: str | None, marks: int) -> bool:
+    """T-070: a 1-mark question that just asks for a fact - it cannot honestly be labelled Evaluate or Create."""
+    return marks <= 1 and bool(_RECALL_STEM.match(text or "")) and not _REASONING.search(text or "") and len((text or "").split()) < 30
 
 
 _PART = re.compile(r"^\s*\(?(?:[a-hA-H]|[ivx]{1,4}|\d{1,2})[.)]\s*")  # "(b) " / "ii. " / "3) " before a sub-question

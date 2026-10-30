@@ -1,4 +1,6 @@
 import difflib
+import logging
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -63,12 +65,16 @@ from src.services.subject_grades import ensure_subjects_enabled_for_school, ensu
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import kg_client
+from src.services.kg_client import KgServiceUnavailableError
 from src.services.bloom_defaults import resolve_bloom_targets
 from src.services.paper_actions import COPILOT_COLUMNS, create_version, load_questions, question_out
 from src.services.paper_instructions import sync_instructions
 from src.services.paper_repeats import normalize
-from src.services.question_selector import figure_svgs, has_figure, text_only_filter, unfit_for_paper
+from src.services.question_selector import (
+    duplicates_of, figure_svgs, has_figure, plain_recall, same_question, text_only_filter, unfit_for_paper,
+)
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["question-papers"])
 
 
@@ -598,15 +604,17 @@ async def _bank_slots(session: AsyncSession, paper: QuestionPaper, user: User, s
     picked: dict[int, dict] = {}
     taken: list[str] = []
     for want_figure in (True, False):  # the figure questions first, then plain ones up to the share
-        for i in order:
-            if len(picked) == (figures if want_figure else quota):
-                break
-            if i not in picked:
-                await _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter_ids, want_figure)
+        # C-020: a figure question is rare, so it may differ in difficulty, then Bloom level, from its slot
+        for relax in ((0, 1, 2) if want_figure else (0,)):
+            for i in order:
+                if len(picked) == (figures if want_figure else quota):
+                    break
+                if i not in picked:
+                    await _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter_ids, want_figure, relax)
     return picked
 
 
-async def _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter_ids, figure: bool) -> None:
+async def _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter_ids, figure: bool, relax: int = 0, others=()) -> None:
     from src.services.paper_parallel import _bank_pick
 
     slot = slots[i]
@@ -614,12 +622,14 @@ async def _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter
                            question_type=_question_type(slot["question_type"]), difficulty=slot["difficulty"],
                            chapter_id=slot.get("chapter_id"))
     bank = await _bank_pick(session, want, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken,
-                            figures=figure)
+                            figures=figure, relax=relax,
+                            related=[*others, *((v['text'], v.get('options'), v.get('answer')) for v in picked.values())])
     if bank is None:
         return
     taken.append(bank.text)
     picked[i] = {"text": bank.text, "answer": bank.answer, "options": bank.options, "bank_id": bank.id,
-                 "bloom_level": slot["bloom_level"], "difficulty": slot["difficulty"],
+                 "bloom_level": bank.bloom_level.value,  # its own label: a relaxed pick may differ from the slot's (T-028)
+                 "difficulty": bank.difficulty.value if bank.difficulty else slot["difficulty"],
                  "question_type": (bank.question_type.value if bank.question_type else slot["question_type"]),
                  "chapter_id": bank.chapter_id, "topic_id": bank.topic_id,
                  "chapter_number": (await session.get(Chapter, bank.chapter_id)).order_index}
@@ -897,36 +907,72 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
 
         filled = dict(from_bank)
         pending = [i for i in free if i not in from_bank]
-        for attempt in range(2):  # T-028: a paper short of a question asks again for just the missing ones
-            if not pending:
-                break
-            generated = _by_slot(await kg_client.generate_paper_questions(
-                subject=subject_name,
-                board=board,
-                grade=grade,
-                chapters=chapter_refs,
-                topic_names=topic_names,
-                bloom_distribution=bloom_distribution,
-                difficulty_distribution=difficulty_distribution,
-                question_types=paper.question_types or [],
-                total_questions=len(pending),
-                reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
-                slots=[{k: v for k, v in slots[i].items() if k != "chapter_id"} for i in pending],
-            ), len(pending))
-            for n, i in enumerate(pending):
-                q = generated.get(n)
-                # Milo's own questions never lean on a figure the paper doesn't have, and are not repeats
-                if (q and _mcq_ok(q) and not unfit_for_paper(q, slots[i]["marks"])
-                        and normalize(q["text"]) not in {normalize(f["text"]) for f in filled.values()} | {normalize(k.text) for k in keep}):
-                    filled[i] = q
-            pending = [i for i in pending if i not in filled]
-        # still short: the question bank covers what Milo could not, so the paper is complete
         bank_ids = [d for d, _ in await _bank_shares(session, paper, user)]
         chapter_ids = await _scope_chapter_ids(session, paper)
-        taken = [f["text"] for f in filled.values()] + [k.text for k in keep]
-        for i in pending:
-            if bank_ids and chapter_ids and not keep:
-                await _pick_bank_slot(session, slots, i, filled, taken, bank_ids, chapter_ids, False)
+        used = [k.text for k in keep]
+        kept_items = [(k.text, k.options, k.answer) for k in keep]
+        soft: dict[int, dict] = {}  # slot -> Milo's question that failed only the picky checks: the last resort
+        kg_error: KgServiceUnavailableError | None = None
+        started = time.monotonic()
+
+        async def ask_milo(strict: bool) -> None:
+            """One kg call for the open slots. A slot stays open, with its reason logged, when kg sent nothing
+            for it or the question is unusable (T-028: every drop used to be silent)."""
+            nonlocal kg_error
+            try:
+                generated = _by_slot(await kg_client.generate_paper_questions(
+                    subject=subject_name, board=board, grade=grade, chapters=chapter_refs, topic_names=topic_names,
+                    bloom_distribution=bloom_distribution, difficulty_distribution=difficulty_distribution,
+                    question_types=paper.question_types or [], total_questions=len(pending),
+                    reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
+                    slots=[{k: v for k, v in slots[i].items() if k != "chapter_id"} for i in pending],
+                ), len(pending))
+            except KgServiceUnavailableError as exc:
+                kg_error = exc
+                logger.warning("paper_kg_failed", extra={"paper": str(paper.id), "open": len(pending)})
+                return
+            on_paper = lambda: [*kept_items, *((f["text"], f.get("options"), f.get("answer")) for f in filled.values())]  # noqa: E731
+            for n, i in enumerate(list(pending)):
+                q = generated.get(n)
+                reason = ("kg_sent_nothing" if not q else "bad_options" if not _mcq_ok(q)
+                          else "repeat" if any(same_question((q["text"], q.get("options"), q.get("answer")), o) for o in on_paper())
+                          else "unfit" if unfit_for_paper(q, slots[i]["marks"]) else None)
+                if reason == "unfit":
+                    soft[i] = q
+                    if not strict:
+                        reason = None
+                if reason:
+                    logger.info("paper_slot_open", extra={"paper": str(paper.id), "slot": i, "reason": reason,
+                                                          "marks": slots[i]["marks"], "type": slots[i]["question_type"]})
+                    continue
+                filled[i] = q
+            pending[:] = [i for i in pending if i not in filled]
+
+        async def backfill(relax: int) -> None:
+            for i in list(pending):
+                if bank_ids and chapter_ids:
+                    await _pick_bank_slot(session, slots, i, filled, used + [f["text"] for f in filled.values()],
+                                          bank_ids, chapter_ids, False, relax, others=kept_items)
+            pending[:] = [i for i in pending if i not in filled]
+
+        for _ in range(2):  # T-028: a paper short of a question asks again for just the missing ones
+            if pending:
+                await ask_milo(strict=True)
+        # still short: the question bank covers what Milo could not, loosening one requirement at a time, then Milo
+        # once more taking questions the picky checks refused, then the bank with nothing but "not an exact repeat"
+        for relax in (0, 1, 2):
+            await backfill(relax)
+        if pending and time.monotonic() - started < 150:  # the request still has to answer in time
+            await ask_milo(strict=False)
+        await backfill(3)
+        for i in list(pending):
+            if i in soft:
+                filled[i] = soft[i]
+        pending[:] = [i for i in pending if i not in filled]
+        if pending:
+            logger.error("paper_short", extra={"paper": str(paper.id), "open": len(pending), "of": len(slots)})
+            if kg_error and not filled:
+                raise kg_error
         picked = [(i, filled[i]) for i in free if i in filled and _mcq_ok(filled[i])]
         questions = [q for _, q in picked]
         slot_of = [i for i, _ in picked]
@@ -956,7 +1002,9 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         close = difflib.get_close_matches(normalize(q["text"]), list(bank_by_text), n=1, cutoff=0.8)
         bank_id = q.get("bank_id") or (bank_by_text[close[0]] if close else None)
         placed.append((i, QuestionPaperQuestion(
-            paper_id=paper.id, order=0, bloom_level=q["bloom_level"], marks=slots[i]["marks"], text=q["text"],
+            paper_id=paper.id, order=0, marks=slots[i]["marks"], text=q["text"],
+            # T-070: a 1-mark question that only asks for a fact is not Evaluate/Create
+            bloom_level="REMEMBER" if q["bloom_level"] in ("EVALUATE", "CREATE") and plain_recall(q["text"], slots[i]["marks"]) else q["bloom_level"],
             question_type=_question_type(q.get("question_type")) or _question_type(slots[i]["question_type"]),
             difficulty=_enum_or_none(PaperDifficultyLevel, q.get("difficulty")),
             chapter_id=chapter.id if chapter else None, topic_id=topic.id if topic else None,
@@ -981,8 +1029,8 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         if requested_chapter_numbers
         else (100 if questions else 0)
     )
-    texts = [q["text"].strip().lower() for q in questions] + [k.text.strip().lower() for k in keep]
-    duplicate_count = len(texts) - len(set(texts))
+    duplicate_count = len(duplicates_of([(k.text, k.options, k.answer) for k in keep]
+                                        + [(q["text"], q.get("options"), q.get("answer")) for q in questions]))
     total = len(keep) + len(questions)
     quality_percent = max(0, 100 - duplicate_count * 20) if total else 0
     quality_percent = min(quality_percent, coverage_percent) if total else 0
@@ -1001,6 +1049,10 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         )
     if paper.total_marks and total and marks_total != paper.total_marks:
         issues.append(f"The questions add up to {marks_total} of the paper's {paper.total_marks} marks.")
+    wanted = diagram_quota(len(slots), diagrams) if not keep else 0
+    if wanted and not await figure_svgs(session, [q["bank_id"] for q in questions if q.get("bank_id")]):
+        issues.append("No question with a figure is in this school's question banks for these chapters. "
+                      "Ask your admin to add a bank that has diagrams.")  # C-020: say so instead of silently skipping
     if duplicate_count:
         issues.append(f"{duplicate_count} duplicate question(s) were generated.")
     if requested_chapter_numbers and coverage_percent < 100:
@@ -1146,13 +1198,12 @@ async def _diagram_candidates(session: AsyncSession, paper: QuestionPaper, user:
     if not dataset_ids or not chapter_ids:
         return []
     banks = []
-    for _ in range(2):
-        bank = await _bank_pick(session, question, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken,
-                                figures=True)
-        if bank is None:
-            break
-        banks.append(bank)
-        taken = [*taken, bank.text]
+    for relax in (0, 1, 2):  # C-020: no figure question of exactly this slot - offer the nearest ones
+        while len(banks) < 2 and (bank := await _bank_pick(session, question, dataset_ids=dataset_ids,
+                                                           chapter_ids=chapter_ids, taken=taken, figures=True,
+                                                           relax=relax)) is not None:
+            banks.append(bank)
+            taken = [*taken, bank.text]
     figures = await figure_svgs(session, [b.id for b in banks], captions=True)
     return [QuestionPaperQuestionCandidateOut(id=f"{question.id}-bank-{b.id}", text=b.text, dataset_question_id=str(b.id),
                                               options=b.options, **figures.get(b.id, {})) for b in banks]

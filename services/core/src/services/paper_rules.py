@@ -44,6 +44,7 @@ from src.domain.models import (
 )
 from src.domain.models.question_paper import COPILOT_COLUMNS, QuestionPaperQuestion
 from src.services.paper_repeats import find_repeats
+from src.services.question_selector import duplicates_of, plain_recall
 
 MIX_TOLERANCE = 10
 MINUTES_FLAT = {QuestionType.MCQ: 1.5, QuestionType.TRUE_FALSE: 1.0}
@@ -154,6 +155,13 @@ async def rules_check(session: AsyncSession, paper: QuestionPaper) -> RulesCheck
     if paper.duration_minutes is not None and estimated > paper.duration_minutes:
         issue("over_duration", "warning",
               f"Estimated {estimated} minutes to write, the exam is {paper.duration_minutes}.")
+
+    # T-070: the same question worded twice on the paper (same answer and concept), and recall labelled Evaluate/Create
+    for later, earlier in duplicates_of([(q.text, q.options, q.answer) for q in questions]).items():
+        issue("duplicate", "warning", f"Q{later + 1} repeats Q{earlier + 1}.", questions[later].id)
+    for n, q in enumerate(questions):
+        if q.bloom_level in (BloomLevel.EVALUATE, BloomLevel.CREATE) and plain_recall(q.text, q.marks):
+            issue("level_mismatch", "warning", f"Q{n + 1} is labelled {q.bloom_level.value.title()} but only asks for a fact.", q.id)
 
     repeats = await find_repeats(session, paper, questions)
     for r in repeats:

@@ -211,7 +211,7 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
 
     async def fake_generate_paper_questions(**kwargs):
         asked.append(len(kwargs["slots"]))
-        n = {1: short["n"], 2: 0}.get(len(asked), len(kwargs["slots"]))
+        n = {1: short["n"], 2: 0, 3: 0}.get(len(asked), len(kwargs["slots"]))  # 3: B26's last ask, also empty
         return [{"text": f"AI question {len(asked)}.{i}?", "answer": "x", "bloom_level": s["bloom_level"],
                  "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": "",
                  "options": ["a", "b", "c", "x"]}
