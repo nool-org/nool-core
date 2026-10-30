@@ -179,6 +179,55 @@ def duplicates_of(items: list[tuple]) -> dict[int, int]:
             for j in range(len(items)) if any(same_question(items[i], items[j]) for i in range(j))}
 
 
+MAX_PER_CONCEPT = 2
+_ALIAS = {"detergent": "soap", "detergents": "soap", "soaps": "soap", "micelles": "micelle"}
+_TOPIC = frozenset("light current electric electricity energy number solution equation reaction chemical metal metals "
+                   "value figure diagram related following statement correct incorrect true false based formula "
+                   "produced produce used uses calculate shown below given using called known nature property".split())
+
+
+def _concepts(text: str) -> set[str]:
+    """T-070 concept words of a stem: long content words, plural folded, soap/detergent one idea."""
+    out = set()
+    for w in words_of(text):
+        if not w.isdigit():
+            w = _ALIAS.get(w, w)
+            w = w[:-1] if w.endswith("s") and not w.endswith("ss") else w
+            if w not in _TOPIC:
+                out.add(w)
+    return out
+
+
+def crowded(texts: list[str], total: int | None = None, universe=()) -> dict[int, str]:
+    """T-070: {index: concept} for each question that is a 3rd+ use of a concept word on the paper (cap MAX_PER_CONCEPT).
+    A word in more than a quarter of the paper is the chapter itself, not a repeated idea; while a paper is still being
+    built, `universe` (the other questions on offer) shows how common a word is. ponytail: word overlap."""
+    sets = [_concepts(t) for t in texts]
+    wide = [*sets, *map(_concepts, universe)]
+    n = max(total or 0, len(texts))
+    if n < 8:
+        return {}
+    seen: dict[str, int] = {}
+    out: dict[int, str] = {}
+    for i, words in enumerate(sets):
+        for w in sorted(words):
+            seen[w] = seen.get(w, 0) + 1
+            if seen[w] > MAX_PER_CONCEPT and sum(w in x for x in wide) <= max(3, n // 4) and i not in out:
+                out[i] = w
+    return out
+
+
+def concept_full(text: str, others: list[str], total: int | None = None, universe=()) -> bool:
+    """Adding `text` to a paper holding `others` would be a 3rd use of some concept."""
+    return len(others) in crowded([*others, text], total, universe)
+
+
+def over_marked(text: str | None, marks: int, bloom) -> bool:
+    """T-070: a Remember question worth 3+ marks that is not multi-part (one fact cannot earn that much)."""
+    return (str(getattr(bloom, "value", bloom)) == "REMEMBER" and marks > 2
+            and max(len(_ENUMERATORS.findall(text or "")), (text or "").count("?")) < 2)
+
+
 _RECALL_STEM = re.compile(r"^\s*(which|what|name|state|define|identify|write|the)\b", re.I)
 _REASONING = re.compile(r"\b(because|why|justify|best|most (appropriate|suitable|likely)|compare|evaluate|assess|predict|"
                         r"design|suggest|would|should|if|conclude|infer|reason|scenario)\b", re.I)
@@ -192,11 +241,65 @@ def plain_recall(text: str | None, marks: int) -> bool:
 _PART = re.compile(r"^\s*\(?(?:[a-hA-H]|[ivx]{1,4}|\d{1,2})[.)]\s*")  # "(b) " / "ii. " / "3) " before a sub-question
 
 
+_SEGMENT = re.compile(r'<line x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)" y2="([\d.]+)" stroke="#2D3748" stroke-width="2"/>')
+_LABEL = re.compile(r'<text x="([\d.]+)" y="([\d.]+)"([^>]*?font-size="(\d+)"[^>]*)>([^<]+)</text>')
+
+
+def _smooth_curves(svg: str) -> str:
+    """C-022: the bank draws a graph as separate straight <line> pieces between its sample points (a zig-zag). A run
+    of 4+ pieces that join end to end and always move right is one curve: redraw it as a smooth Catmull-Rom path
+    through the same points. ponytail: through the bank's own points, no re-sampling of the function."""
+    def curve(run):
+        pts = [(float(run[0][0]), float(run[0][1])), *((float(a[2]), float(a[3])) for a in run)]
+        d = f"M {pts[0][0]} {pts[0][1]}"
+        for i in range(len(pts) - 1):
+            p0, p1, p2, p3 = pts[max(i - 1, 0)], pts[i], pts[i + 1], pts[min(i + 2, len(pts) - 1)]
+            c1 = (p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6)
+            c2 = (p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6)
+            d += f" C {c1[0]:.1f} {c1[1]:.1f} {c2[0]:.1f} {c2[1]:.1f} {p2[0]} {p2[1]}"
+        return f'<path d="{d}" fill="none" stroke="#2D3748" stroke-width="2" stroke-linecap="round"/>'
+
+    edits, run = [], []  # (start, end, replacement); the pieces may have labels and dots between them in the markup
+
+    def flush():
+        nonlocal run
+        if len(run) >= 4:
+            edits.extend((m[4], m[5], "") for m in run[1:])
+            edits.append((run[0][4], run[0][5], curve([m[:4] for m in run])))
+        run = []
+    for m in _SEGMENT.finditer(svg):
+        g = m.groups()
+        if not (run and g[:2] == run[-1][2:4] and float(g[2]) > float(g[0])):
+            flush()
+        run.append((*g, m.start(), m.end()))
+    flush()
+    for start, end, new in sorted(edits, reverse=True):
+        svg = svg[:start] + new + svg[end:]
+    return svg
+
+
+def _separate_labels(svg: str) -> str:
+    """C-022: labels whose boxes overlap (two zeroes next to each other) - move the later one down, clear of the earlier."""
+    placed: list[tuple[float, float, float, float]] = []
+
+    def fix(m):
+        x, y, size = float(m[1]), float(m[2]), int(m[4])
+        w, h = 0.6 * size * len(m[5].strip()), size
+        for _ in range(4):
+            hit = next((b for b in placed if abs(x - b[0]) < (w + b[2]) / 2 and abs(y - b[1]) < (h + b[3]) / 2), None)
+            if hit is None:
+                break
+            y = hit[1] + (h + hit[3]) / 2 + 1
+        placed.append((x, y, w, h))
+        return f'<text x="{m[1]}" y="{y:.1f}"{m[3]}>{m[5]}</text>'
+    return _LABEL.sub(fix, svg)
+
+
 def figure_svg(question: DatasetQuestion | None) -> str | None:
-    """The question's inline picture (SVG markup), if it has one."""
+    """The question's inline picture (SVG markup), if it has one - every screen and the PDF come through here."""
     for figure in (question.figures or []) if question is not None else []:
         if figure.get("svg"):
-            return figure["svg"]
+            return _separate_labels(_smooth_curves(figure["svg"]))
     return None
 
 

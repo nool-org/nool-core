@@ -145,6 +145,16 @@ def outcome_of(attempt: int, lagging: list[str]) -> str:
     return "homework" if attempt == 1 else "needs_teacher"
 
 
+def score_summary(topic: str, scores: dict[str, int]) -> str | None:
+    """C-021: the generated summary is free text and once praised a 0% re-check ("You remember facts well").
+    When no level reached 40%, the summary is ours, so the words always match the score."""
+    if not scores or max(scores.values()) >= 40:
+        return None
+    if max(scores.values()) == 0:
+        return f"None of these were right this time. {topic} needs work from the basics - that's okay, we'll go step by step."
+    return f"Only a few of these were right this time, so {topic} still needs work from the basics."
+
+
 def fallback_analysis(topic: str, attempt: int, lagging: list[str]) -> dict:
     """Plain words when the generation service is down."""
     if not lagging:
@@ -368,6 +378,7 @@ async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: To
     except generation_client.GenerationServiceUnavailableError:
         logger.warning("topic_quiz_analysis_unavailable", extra={"quiz_id": str(quiz.id)})
         words = fallback_analysis(name, quiz.attempt, lagging)
+    words = {**words, "summary": score_summary(name, scores) or words.get("summary")}
     return {**{k: words.get(k) for k in ("summary", "lagging_meaning", "need_to_know", "next_step")},
             "lagging": lagging, "previous_per_bloom": first}
 

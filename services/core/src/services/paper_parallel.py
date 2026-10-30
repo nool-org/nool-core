@@ -28,7 +28,7 @@ from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import paper_answer_key_client as client
 from src.services.question_selector import (
-    UNSEEN_TEXT_REF, figure_svgs, has_figure, same_question, text_only_filter, unfit_for_paper,
+    UNSEEN_TEXT_REF, concept_full, figure_svgs, has_figure, same_question, text_only_filter, unfit_for_paper,
 )
 
 SIMILARITY_LIMIT = 0.85
@@ -116,7 +116,8 @@ async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=Non
     rows = (await session.execute(select(DatasetQuestion).where(*conds)
                                   .order_by(*order).limit(BANK_CANDIDATES))).scalars().all()
     return next((d for d in rows if (_norm(d.text) not in map(_norm, taken) if relax >= 3 else (
-        not too_similar(d.text, taken) and not any(same_question((d.text, d.options, d.answer), r) for r in related)))), None)
+        not too_similar(d.text, taken) and not any(same_question((d.text, d.options, d.answer), r) for r in related)
+        and not concept_full(d.text, [r[0] for r in related], None, [c.text for c in rows])))), None)  # T-070: max 2 per concept
 
 
 async def _sections(session, chapter_ids) -> tuple[str, list[dict]]:

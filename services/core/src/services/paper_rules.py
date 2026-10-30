@@ -40,11 +40,12 @@ from src.domain.models import (
     QuestionPaperChapter,
     QuestionPaperDifficultyDistribution,
     QuestionPaperSection,
+    QuestionPaperValidation,
     QuestionType,
 )
 from src.domain.models.question_paper import COPILOT_COLUMNS, QuestionPaperQuestion
 from src.services.paper_repeats import find_repeats
-from src.services.question_selector import duplicates_of, plain_recall
+from src.services.question_selector import crowded, duplicates_of, over_marked, plain_recall
 
 MIX_TOLERANCE = 10
 MINUTES_FLAT = {QuestionType.MCQ: 1.5, QuestionType.TRUE_FALSE: 1.0}
@@ -162,6 +163,22 @@ async def rules_check(session: AsyncSession, paper: QuestionPaper) -> RulesCheck
     for n, q in enumerate(questions):
         if q.bloom_level in (BloomLevel.EVALUATE, BloomLevel.CREATE) and plain_recall(q.text, q.marks):
             issue("level_mismatch", "warning", f"Q{n + 1} is labelled {q.bloom_level.value.title()} but only asks for a fact.", q.id)
+
+    # T-070: one idea used more than twice, a recall question worth 3+ marks, no Hard question on a real paper
+    for n, word in crowded([q.text for q in questions]).items():
+        issue("repeated_concept", "warning", f'Q{n + 1} is the 3rd+ question about "{word}".', questions[n].id)
+    for n, q in enumerate(questions):
+        if over_marked(q.text, q.marks, q.bloom_level):
+            issue("over_marked", "warning", f"Q{n + 1} is a Remember question worth {q.marks} marks.", q.id)
+    if len(rated) >= 8 and not any(q.difficulty == PaperDifficultyLevel.HARD for q in rated):
+        issue("no_hard", "warning", "The paper has no Hard question.")
+
+    # C-020: figure questions were asked for but this school's banks hold none (generation noted it on the paper)
+    validation = (await session.execute(
+        select(QuestionPaperValidation).where(QuestionPaperValidation.paper_id == paper.id))).scalar_one_or_none()
+    for text in validation.issues or [] if validation else []:
+        if "question banks" in text and "diagrams" in text:
+            issue("no_figure_questions", "warning", text)
 
     repeats = await find_repeats(session, paper, questions)
     for r in repeats:

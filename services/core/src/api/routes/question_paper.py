@@ -71,7 +71,7 @@ from src.services.paper_actions import COPILOT_COLUMNS, create_version, load_que
 from src.services.paper_instructions import sync_instructions
 from src.services.paper_repeats import normalize
 from src.services.question_selector import (
-    duplicates_of, figure_svgs, has_figure, plain_recall, same_question, text_only_filter, unfit_for_paper,
+    concept_full, duplicates_of, figure_svgs, has_figure, over_marked, plain_recall, same_question, text_only_filter, unfit_for_paper,
 )
 
 logger = logging.getLogger(__name__)
@@ -936,6 +936,7 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
                 q = generated.get(n)
                 reason = ("kg_sent_nothing" if not q else "bad_options" if not _mcq_ok(q)
                           else "repeat" if any(same_question((q["text"], q.get("options"), q.get("answer")), o) for o in on_paper())
+                          else "crowded" if concept_full(q["text"], [o[0] for o in on_paper()], len(slots), [g["text"] for g in generated.values()])  # T-070
                           else "unfit" if unfit_for_paper(q, slots[i]["marks"]) else None)
                 if reason == "unfit":
                     soft[i] = q
@@ -1004,7 +1005,9 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         placed.append((i, QuestionPaperQuestion(
             paper_id=paper.id, order=0, marks=slots[i]["marks"], text=q["text"],
             # T-070: a 1-mark question that only asks for a fact is not Evaluate/Create
-            bloom_level="REMEMBER" if q["bloom_level"] in ("EVALUATE", "CREATE") and plain_recall(q["text"], slots[i]["marks"]) else q["bloom_level"],
+            bloom_level=("UNDERSTAND" if over_marked(q["text"], slots[i]["marks"], q["bloom_level"])  # T-070: 3+ marks is not recall
+                         else "REMEMBER" if q["bloom_level"] in ("EVALUATE", "CREATE") and plain_recall(q["text"], slots[i]["marks"])
+                         else q["bloom_level"]),
             question_type=_question_type(q.get("question_type")) or _question_type(slots[i]["question_type"]),
             difficulty=_enum_or_none(PaperDifficultyLevel, q.get("difficulty")),
             chapter_id=chapter.id if chapter else None, topic_id=topic.id if topic else None,
@@ -1012,6 +1015,14 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
             options=q.get("options"), answer=q.get("answer"),
             source=QuestionSource.BANK.value if bank_id else QuestionSource.AI.value, dataset_question_id=bank_id,
         )))
+    # T-070: a 8+ question paper planned with Hard questions must not come back with none: the heaviest higher-order
+    # new questions in Hard slots take the label. ponytail: marks/Bloom heuristic, not a re-grade.
+    fresh = [(i, r) for i, r in placed if r not in keep]
+    if len(placed) >= 8 and not any(r.difficulty == PaperDifficultyLevel.HARD for _, r in placed):
+        hard_slots = [(i, r) for i, r in fresh if str(getattr(slots[i]["difficulty"], "value", slots[i]["difficulty"])) == "HARD"
+                      and str(getattr(r.bloom_level, "value", r.bloom_level)) in ("APPLY", "ANALYZE", "EVALUATE", "CREATE")]
+        for _, r in sorted(hard_slots, key=lambda p: -p[1].marks):
+            r.difficulty = PaperDifficultyLevel.HARD
     # paper order follows the blueprint's slots, so a gap mid-paper is filled where it is
     for order, (_, row) in enumerate(sorted(placed, key=lambda p: p[0]), start=1):
         row.order = order
