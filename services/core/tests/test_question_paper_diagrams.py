@@ -109,3 +109,25 @@ async def test_swap_offers_figure_questions_and_swapping_one_in_brings_its_figur
         seeded["paper_id"], target.id, UpdateQuestionPaperQuestionIn(text="A plain alternative?", replace=True),
         user=teacher, session=db_session)).items
     assert next(q for q in after if q.id == target.id).figure_svg is None
+
+
+@pytest.mark.asyncio
+async def test_a_paper_short_of_a_question_asks_again_then_uses_the_bank_so_it_is_complete(db_session, monkeypatch):
+    """T-028: kg came back one question short (11/12 questions, 20/25 marks) - generation now backfills."""
+    teacher, seeded = await _seed(db_session, monkeypatch)
+    calls = []
+
+    async def short_kg(**kwargs):
+        calls.append(len(kwargs["slots"]))
+        return [{"text": f"Milo question {len(calls)}-{i} about algebra?", "answer": "x", "bloom_level": s["bloom_level"],
+                 "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": "",
+                 "options": ["a", "b", "c", "x"], "slot_index": i}
+                for i, s in enumerate(kwargs["slots"]) if not (len(calls) == 1 and i == 2) and not (len(calls) == 2 and True)]
+
+    monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions", short_kg)
+    out = await question_paper.generate_paper(seeded["paper_id"], GeneratePaperIn(diagram_questions=0),
+                                              user=teacher, session=db_session)
+    questions = await _questions(db_session, teacher, seeded)
+    assert len(questions) == 10 and len({q.text for q in questions}) == 10  # whole paper, no repeats
+    assert len(calls) == 2 and calls[1] < calls[0]  # only the missing ones were asked for again
+    assert out.status.value == "REVIEW" if hasattr(out.status, "value") else out.status == "REVIEW"

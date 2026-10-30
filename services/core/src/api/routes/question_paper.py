@@ -805,24 +805,41 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         subject_name, board, grade = await _paper_kg_identity(session, paper)
         references = await _dataset_reference_questions(session, paper, user)
         from_bank = {} if keep else await _bank_slots(session, paper, user, slots, diagrams)
-        open_slots = [slots[i] for i in free if i not in from_bank]
-        generated = _by_slot(await kg_client.generate_paper_questions(
-            subject=subject_name,
-            board=board,
-            grade=grade,
-            chapters=chapter_refs,
-            topic_names=topic_names,
-            bloom_distribution=bloom_distribution,
-            difficulty_distribution=difficulty_distribution,
-            question_types=paper.question_types or [],
-            total_questions=len(open_slots),
-            reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
-            slots=[{k: v for k, v in s.items() if k != "chapter_id"} for s in open_slots],
-        ) if open_slots else [], len(open_slots))
-        open_index = {i: n for n, i in enumerate(i for i in free if i not in from_bank)}
-        picked = [(i, from_bank.get(i) or generated.get(open_index.get(i))) for i in free]
-        # Milo's own questions never lean on a figure the paper doesn't have (a bank question brings its own)
-        picked = [(i, q) for i, q in picked if q and _mcq_ok(q) and (q.get("bank_id") or not references_missing_figure(q["text"]))]
+        from src.services.paper_parallel import _scope_chapter_ids  # paper_parallel imports this module
+
+        filled = dict(from_bank)
+        pending = [i for i in free if i not in from_bank]
+        for attempt in range(2):  # T-028: a paper short of a question asks again for just the missing ones
+            if not pending:
+                break
+            generated = _by_slot(await kg_client.generate_paper_questions(
+                subject=subject_name,
+                board=board,
+                grade=grade,
+                chapters=chapter_refs,
+                topic_names=topic_names,
+                bloom_distribution=bloom_distribution,
+                difficulty_distribution=difficulty_distribution,
+                question_types=paper.question_types or [],
+                total_questions=len(pending),
+                reference_questions=[{k: v for k, v in r.items() if k != "id"} for r in references],
+                slots=[{k: v for k, v in slots[i].items() if k != "chapter_id"} for i in pending],
+            ), len(pending))
+            for n, i in enumerate(pending):
+                q = generated.get(n)
+                # Milo's own questions never lean on a figure the paper doesn't have, and are not repeats
+                if (q and _mcq_ok(q) and not references_missing_figure(q["text"])
+                        and normalize(q["text"]) not in {normalize(f["text"]) for f in filled.values()} | {normalize(k.text) for k in keep}):
+                    filled[i] = q
+            pending = [i for i in pending if i not in filled]
+        # still short: the question bank covers what Milo could not, so the paper is complete
+        bank_ids = [d for d, _ in await _bank_shares(session, paper, user)]
+        chapter_ids = await _scope_chapter_ids(session, paper)
+        taken = [f["text"] for f in filled.values()] + [k.text for k in keep]
+        for i in pending:
+            if bank_ids and chapter_ids and not keep:
+                await _pick_bank_slot(session, slots, i, filled, taken, bank_ids, chapter_ids, False)
+        picked = [(i, filled[i]) for i in free if i in filled and _mcq_ok(filled[i])]
         questions = [q for _, q in picked]
         slot_of = [i for i, _ in picked]
 
