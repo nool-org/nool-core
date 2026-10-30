@@ -67,7 +67,7 @@ from src.services.bloom_defaults import resolve_bloom_targets
 from src.services.paper_actions import COPILOT_COLUMNS, create_version, load_questions, question_out
 from src.services.paper_instructions import sync_instructions
 from src.services.paper_repeats import normalize
-from src.services.question_selector import figure_svgs, has_figure, references_missing_figure, text_only_filter
+from src.services.question_selector import figure_svgs, has_figure, text_only_filter, unfit_for_paper
 
 router = APIRouter(prefix="/api/v1", tags=["question-papers"])
 
@@ -740,6 +740,13 @@ def _plan_slots(marks: list[int], labels: list[str | None], bloom: dict[str, int
     paper_types = _kg_question_types(question_types)
     levels = _by_marks(marks, bloom if sum(bloom.values()) else _DEFAULT_BLOOM, _BLOOM_ORDER)
     diffs = _by_marks(marks, difficulty if sum(difficulty.values()) else _DEFAULT_DIFFICULTY, _DIFFICULTY_ORDER)
+    # T-070: the same levels, but a 4+ mark question is never EASY and a 1-mark one never HARD while a
+    # smaller/bigger slot holds the level (swapped, so every level keeps its count)
+    for i, m in enumerate(marks):
+        bad, want = ("EASY", lambda j: marks[j] < 4 and diffs[j] != "EASY") if m >= 4 else (
+            ("HARD", lambda j: marks[j] > 1 and diffs[j] != "HARD") if m == 1 else (None, None))
+        if bad and diffs[i] == bad and (j := next((j for j in range(len(marks)) if want(j)), None)) is not None:
+            diffs[i], diffs[j] = diffs[j], diffs[i]
 
     def kind(m: int, own: list[str] | None) -> str:
         types = _kg_question_types(own) if own else paper_types
@@ -909,7 +916,7 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
             for n, i in enumerate(pending):
                 q = generated.get(n)
                 # Milo's own questions never lean on a figure the paper doesn't have, and are not repeats
-                if (q and _mcq_ok(q) and not references_missing_figure(q["text"])
+                if (q and _mcq_ok(q) and not unfit_for_paper(q, slots[i]["marks"])
                         and normalize(q["text"]) not in {normalize(f["text"]) for f in filled.values()} | {normalize(k.text) for k in keep}):
                     filled[i] = q
             pending = [i for i in pending if i not in filled]
@@ -1117,7 +1124,7 @@ async def get_question_candidates(
     items = [
         QuestionPaperQuestionCandidateOut(id=f"{question_id}-alt-{i + 1}", text=c["text"])
         for i, c in enumerate(candidates)
-        if not references_missing_figure(c["text"])
+        if not unfit_for_paper(c, question.marks)
     ]
     items += await _diagram_candidates(session, paper, user, question, [q.text for q in on_paper])
     return ListEnvelope(items=items, total=len(items))

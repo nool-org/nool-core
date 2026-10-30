@@ -93,7 +93,21 @@ printed paper alone: never refer to a figure, diagram, table, activity or
 page "in your textbook" (no "Fig. 2.3", "the circuit shown", "the table
 above"). If the idea needs a diagram, describe the setup in words instead.
 
-- options: for mcq exactly 4 options (without "(a)" labels), and `answer` is
+- Marks decide the amount of work (the slot's `marks`): 1 mark = one fact or one
+  step; 2 marks = at most two short things to state or one two-step working;
+  3 marks = at most three points; never several sub-tasks, "explain in each
+  case" or multi-part questions for 1-3 marks. A question with two or more parts or
+  several steps is MEDIUM or HARD, never EASY.
+- Difficulty (the slot's `difficulty`) means: EASY = direct recall or a
+  one-step substitution; MEDIUM = apply a rule or formula to a new situation;
+  HARD = several steps or combining two ideas. Pitch every question at
+  Class {grade} board level, never lower-class content.
+- Never say "as described in the text/chapter/lesson", "mentioned in the
+  chapter" or similar: the student only sees the question.
+- options: for mcq exactly 4 options (without "(a)" labels), all different,
+  plausible and mutually exclusive: no option may contain or imply another,
+  contradict itself ("A will happen and B will happen too") or be an "all/none of
+  the above" type; `answer` is
   one of them word for word; the options go only here, never in `text`.
   null for every other question_type.
 - slot_index: in slot mode, the slot_index of the slot this question fills;
@@ -124,6 +138,11 @@ ok=true only if ALL hold:
    is correct and `answer` is that option. For assertion-reason, decide separately whether A is true,
    whether R is true, and whether R explains A, then pick the option.
 3. Numbers and facts are right (recompute every calculation).
+4. The work asked fits the `marks` (a 1-3 mark question has at most 1-3 things to state), the `difficulty`
+   label fits (a multi-part or multi-step question is not EASY; a one-step recall is not HARD), and it is at
+   Class {grade} level, not a lower class.
+5. For mcq the four options are different, mutually exclusive, and none contradicts itself.
+6. It never says "as described in the text/chapter" or points at anything the printed paper does not show.
 If not ok, say precisely what is wrong in `problem`; otherwise leave it empty."""
 
 
@@ -296,16 +315,21 @@ async def generate_questions(
     if message.refusal or message.content is None:
         raise RuntimeError(f"Model refused or returned no content: {message.refusal}")
     questions = json.loads(message.content)["questions"]
-    return await _verified(api_key, questions, board=board, grade=grade, subject=subject)
+    return await _verified(api_key, questions, board=board, grade=grade, subject=subject, slots=slots)
 
 
-async def _verified(api_key: str, questions: list[dict], *, board: str, grade: int, subject: str) -> list[dict]:
+async def _verified(api_key: str, questions: list[dict], *, board: str, grade: int, subject: str,
+                    slots: list[dict] | None = None) -> list[dict]:
     """Drops every question whose answer a second model, solving it on its
     own, doesn't agree with (C-009: three wrong MCQ keys reached papers)."""
     if not questions:
         return questions
-    items = [{"index": i, **{k: q.get(k) for k in ("text", "options", "answer", "question_type")}}
-             for i, q in enumerate(questions)]
+    def marks_of(q: dict):
+        slot = q.get("slot_index")
+        return slots[slot].get("marks") if slots and isinstance(slot, int) and 0 <= slot < len(slots) else None
+
+    items = [{"index": i, **{k: q.get(k) for k in ("text", "options", "answer", "question_type", "difficulty")},
+              "marks": marks_of(q)} for i, q in enumerate(questions)]
     try:
         response = await _get_client(api_key).chat.completions.create(
             model=VERIFY_MODEL,

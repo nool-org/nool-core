@@ -131,3 +131,23 @@ async def test_a_paper_short_of_a_question_asks_again_then_uses_the_bank_so_it_i
     assert len(questions) == 10 and len({q.text for q in questions}) == 10  # whole paper, no repeats
     assert len(calls) == 2 and calls[1] < calls[0]  # only the missing ones were asked for again
     assert out.status.value == "REVIEW" if hasattr(out.status, "value") else out.status == "REVIEW"
+
+
+def test_t070_questions_that_cannot_go_on_a_paper_are_recognised():
+    from src.services.question_selector import asks_too_much_for_marks, has_unusable_options, unfit_for_paper
+
+    six_tasks = "Explain (a) what happens to R if l is doubled? (b) and Ohm's law? (c) if A is halved? (d) ...?"
+    assert asks_too_much_for_marks(six_tasks, 2) and not asks_too_much_for_marks(six_tasks, 5)
+    assert not asks_too_much_for_marks("State Ohm's law. Write its formula?", 2)
+    assert has_unusable_options(["1/3 will be removed", "2/3 will be removed", "1/3 will be removed and 2/3 too", "none"])
+    assert not has_unusable_options(["ohm", "volt", "ampere", "watt"])
+    assert unfit_for_paper({"text": "Find the mean as described in the chapter."}, 3)
+    assert unfit_for_paper({"text": "Use the data mentioned in the text to find x?"}, 4)
+    assert not unfit_for_paper({"text": "Find the mean of 2, 4, 6."}, 1)
+
+
+def test_t070_harder_difficulty_goes_to_the_bigger_questions():
+    slots = question_paper._plan_slots([1, 1, 1, 1, 5, 4], [None] * 6, {}, {"EASY": 40, "MEDIUM": 40, "HARD": 20}, ["MCQ"])
+    got = [(s["marks"], s["difficulty"]) for s in slots]
+    assert all(s["difficulty"] != "EASY" for s in slots if s["marks"] >= 4), got
+    assert got.count((5, "EASY")) == got.count((4, "EASY")) == 0

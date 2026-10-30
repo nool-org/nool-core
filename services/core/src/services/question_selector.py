@@ -47,6 +47,31 @@ def references_missing_figure(text: str | None) -> bool:
     return bool(re.search(_LLM_FIGURE_REF, text or "", re.I))
 
 
+# T-070: "as described in the text", "mentioned in the chapter" - the student only has the printed paper
+UNSEEN_TEXT_REF = (r"(described|mentioned|discussed|stated|given|explained|shown|studied)"
+                   r" (in|by) (the|this|your) (text|textbook|chapter|lesson|passage|section|unit|activity)")
+_PARTS = re.compile(r"\(\s*(?:[a-e]|i{1,3}|iv)\s*\)|\?", re.I)
+
+
+def asks_too_much_for_marks(text: str | None, marks: int) -> bool:
+    """T-070: a 1-3 mark question with more parts than marks allow ("a 2-mark question with about 6 answers")."""
+    parts = len(_PARTS.findall(text or ""))
+    return marks <= 3 and parts > max(2, marks)
+
+
+def has_unusable_options(options: list[str] | None) -> bool:
+    """MCQ options of which two are the same question's same answer (case/punctuation aside), or one holds another."""
+    norm = [re.sub(r"\W+", " ", str(o).lower()).strip() for o in options or []]
+    return any(a and b and (a == b or (len(a) > 8 and (a in b or b in a)))
+               for i, a in enumerate(norm) for b in norm[i + 1:])
+
+
+def unfit_for_paper(q: dict, marks: int) -> bool:
+    """An AI-written paper question that cannot go on a printed paper as it is."""
+    return bool(references_missing_figure(q.get("text")) or re.search(UNSEEN_TEXT_REF, q.get("text") or "", re.I)
+                or asks_too_much_for_marks(q.get("text"), marks) or has_unusable_options(q.get("options")))
+
+
 def has_figure():
     """The question itself carries a picture (not only its worked solution)."""
     return _figure(_SHOWN)

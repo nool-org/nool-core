@@ -27,7 +27,7 @@ from src.repositories.dataset_access import visible_datasets
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import paper_answer_key_client as client
-from src.services.question_selector import figure_svgs, has_figure, references_missing_figure, text_only_filter
+from src.services.question_selector import UNSEEN_TEXT_REF, figure_svgs, has_figure, text_only_filter, unfit_for_paper
 
 SIMILARITY_LIMIT = 0.85
 BANK_CANDIDATES = 20
@@ -96,6 +96,7 @@ async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=Non
         conds.append(DatasetQuestion.question_type == qtype)
     if (difficulty := _enum(PaperDifficultyLevel, getattr(q, "difficulty", None))) is not None:
         conds.append(DatasetQuestion.difficulty == difficulty)
+    conds.append(~DatasetQuestion.text.op("~*")(UNSEEN_TEXT_REF))  # "as described in the text" can't go on a paper
     if figures is not None:
         conds.append(has_figure() if figures else not_(func.coalesce(has_figure(), false())))
     if getattr(q, "dataset_question_id", None):
@@ -148,7 +149,7 @@ async def _generate(session, paper, slots: list[tuple[int, QuestionPaperQuestion
             result = await client.gap_fill(payload)
             for out in result.get("questions", []):
                 if (not 0 <= out.get("slot_index", -1) < len(chunk) or too_similar(out["text"], taken)
-                        or references_missing_figure(out["text"])):
+                        or unfit_for_paper(out, getattr(chunk[out["slot_index"]][1], "marks", 1) or 1)):
                     continue
                 index = chunk[out["slot_index"]][0]
                 taken.append(out["text"])
