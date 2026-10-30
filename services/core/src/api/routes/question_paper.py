@@ -929,7 +929,7 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
                 ), len(pending))
             except KgServiceUnavailableError as exc:
                 kg_error = exc
-                logger.warning("paper_kg_failed", extra={"paper": str(paper.id), "open": len(pending)})
+                logger.warning(f"paper_kg_failed paper={paper.id} open={len(pending)}")
                 return
             on_paper = lambda: [*kept_items, *((f["text"], f.get("options"), f.get("answer")) for f in filled.values())]  # noqa: E731
             for n, i in enumerate(list(pending)):
@@ -942,8 +942,8 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
                     if not strict:
                         reason = None
                 if reason:
-                    logger.info("paper_slot_open", extra={"paper": str(paper.id), "slot": i, "reason": reason,
-                                                          "marks": slots[i]["marks"], "type": slots[i]["question_type"]})
+                    logger.info(f"paper_slot_open paper={paper.id} slot={i} reason={reason} marks={slots[i]['marks']} "
+                                f"type={slots[i]['question_type']} bloom={slots[i]['bloom_level']}")
                     continue
                 filled[i] = q
             pending[:] = [i for i in pending if i not in filled]
@@ -970,7 +970,7 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
                 filled[i] = soft[i]
         pending[:] = [i for i in pending if i not in filled]
         if pending:
-            logger.error("paper_short", extra={"paper": str(paper.id), "open": len(pending), "of": len(slots)})
+            logger.error(f"paper_short paper={paper.id} open={len(pending)} of={len(slots)}")
             if kg_error and not filled:
                 raise kg_error
         picked = [(i, filled[i]) for i in free if i in filled and _mcq_ok(filled[i])]

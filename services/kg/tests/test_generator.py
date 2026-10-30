@@ -159,3 +159,16 @@ async def test_verifier_drops_a_question_with_a_wrong_answer(fake):
     )
     assert questions == [QUESTION]
     assert client.calls[1]["model"] == generator.VERIFY_MODEL
+
+
+@pytest.mark.asyncio
+async def test_b26_a_wrong_difficulty_label_relabels_the_question_instead_of_dropping_it(fake):
+    """Live papers came back short: the examiner failed every small slot labelled HARD, on every re-ask."""
+    hard = {**QUESTION, "difficulty": "HARD", "slot_index": 3}
+    fake([{"questions": [hard]}, {"verdicts": [{"index": 0, "ok": True, "problem": "", "difficulty": "EASY"}]}])
+    questions = await generator.generate_questions(
+        api_key="k", board="CBSE", grade=10, subject="Science", concept_context=CONTEXT,
+        bloom_distribution={}, difficulty_distribution={}, question_types=[], total_questions=1,
+    )
+    assert [(q["difficulty"], q["slot_index"]) for q in questions] == [("EASY", 3)]
+    assert "NOT a reason to fail" in generator.VERIFY_SYSTEM

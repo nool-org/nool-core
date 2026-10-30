@@ -122,8 +122,9 @@ VERIFY_SCHEMA = {
     "type": "object",
     "properties": {"verdicts": {"type": "array", "items": {
         "type": "object",
-        "properties": {"index": {"type": "integer"}, "ok": {"type": "boolean"}, "problem": {"type": "string"}},
-        "required": ["index", "ok", "problem"],
+        "properties": {"index": {"type": "integer"}, "ok": {"type": "boolean"}, "problem": {"type": "string"},
+                       "difficulty": {"type": "string", "enum": list(_DIFFICULTY_LEVELS)}},
+        "required": ["index", "ok", "problem", "difficulty"],
         "additionalProperties": False,
     }}},
     "required": ["verdicts"],
@@ -138,12 +139,13 @@ ok=true only if ALL hold:
    is correct and `answer` is that option. For assertion-reason, decide separately whether A is true,
    whether R is true, and whether R explains A, then pick the option.
 3. Numbers and facts are right (recompute every calculation).
-4. The work asked fits the `marks` (a 1-3 mark question has at most 1-3 things to state), the `difficulty`
-   label fits (a multi-part or multi-step question is not EASY; a one-step recall is not HARD), and it is at
-   Class {grade} level, not a lower class.
+4. The work asked fits the `marks` (a 1-3 mark question has at most 1-3 things to state) and it is at
+   Class {grade} level, not a lower class. A wrong `difficulty` label is NOT a reason to fail a question.
 5. For mcq the four options are different, mutually exclusive, and none contradicts itself.
 6. It never says "as described in the text/chapter" or points at anything the printed paper does not show.
-If not ok, say precisely what is wrong in `problem`; otherwise leave it empty."""
+If not ok, say precisely what is wrong in `problem`; otherwise leave it empty.
+In `difficulty` always give the label that fits the question (EASY = direct recall or one step; MEDIUM = apply a
+rule to a new situation or two short parts; HARD = several steps or two ideas combined), whether or not ok."""
 
 
 # ponytail: the 20-30% bank share is prompt-enforced, not checked after the
@@ -350,5 +352,16 @@ async def _verified(api_key: str, questions: list[dict], *, board: str, grade: i
         return questions
     bad = {v["index"]: v["problem"] for v in verdicts if not v["ok"]}
     for i, why in bad.items():
-        logger.info("kg_question_dropped", extra={"index": i, "problem": why})
-    return [q for i, q in enumerate(questions) if i not in bad]
+        # the message carries the reason: this service's log lines don't print `extra`
+        logger.info(f"kg_question_dropped slot={questions[i].get('slot_index')} problem={why[:200]!r}")
+    # B26: a wrong difficulty label used to fail the question - and a small slot asked HARD failed on every re-ask,
+    # so papers came back short. The question stays, labelled as the examiner judges it.
+    fitted = {v["index"]: v.get("difficulty") for v in verdicts if v["ok"] and v.get("difficulty")}
+    kept = []
+    for i, q in enumerate(questions):
+        if i not in bad:
+            if fitted.get(i) and fitted[i] != q.get("difficulty"):
+                logger.info(f"kg_question_relabelled slot={q.get('slot_index')} {q.get('difficulty')}->{fitted[i]}")
+                q = {**q, "difficulty": fitted[i]}
+            kept.append(q)
+    return kept
