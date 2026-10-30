@@ -89,10 +89,10 @@ async def _scope_chapter_ids(session: AsyncSession, paper: QuestionPaper) -> lis
 
 
 async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=None, relax: int = 0,
-                     related=()) -> DatasetQuestion | None:
+                     related=(), total: int | None = None, avoid_topics=()) -> DatasetQuestion | None:
     """`figures`: True only questions with a picture, False only ones without, None either.
     `relax` (T-028, a paper must never come out short): 1 also drops the difficulty, 2 the Bloom level,
-    3 the marks, the chapter (any chapter of the paper) and the near-duplicate check (an exact repeat still never).
+    3 the marks, the chapter (any chapter of the paper) and the near-duplicate check, 4 also the concept cap (an exact repeat still never).
     `related`: (text, options, answer) of the paper's other questions - a bank question about the same thing with the
     same answer is skipped (T-070)."""
     chapter = getattr(q, "chapter_id", None)
@@ -115,9 +115,10 @@ async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=Non
     order = [o for o in (same_topic, func.random()) if o is not None]
     rows = (await session.execute(select(DatasetQuestion).where(*conds)
                                   .order_by(*order).limit(BANK_CANDIDATES))).scalars().all()
-    return next((d for d in rows if (_norm(d.text) not in map(_norm, taken) if relax >= 3 else (
-        not too_similar(d.text, taken) and not any(same_question((d.text, d.options, d.answer), r) for r in related)
-        and not concept_full(d.text, [r[0] for r in related], None, [c.text for c in rows])))), None)  # T-070: max 2 per concept
+    return next((d for d in rows if _norm(d.text) not in map(_norm, taken) and (relax >= 4 or (  # 4: only "not an exact repeat"
+        (relax >= 3 or not too_similar(d.text, taken)) and not any(same_question((d.text, d.options, d.answer), r) for r in related)
+        and d.topic_id not in avoid_topics  # B28: not a fourth question on one subtopic
+        and not concept_full(d.text, [r[0] for r in related], total)))), None)  # T-070: max 2 per concept
 
 
 async def _sections(session, chapter_ids) -> tuple[str, list[dict]]:

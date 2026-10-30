@@ -302,3 +302,26 @@ async def test_instructions_follow_the_blueprint_after_it_shrinks(db_session):
 
     out = await question_paper.get_paper(seeded["paper_id"], user=teacher, session=db_session)
     assert out.instructions == ["Section A (MCQ) consists of 4 questions of 1 mark each."]
+
+
+@pytest.mark.asyncio
+async def test_b28_concept_cap_is_enforced_by_asking_kg_again_and_a_paper_of_ten_has_a_hard_question(db_session, monkeypatch):
+    teacher, seeded = await _seed_paper_ready_to_generate(db_session)
+    monkeypatch.setattr(question_paper, "_bank_slots", lambda *a, **k: _no_bank())
+    calls = []
+    topics = "refraction magnet circuit lens acid ohm prism cell fuse wire".split()
+
+    async def fake(**kwargs):
+        calls.append(len(kwargs["slots"]))
+        # first call: every question is about mirrors; the later ones are varied
+        return [{"text": (f"Explain mirror image {i} number {i * 7}?" if len(calls) == 1 else f"Explain {topics[i % 10]} case {i * 7}?"),
+                 "answer": f"ans{i}", "bloom_level": "UNDERSTAND", "difficulty": "EASY", "question_type": "mcq",
+                 "chapter_number": 3, "topic": "", "options": [f"a{i}", f"b{i}", f"c{i}", f"d{i}"]}
+                for i, s in enumerate(kwargs["slots"])]
+
+    monkeypatch.setattr("src.api.routes.question_paper.kg_client.generate_paper_questions", fake)
+    await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
+    questions = (await question_paper.list_paper_questions(seeded["paper_id"], user=teacher, session=db_session)).items
+    assert len(questions) == 10 and len(calls) >= 2
+    assert sum("mirror" in q.text for q in questions) <= 2
+    assert any(q.difficulty == "HARD" for q in questions)

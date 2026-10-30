@@ -16,7 +16,8 @@ Total is rounded up; over the blueprint's durationMinutes is a warning.
 """
 
 import math
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,10 +43,12 @@ from src.domain.models import (
     QuestionPaperSection,
     QuestionPaperValidation,
     QuestionType,
+    Subtopic,
+    Topic,
 )
 from src.domain.models.question_paper import COPILOT_COLUMNS, QuestionPaperQuestion
 from src.services.paper_repeats import find_repeats
-from src.services.question_selector import crowded, duplicates_of, over_marked, plain_recall
+from src.services.question_selector import _concepts, crowded, duplicates_of, over_marked, plain_recall
 
 MIX_TOLERANCE = 10
 MINUTES_FLAT = {QuestionType.MCQ: 1.5, QuestionType.TRUE_FALSE: 1.0}
@@ -61,6 +64,11 @@ def estimate_minutes(questions) -> int:
         else:
             total += MINUTES_PER_MARK.get(q.question_type, MINUTES_PER_MARK_DEFAULT) * q.marks
     return math.ceil(total)
+
+
+def _word_list(text: str | None) -> list[str]:
+    """Concept words of a topic's text, once per sentence."""
+    return [w for sentence in re.split(r"[.\n]", text or "") for w in _concepts(sentence)]
 
 
 def _percent(part: int, whole: int) -> int:
@@ -165,7 +173,15 @@ async def rules_check(session: AsyncSession, paper: QuestionPaper) -> RulesCheck
             issue("level_mismatch", "warning", f"Q{n + 1} is labelled {q.bloom_level.value.title()} but only asks for a fact.", q.id)
 
     # T-070: one idea used more than twice, a recall question worth 3+ marks, no Hard question on a real paper
-    for n, word in crowded([q.text for q in questions]).items():
+    terms = None  # B28: only the chapters' own topic words are ideas (not "student", "formed", "connected")
+    if blueprint_chapters:
+        topics = (await session.execute(select(Topic).where(Topic.chapter_id.in_(blueprint_chapters)))).scalars().all()
+        names = [c.name for c in (await session.execute(select(Chapter).where(Chapter.id.in_(blueprint_chapters)))).scalars().all()]
+        names += [t.name for t in topics] + [n for (n,) in (await session.execute(
+            select(Subtopic.name).where(Subtopic.topic_id.in_([t.id for t in topics])))).all()]
+        body = Counter(w for t in topics for w in _word_list(t.text_content))
+        terms = set().union(*map(_concepts, names)) | {w for w, c in body.items() if c >= 3}
+    for n, word in crowded([q.text for q in questions], terms=terms).items():
         issue("repeated_concept", "warning", f'Q{n + 1} is the 3rd+ question about "{word}".', questions[n].id)
     for n, q in enumerate(questions):
         if over_marked(q.text, q.marks, q.bloom_level):

@@ -71,7 +71,7 @@ from src.services.paper_actions import COPILOT_COLUMNS, create_version, load_que
 from src.services.paper_instructions import sync_instructions
 from src.services.paper_repeats import normalize
 from src.services.question_selector import (
-    concept_full, duplicates_of, figure_svgs, has_figure, over_marked, plain_recall, same_question, text_only_filter, unfit_for_paper,
+    concept_full, crowded, duplicates_of, topic_full, figure_svgs, has_figure, over_marked, plain_recall, same_question, text_only_filter, unfit_for_paper,
 )
 
 logger = logging.getLogger(__name__)
@@ -622,7 +622,9 @@ async def _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter
                            question_type=_question_type(slot["question_type"]), difficulty=slot["difficulty"],
                            chapter_id=slot.get("chapter_id"))
     bank = await _bank_pick(session, want, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken,
-                            figures=figure, relax=relax,
+                            figures=figure, relax=relax, total=len(slots),
+                            avoid_topics={t for t in (v.get("topic_id") for v in picked.values())
+                                          if topic_full(t, [v.get("topic_id") for v in picked.values()], len(slots))},
                             related=[*others, *((v['text'], v.get('options'), v.get('answer')) for v in picked.values())])
     if bank is None:
         return
@@ -936,8 +938,11 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
                 q = generated.get(n)
                 reason = ("kg_sent_nothing" if not q else "bad_options" if not _mcq_ok(q)
                           else "repeat" if any(same_question((q["text"], q.get("options"), q.get("answer")), o) for o in on_paper())
-                          else "crowded" if concept_full(q["text"], [o[0] for o in on_paper()], len(slots), [g["text"] for g in generated.values()])  # T-070
+                          else "crowded" if (concept_full(q["text"], [o[0] for o in on_paper()], len(slots), [g["text"] for g in generated.values()])  # T-070
+                                             or topic_full(q.get("topic_id") or q.get("topic"), [f.get("topic_id") or f.get("topic") for f in filled.values()], len(slots)))
                           else "unfit" if unfit_for_paper(q, slots[i]["marks"]) else None)
+                if reason == "crowded":
+                    soft.setdefault(i, q)  # B28: only used as the last resort, flagged
                 if reason == "unfit":
                     soft[i] = q
                     if not strict:
@@ -948,6 +953,9 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
                     continue
                 filled[i] = q
             pending[:] = [i for i in pending if i not in filled]
+
+        def on_paper_now() -> list:
+            return [*kept_items, *((f["text"], f.get("options"), f.get("answer")) for f in filled.values())]
 
         async def backfill(relax: int) -> None:
             for i in list(pending):
@@ -965,11 +973,19 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
             await backfill(relax)
         if pending and time.monotonic() - started < 150:  # the request still has to answer in time
             await ask_milo(strict=False)
-        await backfill(3)
-        for i in list(pending):
-            if i in soft:
+        await backfill(3)  # B28: marks/chapter loosened, the concept cap still kept
+        for i in list(pending):  # Milo's picky-check misses, unless they would break the concept cap
+            if i in soft and not concept_full(soft[i]["text"], [o[0] for o in on_paper_now()], len(slots)):
                 filled[i] = soft[i]
         pending[:] = [i for i in pending if i not in filled]
+        if pending and time.monotonic() - started < 150:  # ask kg again for what is still open
+            await ask_milo(strict=False)
+        if pending:  # last resort: over the cap beats a short paper, and the paper says so
+            await backfill(4)
+            for i in list(pending):
+                if i in soft:
+                    filled[i] = soft[i]
+            pending[:] = [i for i in pending if i not in filled]
         if pending:
             logger.error(f"paper_short paper={paper.id} open={len(pending)} of={len(slots)}")
             if kg_error and not filled:
@@ -1023,6 +1039,11 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
                       and str(getattr(r.bloom_level, "value", r.bloom_level)) in ("APPLY", "ANALYZE", "EVALUATE", "CREATE")]
         for _, r in sorted(hard_slots, key=lambda p: -p[1].marks):
             r.difficulty = PaperDifficultyLevel.HARD
+        if not any(r.difficulty == PaperDifficultyLevel.HARD for _, r in placed):  # B28: none planned (e.g. a 20-mark test)
+            # the heaviest question that asks for more than recall; ponytail: relabel, not a request to kg
+            rank = lambda r: (str(getattr(r.bloom_level, "value", r.bloom_level)) != "REMEMBER", r.marks > 1, r.marks)  # noqa: E731
+            if (pool := fresh or placed):
+                max(pool, key=lambda p: rank(p[1]))[1].difficulty = PaperDifficultyLevel.HARD
     # paper order follows the blueprint's slots, so a gap mid-paper is filled where it is
     for order, (_, row) in enumerate(sorted(placed, key=lambda p: p[0]), start=1):
         row.order = order
@@ -1064,6 +1085,8 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
     if wanted and not await figure_svgs(session, [q["bank_id"] for q in questions if q.get("bank_id")]):
         issues.append("No question with a figure is in this school's question banks for these chapters. "
                       "Ask your admin to add a bank that has diagrams.")  # C-020: say so instead of silently skipping
+    for n, word in crowded([k.text for k in keep] + [q["text"] for q in questions], len(slots)).items():
+        issues.append(f'A 3rd question about "{word}" was kept because the paper could not be filled otherwise.')  # B28
     if duplicate_count:
         issues.append(f"{duplicate_count} duplicate question(s) were generated.")
     if requested_chapter_numbers and coverage_percent < 100:

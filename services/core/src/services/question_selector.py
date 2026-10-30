@@ -18,6 +18,7 @@ import random
 import uuid
 from dataclasses import dataclass, field
 
+import math
 import re
 
 from sqlalchemy import and_, false, func, literal_column, not_, or_, select
@@ -183,7 +184,16 @@ MAX_PER_CONCEPT = 2
 _ALIAS = {"detergent": "soap", "detergents": "soap", "soaps": "soap", "micelles": "micelle"}
 _TOPIC = frozenset("light current electric electricity energy number solution equation reaction chemical metal metals "
                    "value figure diagram related following statement correct incorrect true false based formula "
-                   "produced produce used uses calculate shown below given using called known nature property".split())
+                   "produced produce used uses calculate shown below given using called known nature property "
+                   # B28: generic words that are in every stem, never an idea of their own
+                   "student students formed form forms body human connected connect explain describe write state "
+                   "name list give example examples help helps case cases system process place different "
+                   "similar common effect effects reason reasons difference differences define situation "
+                   "observed observe observation experiment activity result results change changes things thing "
+                   "people person water air house household home daily everyday general important main major "
+                   "several certain various following along between during while which what why how "
+                   "where when would could should about after before through other another their there these those "
+                   "points point part parts type types kind kinds mark marks answer question questions".split())
 
 
 def _concepts(text: str) -> set[str]:
@@ -198,10 +208,11 @@ def _concepts(text: str) -> set[str]:
     return out
 
 
-def crowded(texts: list[str], total: int | None = None, universe=()) -> dict[int, str]:
+def crowded(texts: list[str], total: int | None = None, universe=(), terms=None) -> dict[int, str]:
     """T-070: {index: concept} for each question that is a 3rd+ use of a concept word on the paper (cap MAX_PER_CONCEPT).
-    A word in more than a quarter of the paper is the chapter itself, not a repeated idea; while a paper is still being
-    built, `universe` (the other questions on offer) shows how common a word is. ponytail: word overlap."""
+    A word in over half the questions is the chapter itself, not a repeated idea; while a paper is still being built,
+    `universe` (the other questions on offer) shows how common a word is. `terms` (B28): when given, only a word in it
+    (the chapters' topic words) counts as an idea. ponytail: word overlap."""
     sets = [_concepts(t) for t in texts]
     wide = [*sets, *map(_concepts, universe)]
     n = max(total or 0, len(texts))
@@ -212,7 +223,8 @@ def crowded(texts: list[str], total: int | None = None, universe=()) -> dict[int
     for i, words in enumerate(sets):
         for w in sorted(words):
             seen[w] = seen.get(w, 0) + 1
-            if seen[w] > MAX_PER_CONCEPT and sum(w in x for x in wide) <= max(3, n // 4) and i not in out:
+            if (seen[w] > MAX_PER_CONCEPT and (terms is None or w in terms) and i not in out
+                    and sum(w in x for x in wide) <= len(wide) / 2):
                 out[i] = w
     return out
 
@@ -220,6 +232,11 @@ def crowded(texts: list[str], total: int | None = None, universe=()) -> dict[int
 def concept_full(text: str, others: list[str], total: int | None = None, universe=()) -> bool:
     """Adding `text` to a paper holding `others` would be a 3rd use of some concept."""
     return len(others) in crowded([*others, text], total, universe)
+
+
+def topic_full(key, keys: list, total: int) -> bool:
+    """B28: a paper of 8+ questions keeps a quarter of its questions (at least 3) on one subtopic at most."""
+    return bool(key) and total >= 8 and keys.count(key) >= max(3, math.ceil(total / 4))
 
 
 def over_marked(text: str | None, marks: int, bloom) -> bool:

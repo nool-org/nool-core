@@ -72,3 +72,22 @@ def test_pieces_with_dots_and_labels_between_them_still_join():
     xs = [10, 20, 30, 40, 50]
     body = "".join(seg.format(a, 50 - a, b, 50 - b, b, 50 - b) for a, b in zip(xs, xs[1:]))
     assert _smooth_curves(f"<svg>{body}</svg>").count("<circle") == 4 and "<line" not in _smooth_curves(f"<svg>{body}</svg>")
+
+
+def test_b28_generic_words_are_never_a_repeated_concept_and_the_cap_holds_in_a_chapter_heavy_paper():
+    generic = [f"The student {w} in case number {n} is connected to the human body?" for n, w in enumerate(
+        "refraction magnet circuit lens acid ohm prism cell".split())]
+    assert crowded(generic) == {}  # student / human / body / connected are stop-words
+    mirror = [f"Q{n}: which mirror shows case {n} in {w}?" for n, w in enumerate("refraction magnet circuit lens acid".split())]
+    texts = [*mirror[:3], *OTHER[:5]]
+    assert crowded(texts) == {2: "mirror"}  # 3 of 8 is not "chapter-wide", the cap holds (was exempt at >3 of a 12+ paper)
+    # a word only counts when it is one of the chapters' topic words
+    assert crowded(texts, terms={"circuit"}) == {}
+    assert concept_full("A mirror question", mirror[:2] + OTHER[:5], 10)  # even while the paper is still short (total given)
+
+
+def test_b28_topic_is_capped_at_a_quarter_of_the_paper():
+    from src.services.question_selector import topic_full
+    assert topic_full("earthing", ["earthing"] * 3 + ["x"] * 5, 12)
+    assert not topic_full("earthing", ["earthing"] * 2 + ["x"] * 5, 12)
+    assert not topic_full("earthing", ["earthing"] * 9, 6)  # a short paper is not judged
