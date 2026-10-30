@@ -62,6 +62,12 @@ services:
       - traefik.http.routers.nool-assets-ip.rule=Host(`assets.200.234.40.151.sslip.io`)
       - traefik.http.routers.nool-assets-ip.entrypoints=websecure
       - traefik.http.routers.nool-assets-ip.tls.certresolver=letsencrypt
+      # B23: the web app draws question figures onto a canvas for the paper PDF, which needs CORS
+      - traefik.http.middlewares.nool-assets-cors.headers.accesscontrolallowmethods=GET,HEAD
+      - traefik.http.middlewares.nool-assets-cors.headers.accesscontrolalloworiginlist=*
+      - traefik.http.middlewares.nool-assets-cors.headers.accesscontrolmaxage=86400
+      - traefik.http.routers.nool-assets.middlewares=nool-assets-cors
+      - traefik.http.routers.nool-assets-ip.middlewares=nool-assets-cors
 
   # images built in their own repos (scripts/deploy-server.sh)
   school-admin:

@@ -23,7 +23,8 @@ def test_bloom_and_difficulty_follow_marks_not_question_count():
         assert abs(bloom[level] - pct * 25 / 100) <= 2, (level, bloom)
     assert "CREATE" not in bloom and "EVALUATE" not in bloom
     diff = _marks_by(slots, "difficulty")
-    assert abs(diff["EASY"] - 10) <= 2 and abs(diff["HARD"] - 3.75) <= 2
+    # T-070: a 4+ mark question is never EASY, so some EASY marks move to small questions (within 5 marks of target)
+    assert abs(diff["EASY"] - 10) <= 5 and abs(diff["HARD"] - 3.75) <= 5
     assert [s["question_type"] for s in slots] == ["mcq"] * 5 + ["short_answer"] * 5 + ["long_answer"] * 2
     assert [s["section"] for s in slots][-1] == "C"
 

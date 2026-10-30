@@ -205,13 +205,13 @@ async def test_fill_missing_keeps_what_the_paper_has_and_milo_writes_only_the_re
     from src.domain.models import QuestionPaper
 
     teacher, seeded = await _seed_paper_ready_to_generate(db_session)
-    short = {"n": 4}  # the first run comes back 6 short of 10
+    short = {"n": 4}  # the first run comes back 6 short of 10 - and so does the automatic second ask (T-028)
     (await db_session.get(QuestionPaper, uuid.UUID(seeded["paper_id"]))).total_marks = 10  # 10 slots of 1
     asked = []
 
     async def fake_generate_paper_questions(**kwargs):
         asked.append(len(kwargs["slots"]))
-        n = short.pop("n", len(kwargs["slots"]))
+        n = {1: short["n"], 2: 0}.get(len(asked), len(kwargs["slots"]))
         return [{"text": f"AI question {len(asked)}.{i}?", "answer": "x", "bloom_level": s["bloom_level"],
                  "difficulty": s["difficulty"], "question_type": "mcq", "chapter_number": 3, "topic": "",
                  "options": ["a", "b", "c", "x"]}
@@ -280,14 +280,10 @@ async def test_kg_questions_land_by_slot_index_and_an_mcq_without_options_is_not
     await question_paper.generate_paper(seeded["paper_id"], user=teacher, session=db_session)
     questions = (await question_paper.list_paper_questions(seeded["paper_id"], user=teacher, session=db_session)).items
     expected = [i for i in range(len(slots_seen)) if i != 1]
-    assert [q.text for q in questions] == [f"Q for slot {i}?" for i in expected]
-    assert [q.marks for q in questions] == [slots_seen[i]["marks"] for i in expected]
-
-    # the gap is slot 1 (mid-paper): fill-missing asks for that slot only and fills it in place
-    await question_paper.fill_missing(seeded["paper_id"], user=teacher, session=db_session)
-    assert calls[1] == [slots_seen[1]]
-    questions = (await question_paper.list_paper_questions(seeded["paper_id"], user=teacher, session=db_session)).items
+    # the optionless MCQ (slot 1, mid-paper) is not saved; generation asks again for that slot only (T-028)
+    assert calls[1] == [slots_seen[1]] and len(calls) == 2
     assert [q.text for q in questions] == ["Q for slot 0?", "Filled slot 1?"] + [f"Q for slot {i}?" for i in expected[1:]]
+    assert [q.marks for q in questions] == [slots_seen[i]["marks"] for i in range(len(slots_seen))]
     assert [q.order for q in questions] == list(range(1, len(slots_seen) + 1))
     assert questions[1].marks == slots_seen[1]["marks"]
 

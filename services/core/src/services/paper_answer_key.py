@@ -7,6 +7,8 @@ model only lays out the marking points. A teacher-edited key (updated_by set)
 is never regenerated unless the caller asks to overwrite.
 """
 
+import re
+
 from sqlalchemy import select
 from sqlalchemy.orm import undefer_group
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +23,7 @@ from src.api.schemas.paper_answer_key import (
 from src.domain.models import DatasetQuestion, QuestionPaper, QuestionPaperQuestion, Subject, User
 from src.domain.models.paper_answer_key import QuestionPaperAnswerKey
 from src.services import paper_answer_key_client as client
+from src.services.question_selector import figure_caption
 
 _TYPES = {"MCQ", "SHORT_ANSWER", "LONG_ANSWER", "TRUE_FALSE"}
 
@@ -28,6 +31,32 @@ _TYPES = {"MCQ", "SHORT_ANSWER", "LONG_ANSWER", "TRUE_FALSE"}
 def _v(x):
     """Enum -> its value; anything else as is."""
     return getattr(x, "value", x)
+
+
+def _words(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9. ]+", " ", (text or "").lower()).split())
+
+
+def mcq_index(answer: str | None, options: list[str] | None) -> int | None:
+    """Which option an MCQ answer points at: a letter "(b)" / "b)" / "B", or the option's own text (possibly
+    followed by a reason). None when it can't be told - never a guess between two equal options."""
+    if not answer or not options:
+        return None
+    letter = re.match(r"^\s*\(?([a-dA-D])(?:\)|[.:]|\s*$)", answer)
+    if letter and len(options) > ord(letter.group(1).lower()) - 97:
+        return ord(letter.group(1).lower()) - 97
+    head, norm = _words(answer), [_words(o) for o in options]
+    hits = [i for i, o in enumerate(norm) if o and (head == o or head.startswith(o + " ") or head.startswith(o + "."))]
+    if len(hits) != 1 and len(set(norm[i] for i in hits)) == 1:
+        return None  # identical options: ambiguous
+    # several prefixes match ("Greater" / "Greater with water"): the longest is the one meant
+    return max(hits, key=lambda i: len(norm[i])) if hits else None
+
+
+def key_contradicts(question_answer: str | None, key_answer: str, options: list[str] | None) -> bool:
+    """T-062: the written key names a different option than the answer stored with the question."""
+    stored, written = mcq_index(question_answer, options), mcq_index(key_answer, options)
+    return stored is not None and written is not None and stored != written
 
 
 def marks_match(points: list[dict], marks: float) -> bool:
@@ -82,8 +111,12 @@ async def generate_answer_key(session: AsyncSession, paper: QuestionPaper, *, re
         source = bank.get(getattr(q, "dataset_question_id", None))
         qtype = str(_v(getattr(q, "question_type", None)) or "").upper()
         options = getattr(q, "options", None) or (source.options if source else None)
-        answer = getattr(q, "answer", None) or (source.answer if source else None)
-        return {"id": str(q.id), "text": q.text, "marks": q.marks, "bloom_level": _v(q.bloom_level),
+        # only the vetted bank answer is a reference; an AI question's own answer is checked against the key below
+        answer = source.answer if source else None
+        # the model can't see a figure: tell it what the picture shows, so the key can refer to it
+        shown = figure_caption(source) if source else None
+        text = f"{q.text}\n[Figure shown with this question: {shown}]" if shown else q.text
+        return {"id": str(q.id), "text": text, "marks": q.marks, "bloom_level": _v(q.bloom_level),
                 "question_type": qtype if qtype in _TYPES else None, "options": options or None,
                 "reference_answer": answer or None,
                 "reference_solution": (source.solution if source else None) or None}
@@ -93,18 +126,26 @@ async def generate_answer_key(session: AsyncSession, paper: QuestionPaper, *, re
         "items": [item(q) for q in targets],
     })
     by_id = {str(q.id): q for q in targets}
+    conflicts: list[str] = []
     for out in result.get("items", []):
         q = by_id.get(out.get("id"))
         points = [{"point": p["point"], "marks": p["marks"]} for p in out.get("marking_points", [])]
         if q is None or not points or not marks_match(points, q.marks):
             continue  # never store a scheme that doesn't add up
+        if str(_v(q.question_type) or "").upper() == "MCQ" and key_contradicts(
+                (q.answer or (bank.get(q.dataset_question_id).answer if bank.get(q.dataset_question_id) else None)),
+                out["answer"], q.options or (bank[q.dataset_question_id].options if q.dataset_question_id in bank else None)):
+            conflicts.append(str(q.id))  # two sources disagree on the right option: no key beats a wrong key
+            continue
         key = keys.get(q.id)
         if key is None:
             key = QuestionPaperAnswerKey(question_id=q.id)
             session.add(key)
         key.answer, key.marking_points, key.updated_by = out["answer"], points, None
     await session.commit()
-    return await get_answer_key(session, paper)
+    out = await get_answer_key(session, paper)
+    out.conflict_question_ids = conflicts
+    return out
 
 
 async def update_answer_key(session: AsyncSession, paper: QuestionPaper, question_id: str,
