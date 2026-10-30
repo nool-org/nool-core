@@ -66,6 +66,7 @@ class ChapterMarks(CamelModel):
 class QuestionPaperOut(CamelModel):
     id: str
     name: str
+    created_at: datetime | None = None  # when the paper was made - the list's "Recent" order and date
     exam_type: str
     board: str
     grade: int
@@ -93,8 +94,15 @@ class QuestionPaperOut(CamelModel):
     difficulty_mix: DifficultyMix | None = None
 
 
+PaperName = Annotated[str, Field(min_length=1, max_length=120)]  # T-066: a name that fits a list row
+
+
+class RenamePaperIn(CamelModel):
+    name: PaperName
+
+
 class CreateQuestionPaperIn(CamelModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: PaperName
     exam_type: str
     board: str
     grade: int

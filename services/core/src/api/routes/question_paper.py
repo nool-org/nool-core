@@ -3,7 +3,7 @@ import uuid
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer_group
 
@@ -27,6 +27,7 @@ from src.api.schemas.question_paper import (
     QuestionPaperQuestionCandidateOut,
     QuestionPaperQuestionOut,
     ReorderQuestionsIn,
+    RenamePaperIn,
     UpdateQuestionPaperQuestionIn,
 )
 from src.domain.models import (
@@ -110,6 +111,7 @@ async def _serialize(session: AsyncSession, paper: QuestionPaper) -> QuestionPap
     difficulty_rows = {d.level: d.value for d in difficulty_dist.scalars().all()}
 
     return QuestionPaperOut(
+        created_at=paper.created_at,
         id=str(paper.id),
         name=paper.name,
         exam_type=paper.exam_type,
@@ -326,7 +328,8 @@ async def list_papers(
               .where(TeacherClassAssignment.teacher_id == user.id,
                      TeacherClassAssignment.subject_id == QuestionPaper.subject_id,
                      SchoolClass.grade == QuestionPaper.grade, SchoolClass.school_id == user.school_id))
-    result = await session.execute(select(QuestionPaper).where(QuestionPaper.school_id == user.school_id, taught.exists()))
+    result = await session.execute(select(QuestionPaper).where(QuestionPaper.school_id == user.school_id, taught.exists())
+                                   .order_by(QuestionPaper.created_at.desc()))  # newest first (T-065)
     items = [await _serialize(session, p) for p in result.scalars().all()]
     return ListEnvelope(items=items, total=len(items))
 
@@ -392,6 +395,84 @@ async def update_paper(
     await session.commit()
     await session.refresh(paper)
     return await _serialize(session, paper)
+
+
+async def _get_paper_owned(session: AsyncSession, paper_id: str, user: User) -> QuestionPaper:
+    """Renaming, duplicating and deleting are for the teacher who made the paper (T-067)."""
+    paper = await _get_paper_to_edit(session, paper_id, user)
+    if paper.created_by != user.id:
+        raise ForbiddenError("Only the teacher who made this paper can do that.")
+    return paper
+
+
+@router.patch("/question-papers/{paper_id}", summary="Rename")
+async def rename_paper(
+    paper_id: str,
+    body: RenamePaperIn,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> QuestionPaperOut:
+    paper = await _get_paper_owned(session, paper_id, user)
+    paper.name = body.name.strip() or paper.name
+    await session.commit()
+    await session.refresh(paper)
+    return await _serialize(session, paper)
+
+
+@router.delete("/question-papers/{paper_id}", status_code=204, summary="Delete a paper and everything on it")
+async def delete_paper(
+    paper_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    paper = await _get_paper_owned(session, paper_id, user)
+    # answer keys, versions, chat and Set B links cascade in the database; these children don't
+    for child in (QuestionPaperQuestion, QuestionPaperDatasetShare, QuestionPaperChapter, QuestionPaperTopic,
+                  QuestionPaperSection, QuestionPaperBloomDistribution, QuestionPaperDifficultyDistribution,
+                  QuestionPaperValidation):
+        await session.execute(delete(child).where(child.paper_id == paper.id))
+    await session.delete(paper)
+    await session.commit()
+
+
+@router.post("/question-papers/{paper_id}/duplicate", status_code=201, summary="Copy a paper, questions included")
+async def duplicate_paper(
+    paper_id: str,
+    user: User = Depends(require_role(Role.TEACHER)),
+    _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
+    session: AsyncSession = Depends(get_db_session),
+) -> QuestionPaperOut:
+    original = await _get_paper_owned(session, paper_id, user)
+    plan = await get_active_plan(session, user.school_id)
+    if plan is not None and plan.question_paper_limit is not None:
+        if await count_question_papers(session, user.school_id) >= plan.question_paper_limit:
+            raise ConflictError(f"Your plan allows up to {plan.question_paper_limit} Question Papers.")
+    blueprint = CreateQuestionPaperIn.model_validate((await _serialize(session, original)).model_dump())
+    blueprint.name = f"{original.name} (copy)"[:120]
+    questions = await load_questions(session, original.id)
+    copy = QuestionPaper(
+        school_id=user.school_id, created_by=user.id, status=QuestionPaperStatus.DRAFT, name=blueprint.name,
+        exam_type=blueprint.exam_type, board=blueprint.board, grade=blueprint.grade, language=blueprint.language,
+        subject_id=blueprint.subject_id,
+    )
+    session.add(copy)
+    await session.flush()
+    await _apply_body(session, copy, blueprint)
+    for q in questions:
+        session.add(QuestionPaperQuestion(
+            paper_id=copy.id, order=q.order, bloom_level=q.bloom_level, marks=q.marks, text=q.text,
+            question_type=q.question_type, difficulty=q.difficulty, chapter_id=q.chapter_id, topic_id=q.topic_id,
+            section_name=q.section_name, options=q.options, answer=q.answer, source=q.source,
+            dataset_question_id=q.dataset_question_id))
+    if questions:  # an editable copy: in review, never finalized
+        copy.status = QuestionPaperStatus.REVIEW
+        await create_version(session, copy, created_by=user.id, summary="Copied from " + original.name[:60],
+                             origin="manual")
+    await session.commit()
+    await session.refresh(copy)
+    return await _serialize(session, copy)
 
 
 async def _resolve_kg_scope(session: AsyncSession, paper: QuestionPaper) -> tuple[list[dict], list[str]]:
