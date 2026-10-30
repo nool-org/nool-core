@@ -15,6 +15,7 @@ The stage of each topic is derived (loop_of), never stored.
 
 import logging
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -394,7 +395,8 @@ async def finish(session: AsyncSession, quiz: DailyPracticeSession) -> dict:
         # right / answered: a skipped spoken question is not in `items`; none answered = no percentage (UI-048)
         quiz.score_percent = round(100 * sum(bool(i.correct) for i, _, _ in items) / len(items)) if items else None
         quiz.analysis = {**await _analysis(session, quiz, topic, scores, lagging, items, label),
-                         "focus_topic_id": str(topic.id)}
+                         "focus_topic_id": str(topic.id),
+                         "asked": dict(Counter(item.bloom_level.value for item, _, _ in items))}
         quiz.outcome = outcome_of(quiz.attempt, lagging)
         await session.flush()
     return {"quiz": quiz, "xp_awarded": quiz.xp_awarded, "streak_days": completion["streak_days"]}

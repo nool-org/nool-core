@@ -41,6 +41,7 @@ class QuizAnalysisOut(CamelModel):
     next_step: str
     outcome: Literal["homework", "mastered", "needs_teacher"]
     homework_id: str | None
+    asked: dict[str, int] = {}  # answers per level; a level asked once is 'Not assessed' (S-012), none stored = old quiz
 
 
 class TopicQuizOut(CamelModel):

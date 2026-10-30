@@ -38,7 +38,7 @@ def _analysis_out(quiz: DailyPracticeSession) -> QuizAnalysisOut | None:
         previous_per_bloom=topic_quiz.ordered(a.get("previous_per_bloom")), lagging=a.get("lagging") or [],
         summary=a.get("summary") or "", lagging_meaning=a.get("lagging_meaning") or "",
         need_to_know=a.get("need_to_know") or [], next_step=a.get("next_step") or "", outcome=quiz.outcome,
-        homework_id=str(quiz.homework_id) if quiz.homework_id else None)
+        homework_id=str(quiz.homework_id) if quiz.homework_id else None, asked=a.get("asked") or {})
 
 
 async def _quiz_out(session: AsyncSession, quiz: DailyPracticeSession) -> TopicQuizOut:
