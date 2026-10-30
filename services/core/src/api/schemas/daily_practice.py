@@ -75,6 +75,19 @@ class PracticeResponseIn(CamelModel):
     response: dict  # who_is_right {pick, reason}; fix_steps {step, fix}; make_your_own {values: [str]}
 
 
+class PracticeLineIn(CamelModel):
+    step: int = Field(ge=0, le=20)
+
+
+class PracticeLineOut(CamelModel):
+    """Fix Milo's first tap: `found` (the circled line is the slip, go on to the fix), else `tryAgain`
+    (gentle, nothing revealed), else `result` (second wrong line: scored 0, the usual reveal)."""
+    found: bool = False
+    try_again: bool = False
+    result: SpecialResultOut | None = None
+    xp_awarded: int = 0
+
+
 class PracticeResponseOut(CamelModel):
     result: SpecialResultOut
     xp_awarded: int
