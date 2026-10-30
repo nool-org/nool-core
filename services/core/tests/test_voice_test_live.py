@@ -22,7 +22,7 @@ from tests.test_voice_test import _seed_school, _seed_teacher
 def sent(monkeypatch):
     calls = []
 
-    async def fake(session, user_ids, title, body, data=None):
+    async def fake(session, user_ids, title, body, data=None, kind=None):
         calls.append({"user_ids": {str(u) for u in user_ids}, "title": title})
         return 1
 

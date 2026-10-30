@@ -655,7 +655,7 @@ async def test_at_most_two_extensions_and_16_items_a_day(db_session):
 def sent(monkeypatch):
     calls = []
 
-    async def fake(session, user_ids, title, body, data=None):
+    async def fake(session, user_ids, title, body, data=None, kind=None):
         calls.append({"user_ids": {u for u in user_ids}, "title": title, "body": body, "data": data})
         return 1
 

@@ -32,7 +32,7 @@ from tests.test_voice_test import (_questions_ready, _seed_class_subject_chapter
 def sent(monkeypatch):
     calls = []
 
-    async def fake(session, user_ids, title, body, data=None):
+    async def fake(session, user_ids, title, body, data=None, kind=None):
         calls.append({"user_ids": {str(u) for u in user_ids}, "title": title, "data": data})
         return len(calls)
 
