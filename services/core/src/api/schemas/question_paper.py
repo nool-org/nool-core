@@ -140,15 +140,31 @@ class QuestionPaperQuestionOut(CamelModel):
     dataset_question_id: str | None = None
     figure_svg: str | None = None  # a picture question's drawing (SVG markup); not in version snapshots
     figure_url: str | None = None  # or its image file (ASSET_BASE_URL)
+    figure_caption: str | None = None  # what the image shows - alt text
+
+
+class GeneratePaperIn(CamelModel):
+    """Optional body of POST /generate. diagram_questions: how many questions with a figure to take from
+    the bank - None picks a sensible share (about 15%, at most 5), 0 means none."""
+    diagram_questions: int | None = Field(default=None, ge=0, le=30)
 
 
 class UpdateQuestionPaperQuestionIn(CamelModel):
     text: str
+    # swap in this bank question whole (text, choices, answer, picture); else only the text changes
+    dataset_question_id: str | None = None
+    # the text is a new question, not an edit of this one: the old bank question's picture goes
+    replace: bool = False
 
 
 class QuestionPaperQuestionCandidateOut(CamelModel):
     id: str
     text: str
+    dataset_question_id: str | None = None  # a bank question (send it back to swap it in whole)
+    options: list[str] | None = None
+    figure_svg: str | None = None
+    figure_url: str | None = None
+    figure_caption: str | None = None
 
 
 class ReorderQuestionsIn(CamelModel):

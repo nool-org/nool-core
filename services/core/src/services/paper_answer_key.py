@@ -21,6 +21,7 @@ from src.api.schemas.paper_answer_key import (
 from src.domain.models import DatasetQuestion, QuestionPaper, QuestionPaperQuestion, Subject, User
 from src.domain.models.paper_answer_key import QuestionPaperAnswerKey
 from src.services import paper_answer_key_client as client
+from src.services.question_selector import figure_caption
 
 _TYPES = {"MCQ", "SHORT_ANSWER", "LONG_ANSWER", "TRUE_FALSE"}
 
@@ -83,7 +84,10 @@ async def generate_answer_key(session: AsyncSession, paper: QuestionPaper, *, re
         qtype = str(_v(getattr(q, "question_type", None)) or "").upper()
         options = getattr(q, "options", None) or (source.options if source else None)
         answer = getattr(q, "answer", None) or (source.answer if source else None)
-        return {"id": str(q.id), "text": q.text, "marks": q.marks, "bloom_level": _v(q.bloom_level),
+        # the model can't see a figure: tell it what the picture shows, so the key can refer to it
+        shown = figure_caption(source) if source else None
+        text = f"{q.text}\n[Figure shown with this question: {shown}]" if shown else q.text
+        return {"id": str(q.id), "text": text, "marks": q.marks, "bloom_level": _v(q.bloom_level),
                 "question_type": qtype if qtype in _TYPES else None, "options": options or None,
                 "reference_answer": answer or None,
                 "reference_solution": (source.solution if source else None) or None}

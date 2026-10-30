@@ -37,6 +37,21 @@ def _figure(cond: str):
 _SHOWN = '!(@.role == "solution")'  # on the question or an option; a worked-solution figure blocks nothing
 
 
+# A stem that points at a figure the bank import couldn't attach.
+FIGURE_REF = r"\[image|(given|following|shown|adjacent) (figure|diagram|graph)|fig\."
+# B23: what an LLM-written paper question must not say - the paper has no picture for it.
+_LLM_FIGURE_REF = FIGURE_REF + r"|(in|from|see) the (figure|diagram|graph|circuit)|(figure|diagram|graph|circuit) (below|above)"
+
+
+def references_missing_figure(text: str | None) -> bool:
+    return bool(re.search(_LLM_FIGURE_REF, text or "", re.I))
+
+
+def has_figure():
+    """The question itself carries a picture (not only its worked solution)."""
+    return _figure(_SHOWN)
+
+
 def text_only_filter(*, pictures: bool = False):
     """Questions the app can show: no figure on the question (one only in the worked
     solution is fine), no reference to a figure the import couldn't attach, no blank MCQ
@@ -49,7 +64,7 @@ def text_only_filter(*, pictures: bool = False):
     else:
         drawable = not_(_figure(f'exists(@.blob) && {_SHOWN}'))
     pictured = and_(shown, drawable) if pictures else false()
-    unattached = DatasetQuestion.text.op("~*")(r"\[image|(given|following|shown|adjacent) (figure|diagram|graph)|fig\.")
+    unattached = DatasetQuestion.text.op("~*")(FIGURE_REF)
     return and_(
         or_(DatasetQuestion.figures.is_(None), not_(shown), pictured),
         or_(pictured, not_(unattached)),
@@ -123,7 +138,7 @@ def figure_svg(question: DatasetQuestion | None) -> str | None:
     return None
 
 
-def _figure_url(question: DatasetQuestion) -> str | None:
+def figure_url(question: DatasetQuestion) -> str | None:
     """Public URL of the question's own image file (not a solution or option one)."""
     for figure in question.figures or []:
         if figure.get("blob") and figure.get("role") not in ("solution", "option"):
@@ -131,15 +146,25 @@ def _figure_url(question: DatasetQuestion) -> str | None:
     return None
 
 
-async def figure_svgs(session: AsyncSession, question_ids) -> dict[uuid.UUID, dict]:
+def figure_caption(question: DatasetQuestion) -> str | None:
+    """What the question's own image shows (the import's caption) - alt text and answer-key context."""
+    for figure in question.figures or []:
+        if figure.get("caption") and figure.get("role") not in ("solution", "option"):
+            return figure["caption"]
+    return None
+
+
+async def figure_svgs(session: AsyncSession, question_ids, *, captions: bool = False) -> dict[uuid.UUID, dict]:
     """{bank question id: {"figure_svg": inline picture, "figure_url": image file URL}}
-    for those of `question_ids` with a picture to show - spread into the item out."""
+    for those of `question_ids` with a picture to show - spread into the item out.
+    `captions`: also "figure_caption" (for outs that have the field)."""
     ids = {i for i in question_ids if i is not None}
     if not ids:
         return {}
     rows = (await session.execute(select(DatasetQuestion).where(
         DatasetQuestion.id.in_(ids), DatasetQuestion.figures.is_not(None)))).scalars()
-    out = {q.id: {"figure_svg": figure_svg(q), "figure_url": _figure_url(q)} for q in rows}
+    out = {q.id: {"figure_svg": figure_svg(q), "figure_url": figure_url(q),
+                  **({"figure_caption": figure_caption(q)} if captions else {})} for q in rows}
     return {k: v for k, v in out.items() if v["figure_svg"] or v["figure_url"]}
 
 

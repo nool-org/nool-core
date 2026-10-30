@@ -8,7 +8,7 @@ Set B is never padded with a copy or a made-up question.
 
 from difflib import SequenceMatcher
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import false, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.services import paper_actions
@@ -27,7 +27,7 @@ from src.repositories.dataset_access import visible_datasets
 from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import paper_answer_key_client as client
-from src.services.question_selector import text_only_filter
+from src.services.question_selector import figure_svgs, has_figure, references_missing_figure, text_only_filter
 
 SIMILARITY_LIMIT = 0.85
 BANK_CANDIDATES = 20
@@ -86,7 +86,8 @@ async def _scope_chapter_ids(session: AsyncSession, paper: QuestionPaper) -> lis
     return list(chapters)
 
 
-async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken) -> DatasetQuestion | None:
+async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken, figures=None) -> DatasetQuestion | None:
+    """`figures`: True only questions with a picture, False only ones without, None either."""
     chapter = getattr(q, "chapter_id", None)
     conds = [DatasetQuestion.dataset_id.in_(dataset_ids), DatasetQuestion.bloom_level == q.bloom_level,
              text_only_filter(pictures=True), or_(DatasetQuestion.marks == q.marks, DatasetQuestion.marks.is_(None)),
@@ -95,6 +96,8 @@ async def _bank_pick(session, q, *, dataset_ids, chapter_ids, taken) -> DatasetQ
         conds.append(DatasetQuestion.question_type == qtype)
     if (difficulty := _enum(PaperDifficultyLevel, getattr(q, "difficulty", None))) is not None:
         conds.append(DatasetQuestion.difficulty == difficulty)
+    if figures is not None:
+        conds.append(has_figure() if figures else not_(func.coalesce(has_figure(), false())))
     if getattr(q, "dataset_question_id", None):
         conds.append(DatasetQuestion.id != q.dataset_question_id)
     same_topic = (DatasetQuestion.topic_id == q.topic_id).desc().nulls_last() if getattr(q, "topic_id", None) else None
@@ -144,7 +147,8 @@ async def _generate(session, paper, slots: list[tuple[int, QuestionPaperQuestion
             }
             result = await client.gap_fill(payload)
             for out in result.get("questions", []):
-                if not 0 <= out.get("slot_index", -1) < len(chunk) or too_similar(out["text"], taken):
+                if (not 0 <= out.get("slot_index", -1) < len(chunk) or too_similar(out["text"], taken)
+                        or references_missing_figure(out["text"])):
                     continue
                 index = chunk[out["slot_index"]][0]
                 taken.append(out["text"])
@@ -170,11 +174,13 @@ async def create_parallel(session: AsyncSession, original: QuestionPaper, user: 
                                                             grade=original.grade) if d.type == DatasetType.QA]
 
     taken = [q.text for q in originals]
+    pictured = await figure_svgs(session, [q.dataset_question_id for q in originals])  # a picture question gets a picture one
     picked: dict[int, dict] = {}
     for index, q in enumerate(originals):
         if not dataset_ids:
             break
-        bank = await _bank_pick(session, q, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken)
+        bank = await _bank_pick(session, q, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken,
+                                figures=q.dataset_question_id in pictured)
         if bank is not None:
             taken.append(bank.text)
             picked[index] = _question_fields(bank.text, bank.options, bank.answer, source="bank",

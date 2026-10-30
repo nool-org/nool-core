@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer_group
 
 from shared.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 
@@ -17,6 +18,7 @@ from src.api.schemas.question_paper import (
     ChapterMarks,
     CreateQuestionPaperIn,
     DifficultyMix,
+    GeneratePaperIn,
     PaperDifficultyTarget,
     PaperRules,
     PaperSection,
@@ -61,10 +63,10 @@ from src.repositories.subscription_repository import get_active_plan
 from src.repositories.usage_repository import count_question_papers
 from src.services import kg_client
 from src.services.bloom_defaults import resolve_bloom_targets
-from src.services.paper_actions import create_version, load_questions, question_out
+from src.services.paper_actions import COPILOT_COLUMNS, create_version, load_questions, question_out
 from src.services.paper_instructions import sync_instructions
 from src.services.paper_repeats import normalize
-from src.services.question_selector import figure_svgs
+from src.services.question_selector import figure_svgs, has_figure, references_missing_figure, text_only_filter
 
 router = APIRouter(prefix="/api/v1", tags=["question-papers"])
 
@@ -471,6 +473,15 @@ async def _paper_kg_identity(session: AsyncSession, paper: QuestionPaper) -> tup
 
 _REFERENCE_POOL_SIZE = 40
 BANK_SHARE = 0.25  # of a generated paper's questions taken straight from the question bank
+DIAGRAM_SHARE, MAX_DIAGRAMS = 0.15, 5  # of them, the questions with a figure (B23): about 15%, never more than 5
+
+
+def diagram_quota(slot_count: int, requested: int | None) -> int:
+    """Figure questions for a paper of `slot_count` questions: `requested` (0 = none, never more than half
+    the paper), else about DIAGRAM_SHARE of it."""
+    if requested is not None:
+        return min(requested, slot_count // 2)
+    return min(MAX_DIAGRAMS, round(slot_count * DIAGRAM_SHARE))
 
 
 async def _bank_shares(session: AsyncSession, paper: QuestionPaper, user: User) -> list[tuple]:
@@ -489,36 +500,48 @@ async def _bank_shares(session: AsyncSession, paper: QuestionPaper, user: User) 
             if d.type == DatasetType.QA]
 
 
-async def _bank_slots(session: AsyncSession, paper: QuestionPaper, user: User, slots: list[dict]) -> dict[int, dict]:
+async def _bank_slots(session: AsyncSession, paper: QuestionPaper, user: User, slots: list[dict],
+                      diagrams: int | None = None) -> dict[int, dict]:
     """About BANK_SHARE of the slots filled straight from the question bank
-    (same bloom/type/difficulty/marks), spread across the paper."""
-    from src.services.paper_parallel import _bank_pick, _scope_chapter_ids  # paper_parallel imports this module
+    (same bloom/type/difficulty/marks), spread across the paper. `diagram_quota` of them are questions
+    with a figure (they count towards that share); all the others are plain text."""
+    from src.services.paper_parallel import _scope_chapter_ids  # paper_parallel imports this module
 
     dataset_ids = [d for d, _ in await _bank_shares(session, paper, user)]
     chapter_ids = await _scope_chapter_ids(session, paper)
     if not dataset_ids or not chapter_ids or len(slots) < 2:
         return {}
-    quota, step = max(1, round(len(slots) * BANK_SHARE)), max(1, round(1 / BANK_SHARE))
+    figures = diagram_quota(len(slots), diagrams)
+    quota, step = max(1, round(len(slots) * BANK_SHARE), figures), max(1, round(1 / BANK_SHARE))
     order = [i for start in range(step) for i in range(start, len(slots), step)]  # 0,4,8,..,1,5,9,..
     picked: dict[int, dict] = {}
     taken: list[str] = []
-    for i in order:
-        if len(picked) == quota:
-            break
-        slot = slots[i]
-        want = SimpleNamespace(bloom_level=BloomLevel(slot["bloom_level"]), marks=slot["marks"],
-                               question_type=_question_type(slot["question_type"]), difficulty=slot["difficulty"],
-                               chapter_id=slot.get("chapter_id"))
-        bank = await _bank_pick(session, want, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken)
-        if bank is None:
-            continue
-        taken.append(bank.text)
-        picked[i] = {"text": bank.text, "answer": bank.answer, "options": bank.options, "bank_id": bank.id,
-                     "bloom_level": slot["bloom_level"], "difficulty": slot["difficulty"],
-                     "question_type": (bank.question_type.value if bank.question_type else slot["question_type"]),
-                     "chapter_id": bank.chapter_id, "topic_id": bank.topic_id,
-                     "chapter_number": (await session.get(Chapter, bank.chapter_id)).order_index}
+    for want_figure in (True, False):  # the figure questions first, then plain ones up to the share
+        for i in order:
+            if len(picked) == (figures if want_figure else quota):
+                break
+            if i not in picked:
+                await _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter_ids, want_figure)
     return picked
+
+
+async def _pick_bank_slot(session, slots, i, picked, taken, dataset_ids, chapter_ids, figure: bool) -> None:
+    from src.services.paper_parallel import _bank_pick
+
+    slot = slots[i]
+    want = SimpleNamespace(bloom_level=BloomLevel(slot["bloom_level"]), marks=slot["marks"],
+                           question_type=_question_type(slot["question_type"]), difficulty=slot["difficulty"],
+                           chapter_id=slot.get("chapter_id"))
+    bank = await _bank_pick(session, want, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken,
+                            figures=figure)
+    if bank is None:
+        return
+    taken.append(bank.text)
+    picked[i] = {"text": bank.text, "answer": bank.answer, "options": bank.options, "bank_id": bank.id,
+                 "bloom_level": slot["bloom_level"], "difficulty": slot["difficulty"],
+                 "question_type": (bank.question_type.value if bank.question_type else slot["question_type"]),
+                 "chapter_id": bank.chapter_id, "topic_id": bank.topic_id,
+                 "chapter_number": (await session.get(Chapter, bank.chapter_id)).order_index}
 
 
 async def _dataset_reference_questions(session: AsyncSession, paper: QuestionPaper, user: User) -> list[dict]:
@@ -553,7 +576,7 @@ async def _dataset_reference_questions(session: AsyncSession, paper: QuestionPap
         rows = (
             await session.execute(
                 select(DatasetQuestion)
-                .where(DatasetQuestion.dataset_id == dataset_id, in_scope)
+                .where(DatasetQuestion.dataset_id == dataset_id, in_scope, text_only_filter())  # no figure to lean on
                 .order_by(func.random())
                 .limit(limit)
             )
@@ -713,12 +736,13 @@ def _question_type(value: str | None) -> QuestionType | None:
 @router.post("/question-papers/{paper_id}/generate")
 async def generate_paper(
     paper_id: str,
+    body: GeneratePaperIn | None = None,
     user: User = Depends(require_role(Role.TEACHER)),
     _feature: User = Depends(require_feature(Feature.QUESTION_PAPER)),
     session: AsyncSession = Depends(get_db_session),
 ) -> QuestionPaperOut:
     paper = await _get_paper_to_edit(session, paper_id, user)
-    return await _generate(session, paper, user, keep=[])
+    return await _generate(session, paper, user, keep=[], diagrams=body.diagram_questions if body else None)
 
 
 @router.post("/question-papers/{paper_id}/fill-missing", summary="Let Milo write the questions the paper is short of")
@@ -737,7 +761,7 @@ async def fill_missing(
 
 
 async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
-                    keep: list[QuestionPaperQuestion]) -> QuestionPaperOut:
+                    keep: list[QuestionPaperQuestion], diagrams: int | None = None) -> QuestionPaperOut:
     """Fills the blueprint's slots: all of them (bank first, then Milo), or
     with `keep`, only the slots after the kept questions (Milo only)."""
     bloom_dist = await session.execute(
@@ -779,7 +803,7 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
     if chapter_refs:
         subject_name, board, grade = await _paper_kg_identity(session, paper)
         references = await _dataset_reference_questions(session, paper, user)
-        from_bank = {} if keep else await _bank_slots(session, paper, user, slots)
+        from_bank = {} if keep else await _bank_slots(session, paper, user, slots, diagrams)
         open_slots = [slots[i] for i in free if i not in from_bank]
         generated = _by_slot(await kg_client.generate_paper_questions(
             subject=subject_name,
@@ -796,7 +820,8 @@ async def _generate(session: AsyncSession, paper: QuestionPaper, user: User, *,
         ) if open_slots else [], len(open_slots))
         open_index = {i: n for n, i in enumerate(i for i in free if i not in from_bank)}
         picked = [(i, from_bank.get(i) or generated.get(open_index.get(i))) for i in free]
-        picked = [(i, q) for i, q in picked if q and _mcq_ok(q)]
+        # Milo's own questions never lean on a figure the paper doesn't have (a bank question brings its own)
+        picked = [(i, q) for i, q in picked if q and _mcq_ok(q) and (q.get("bank_id") or not references_missing_figure(q["text"]))]
         questions = [q for _, q in picked]
         slot_of = [i for i, _ in picked]
 
@@ -902,7 +927,7 @@ def _enum_or_none(enum, value):
 
 async def _paper_questions_out(session: AsyncSession, paper_id: str) -> ListEnvelope[QuestionPaperQuestionOut]:
     questions = await load_questions(session, paper_id)
-    svgs = await figure_svgs(session, [q.dataset_question_id for q in questions])
+    svgs = await figure_svgs(session, [q.dataset_question_id for q in questions], captions=True)
     items = [question_out(q).model_copy(update=svgs.get(q.dataset_question_id, {})) for q in questions]
     return ListEnvelope(items=items, total=len(items))
 
@@ -931,15 +956,29 @@ async def update_paper_question(
     if paper.status != QuestionPaperStatus.REVIEW:
         raise ConflictError("Paper isn't in REVIEW.")
     result = await session.execute(
-        select(QuestionPaperQuestion).where(
+        select(QuestionPaperQuestion).options(undefer_group(COPILOT_COLUMNS)).where(
             QuestionPaperQuestion.id == question_id, QuestionPaperQuestion.paper_id == paper_id
         )
     )
     question = result.scalar_one_or_none()
     if question is None:
         raise NotFoundError(f'No question "{question_id}" on this paper.')
-    question.text = body.text
-    question.source = QuestionSource.EDITED.value
+    if body.dataset_question_id:  # a bank question (e.g. one with a figure) swapped in whole
+        bank = (await session.execute(select(DatasetQuestion).where(
+            DatasetQuestion.id == body.dataset_question_id,
+            DatasetQuestion.dataset_id.in_([d for d, _ in await _bank_shares(session, paper, user)]),
+            text_only_filter(pictures=True)))).scalar_one_or_none()
+        if bank is None:
+            raise NotFoundError("That question isn't in this paper's question bank.")
+        question.text, question.options, question.answer = bank.text, bank.options, bank.answer
+        question.question_type = bank.question_type or question.question_type
+        question.dataset_question_id, question.source = bank.id, QuestionSource.BANK.value
+        question.chapter_id, question.topic_id = bank.chapter_id or question.chapter_id, bank.topic_id
+    else:
+        question.text = body.text
+        question.source = QuestionSource.EDITED.value
+        if body.replace:  # a different question: the old bank question's figure is no longer its figure
+            question.dataset_question_id = None
     await create_version(session, paper, created_by=user.id, summary=f"Edited question {question.order}",
                          origin="manual")
     await session.commit()
@@ -957,12 +996,8 @@ async def get_question_candidates(
     paper = await _get_paper_to_edit(session, paper_id, user)
     if paper.status != QuestionPaperStatus.REVIEW:
         raise ConflictError("Paper isn't in REVIEW.")
-    result = await session.execute(
-        select(QuestionPaperQuestion).where(
-            QuestionPaperQuestion.id == question_id, QuestionPaperQuestion.paper_id == paper_id
-        )
-    )
-    question = result.scalar_one_or_none()
+    on_paper = await load_questions(session, paper_id)
+    question = next((q for q in on_paper if str(q.id) == question_id), None)
     if question is None:
         raise NotFoundError(f'No question "{question_id}" on this paper.')
 
@@ -983,8 +1018,32 @@ async def get_question_candidates(
     items = [
         QuestionPaperQuestionCandidateOut(id=f"{question_id}-alt-{i + 1}", text=c["text"])
         for i, c in enumerate(candidates)
+        if not references_missing_figure(c["text"])
     ]
+    items += await _diagram_candidates(session, paper, user, question, [q.text for q in on_paper])
     return ListEnvelope(items=items, total=len(items))
+
+
+async def _diagram_candidates(session: AsyncSession, paper: QuestionPaper, user: User,
+                              question: QuestionPaperQuestion, taken: list[str]) -> list[QuestionPaperQuestionCandidateOut]:
+    """Up to 2 question-bank questions with a figure that fit this question's slot - a swap can bring a picture."""
+    from src.services.paper_parallel import _bank_pick, _scope_chapter_ids
+
+    dataset_ids = [d for d, _ in await _bank_shares(session, paper, user)]
+    chapter_ids = await _scope_chapter_ids(session, paper)
+    if not dataset_ids or not chapter_ids:
+        return []
+    banks = []
+    for _ in range(2):
+        bank = await _bank_pick(session, question, dataset_ids=dataset_ids, chapter_ids=chapter_ids, taken=taken,
+                                figures=True)
+        if bank is None:
+            break
+        banks.append(bank)
+        taken = [*taken, bank.text]
+    figures = await figure_svgs(session, [b.id for b in banks], captions=True)
+    return [QuestionPaperQuestionCandidateOut(id=f"{question.id}-bank-{b.id}", text=b.text, dataset_question_id=str(b.id),
+                                              options=b.options, **figures.get(b.id, {})) for b in banks]
 
 
 @router.put("/question-papers/{paper_id}/questions/order")
