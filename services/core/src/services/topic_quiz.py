@@ -356,7 +356,7 @@ async def _analysis(session: AsyncSession, quiz: DailyPracticeSession, topic: To
             DailyPracticeSession.student_id == quiz.student_id, same,
             DailyPracticeSession.attempt == 1))).scalar_one_or_none()
     missed = [{"bloom_level": item.bloom_level.value, "question": q.text,
-               "chosen": q.options[item.option_index] if item.option_index is not None else "",
+               "chosen": q.options[item.option_index] if item.option_index is not None and item.option_index >= 0 else "",
                "correct": q.options[q.correct_index]}
               for item, q, _ in items if not item.correct and q.options and q.correct_index is not None]
     missed += [{"bloom_level": item.bloom_level.value, "question": f"(answered aloud) {q.text}",

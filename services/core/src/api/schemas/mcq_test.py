@@ -62,7 +62,7 @@ class SpeedModeOut(CamelModel):
 
 class McqAnswerIn(CamelModel):
     question_id: str
-    option_index: int = Field(ge=0, le=3)
+    option_index: int = Field(ge=-1, le=3)  # -1: the time ran out, no option chosen
     elapsed_ms: int | None = Field(default=None, ge=0)
 
 
@@ -86,7 +86,7 @@ class LifelineOut(CamelModel):
 
 class McqAnswer(CamelModel):
     question_id: str
-    option_index: int = Field(ge=0, le=3)
+    option_index: int = Field(ge=-1, le=3)
 
 
 class McqAttemptIn(CamelModel):

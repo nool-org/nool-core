@@ -747,7 +747,7 @@ async def answer_mcq(session: AsyncSession, item: DailyPracticeItem, question: P
     """Marks the first answer; a repeat returns the stored result. Caller commits."""
     if item.kind != "mcq":
         raise ValidationError("This question takes a recorded answer.")
-    if not 0 <= option_index < len(question.options or []):
+    if not -1 <= option_index < len(question.options or []):  # -1: timed out
         raise ValidationError("No such option.")
     # lock the item so two taps can't both be the first answer
     await session.execute(select(DailyPracticeItem).where(DailyPracticeItem.id == item.id).with_for_update()

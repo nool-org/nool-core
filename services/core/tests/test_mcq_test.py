@@ -550,6 +550,13 @@ async def test_answer_keeps_only_the_first_answer_and_returns_the_marking(schema
                                             user=s["student"], session=db)
 
 
+async def test_a_timed_out_answer_is_wrong_and_earns_nothing(schema, monkeypatch):
+    db = schema
+    s, item, rows = await _ready(db, monkeypatch)
+    out = await _answer(db, s, item, rows[0], -1, 20000)
+    assert (out.correct, out.combo, out.xp_so_far) == (False, 0, 0)
+
+
 async def test_speed_mode_only_before_the_first_answer_and_its_bonus(schema, monkeypatch):
     db = schema
     s, item, rows = await _ready(db, monkeypatch)

@@ -67,7 +67,7 @@ class DailyPracticeTodayOut(CamelModel):
 
 
 class PracticeMcqAnswerIn(CamelModel):
-    option_index: int = Field(ge=0, le=3)
+    option_index: int = Field(ge=-1, le=3)  # -1: the time ran out, no option chosen
     elapsed_ms: int | None = Field(default=None, ge=0)
 
 
